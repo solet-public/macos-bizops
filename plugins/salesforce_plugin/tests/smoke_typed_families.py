@@ -575,7 +575,8 @@ class Registration(unittest.TestCase):
             with self.subTest(family=family):
                 self.assertEqual(typed_families.path_parameters(family), placeholders)
                 tail = local.get(family, [])
-                self.assertEqual(list(decorated[family].parameters), ["operation", "query", "body", "headers", *placeholders, *tail])
+                # Build 6: every org-reaching verb also takes the bound org.
+                self.assertEqual(list(decorated[family].parameters), ["operation", "query", "body", "headers", *placeholders, *tail, "org"])
 
 
 def _gate(workspace: str) -> Any:

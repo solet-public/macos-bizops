@@ -17,6 +17,11 @@ a driver/CLI executor object rather than a chatty REST client
 **Containment (this lane's brief, "keep the executor, contain the
 dispatch"):** the dispatch handlers never touch ``SalesforceCliExecutor`` —
 only this module's worker thread does, exactly as before this migration.
+Since build 6 the worker also resolves which bound org a job runs against
+(``org_service.OrgService.resolve``: the named org, the only one, or the
+default; the pre-build-6 address-book entry is migrated here on first use)
+and names that org in every result (``org``, ``org_id``). The verbs over the
+bound orgs themselves and the org lifecycle are ``ORG_HANDLERS``.
 Salesforce verbs already ran with an effective concurrency of one (the
 plugin's ``_cli_executor`` is a single instance, and every dispatch used to
 run inline on the poller); routing every call through ONE background worker
@@ -49,9 +54,12 @@ from typing import TYPE_CHECKING, Any
 from ananta.constants import CONTEXT_KEY_FLOW_ID, CONTEXT_KEY_SESSION_ID
 from ananta.file_locations.containment import job_location_session, location_session
 
-from . import bulk_actions, completion_templates, record_actions, soql_actions, typed_families
+from . import bulk_actions, completion_templates, org_lifecycle, record_actions, soql_actions, typed_families
 from .client import SalesforceCliExecutor
 from .constants import ERROR_API_ERROR, PLUGIN_NAME
+from .errors import TypedFamilyError
+from .org_service import OrgService, ResolvedOrg
+from .orgs import org_selector
 from .request_actions import authenticated_request
 
 if TYPE_CHECKING:
@@ -109,6 +117,45 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "metadata": (functools.partial(typed_families.run_family, "metadata"), lambda plugin: plugin._zip_import_path_gate),  # noqa: SLF001
     "content_files": (functools.partial(typed_families.run_family, "content_files"), lambda plugin: plugin._file_transfer_gates()),  # noqa: SLF001
 }
+
+
+# Build 6: verbs over the bound orgs themselves and the org lifecycle. Each
+# takes the plugin's OrgService, the job params and the read gate for any
+# local file a CLI flag names.
+ReadGate = Callable[[str], str]
+OrgHandler = Callable[[OrgService, dict[str, Any], ReadGate], dict[str, Any]]
+
+
+def _required_org(service: OrgService, params: dict[str, Any], verb: str) -> ResolvedOrg:
+    if org_selector(params) is None:
+        raise TypedFamilyError(f"{verb} needs org: the alias, username or org id of a bound org (see list_orgs)")
+    return service.resolve(params)
+
+
+def _logout(service: OrgService, params: dict[str, Any], _gate: ReadGate) -> dict[str, Any]:
+    resolved = _required_org(service, params, "logout")
+    return {**service.logout(resolved, params), **_org_names(resolved)}
+
+
+ORG_HANDLERS: dict[str, OrgHandler] = {
+    "list_orgs": lambda service, _params, _gate: service.list_orgs(),
+    "bind_org": lambda service, params, _gate: service.bind_org(params),
+    "login": lambda service, params, gate: service.login(params, gate),
+    "logout": _logout,
+    "set_default_org": lambda service, params, _gate: service.set_default_org(params),
+    "disconnect_org": lambda service, params, _gate: service.disconnect_org(params),
+    "org_lifecycle": org_lifecycle.run_lifecycle,
+}
+# Every job kind the worker drains; a name missing here strands its queued jobs.
+ACTION_NAMES: tuple[str, ...] = (*ACTION_HANDLERS, *ORG_HANDLERS)
+
+
+def _org_names(resolved: ResolvedOrg) -> dict[str, Any]:
+    """The org a result came from: every org-reaching result names it."""
+    named: dict[str, Any] = {"org": resolved.binding.alias, "org_id": resolved.binding.org_id}
+    if resolved.note:
+        named["org_note"] = resolved.note
+    return named
 
 
 def _validate_state_context(state: dict[str, Any]) -> tuple[str, str]:
@@ -200,7 +247,7 @@ def _worker_loop(plugin: SalesforcePlugin) -> None:
 def _drain_queued_jobs(plugin: SalesforcePlugin) -> None:
     async_job_manager = _acquire_async_job_manager(plugin)
     _drain_provision_jobs(plugin, async_job_manager)
-    for action_name in ACTION_HANDLERS:
+    for action_name in ACTION_NAMES:
         listing = async_job_manager.list_jobs(
             status="queued",
             provider_name=f"{PLUGIN_NAME}.{action_name}",
@@ -272,8 +319,16 @@ def _process_job_in_context(
 
 
 def _execute_vendor_action(plugin: SalesforcePlugin, action_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the org on this worker, run the verb against it, and name the org in the result."""
+    if action_name in ORG_HANDLERS:
+        handler = ORG_HANDLERS[action_name]
+        return plugin._run(lambda: handler(plugin._org_service(), params, plugin._flag_file_gate), action_name)  # noqa: SLF001
     action_fn, gate_factory = ACTION_HANDLERS[action_name]
-    if gate_factory is not None:
-        gate = gate_factory(plugin)
-        return plugin._run(lambda executor: action_fn(executor, params, gate), action_name)
-    return plugin._run(lambda executor: action_fn(executor, params), action_name)
+    gate = gate_factory(plugin) if gate_factory is not None else None
+
+    def produce() -> dict[str, Any]:
+        resolved = plugin._org_service().resolve(params)  # noqa: SLF001
+        data = action_fn(resolved.executor, params, gate) if gate is not None else action_fn(resolved.executor, params)
+        return {**data, **{key: value for key, value in _org_names(resolved).items() if key not in data}}
+
+    return plugin._run(produce, action_name)

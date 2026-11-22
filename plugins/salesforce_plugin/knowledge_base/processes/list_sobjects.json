@@ -11,7 +11,7 @@
   },
   "error_processor_customizations": {
     "action_context": "List the Salesforce org's sobjects.",
-    "error_interpretation": "sf.auth_failed: the sf CLI has no live session for the registered org. sf.api_error: an unexpected org error.",
+    "error_interpretation": "sf.auth_failed: the sf CLI has no live session for the bound org. sf.api_error: an unexpected org error.",
     "recovery_guidance": "sf.auth_failed: ask the operator to re-establish the org session with: sf org login web."
   }
 }

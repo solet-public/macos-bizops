@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 _PLUGIN_SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_PLUGIN_SRC) not in sys.path:
@@ -102,17 +103,13 @@ def _additive_cases() -> None:
         classify_snapshot_diff(base, add_nullable).is_additive,
         "added nullable column → additive",
     )
-    add_defaulted = _snap(
-        {**base["plugin"]["thing"], "flag": _col("BOOLEAN", not_null=True, default=False)}
-    )
+    add_defaulted = _snap({**base["plugin"]["thing"], "flag": _col("BOOLEAN", not_null=True, default=False)})
     _check(
         classify_snapshot_diff(base, add_defaulted).is_additive,
         "added NOT NULL column WITH default → additive",
     )
     relax = _snap({"id": _col("INTEGER", not_null=True, primary_key=True), "name": _col()})
-    tighten_base = _snap(
-        {"id": _col("INTEGER", not_null=True, primary_key=True), "name": _col(not_null=True)}
-    )
+    tighten_base = _snap({"id": _col("INTEGER", not_null=True, primary_key=True), "name": _col(not_null=True)})
     _check(
         classify_snapshot_diff(tighten_base, relax).is_additive,
         "relaxed NOT NULL → nullable → additive",
@@ -177,9 +174,7 @@ def _producer_case() -> None:
             "widget": TableSchema(
                 table_name="widget",
                 columns={
-                    "id": ColumnDefinition(
-                        type=ColumnType.INTEGER, primary_key=True, not_null=True
-                    ),
+                    "id": ColumnDefinition(type=ColumnType.INTEGER, primary_key=True, not_null=True),
                     "label": ColumnDefinition(type=ColumnType.TEXT),
                 },
             )
@@ -202,11 +197,107 @@ def _producer_case() -> None:
     )
 
 
+def _schema(namespace: str, tables: tuple[str, ...], retired: tuple[str, ...] = ()) -> SchemaDefinition:
+    return SchemaDefinition(
+        namespace=namespace,
+        tables={
+            name: TableSchema(
+                table_name=name,
+                columns={"id": ColumnDefinition(type=ColumnType.INTEGER, primary_key=True)},
+            )
+            for name in tables
+        },
+        retired_tables=retired,
+    )
+
+
+def _retire_snapshots() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """(old with keep+gone, new that retires gone, new that just omits gone)."""
+    return (
+        schemas_to_snapshot({"ns": _schema("ns", ("keep", "gone"))}),
+        schemas_to_snapshot({"ns": _schema("ns", ("keep",), ("gone",))}),
+        schemas_to_snapshot({"ns": _schema("ns", ("keep",))}),
+    )
+
+
+def _declared_retirement_cases() -> None:
+    """A table the NEW snapshot names as retired is a declared removal (advisory)."""
+    old, retiring, _plain = _retire_snapshots()
+    verdict = classify_snapshot_diff(old, retiring)
+    _check(verdict.is_additive and not verdict.breaking_changes, "removal named in new retired list → additive")
+    _check(
+        len(verdict.retired_removals) == 1 and verdict.retired_removals[0].namespace == "ns" and verdict.retired_removals[0].table == "gone",
+        "declared retirement is reported as exactly one advisory change",
+    )
+    _check(
+        "ns.gone" in verdict.summary() and "one deploy later" in verdict.summary(),
+        "summary carries the advisory with the data-integrity ordering sentence",
+    )
+
+
+def _unnamed_removal_cases() -> None:
+    """Negative controls: fail-closed is unchanged for every removal not named."""
+    old, retiring, plain = _retire_snapshots()
+    unnamed = classify_snapshot_diff(old, plain)
+    _check(
+        not unnamed.is_additive and not unnamed.retired_removals,
+        "same removal WITHOUT the retired name → still breaking",
+    )
+    other = schemas_to_snapshot({"ns": _schema("ns", ("keep",), ("other",))})
+    _check(
+        not classify_snapshot_diff(old, other).is_additive,
+        "retiring a different table does not admit the removed one",
+    )
+    elsewhere = schemas_to_snapshot({"ns": _schema("ns", ("keep",)), "ns2": _schema("ns2", ("x",), ("gone",))})
+    _check(
+        not classify_snapshot_diff(old, elsewhere).is_additive,
+        "the same name retired in ANOTHER namespace does not admit the removal",
+    )
+    mixed_old = schemas_to_snapshot({"ns": _schema("ns", ("keep", "gone", "lost"))})
+    mixed = classify_snapshot_diff(mixed_old, retiring)
+    _check(
+        not mixed.is_additive and [c.table for c in mixed.breaking_changes] == ["lost"] and [c.table for c in mixed.retired_removals] == ["gone"],
+        "a retired removal beside an unnamed one → breaking lists only the unnamed table",
+    )
+    dropped_ns = classify_snapshot_diff(old, {})
+    _check(not dropped_ns.is_additive, "a dropped namespace is still breaking")
+    gone_column = _schema("ns", ("keep", "gone"))
+    gone_column.tables["keep"].columns.clear()
+    _check(
+        not classify_snapshot_diff(old, schemas_to_snapshot({"ns": gone_column})).is_additive,
+        "a column dropped from a kept table is still breaking",
+    )
+
+
+def _old_format_cases() -> None:
+    """Snapshots without the retired key behave exactly as before, on either side."""
+    old, retiring, plain = _retire_snapshots()
+    _check(
+        classify_snapshot_diff(retiring, retiring).is_additive,
+        "a snapshot carrying the retired key diffed against itself → additive",
+    )
+    _check(
+        classify_snapshot_diff(retiring, plain).is_additive,
+        "retired key on the OLD side is not treated as a namespace or table",
+    )
+    _check(
+        set(plain) == {"ns"} and set(old) == {"ns"},
+        "a schema that retires nothing adds no key to the snapshot",
+    )
+    _check(
+        not classify_snapshot_diff(old, plain).is_additive and old == schemas_to_snapshot({"ns": _schema("ns", ("keep", "gone"))}),
+        "old-format snapshot pair behaves as before",
+    )
+
+
 def run_smoke() -> int:
     print("=== schema_preflight_smoke (§8.7: §3 DDL-free gate classifier) ===")
     _additive_cases()
     _non_additive_cases()
     _producer_case()
+    _declared_retirement_cases()
+    _unnamed_removal_cases()
+    _old_format_cases()
     print(f"\nschema_preflight_smoke: {_passed} passed, {len(_failed)} failed")
     for label in _failed:
         print(f"  FAILED: {label}")

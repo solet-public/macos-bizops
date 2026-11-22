@@ -9,7 +9,12 @@ increment contains:
 - `inbox_consumer.py` (CDX-06, 2026-08-24), a SYNCHRONOUS `Stop` hook that
   checks the session's peer inbox for anything already queued and, if so,
   forces the turn to continue with a fixed nudge; plus its own honesty
-  attestation, `report_inbox_consumption`.
+  attestation, `report_inbox_consumption`;
+- `recovery_codex.py` (git-safety Change 4), working-tree recovery: before a
+  shell command that discards working-tree state, and at the end of every turn,
+  it saves every file git can see into a local store outside your repository,
+  then lets the command run. It never refuses and never blocks. See *Working-tree
+  recovery* below.
 
 The context reporter is bound with `"async": true`, as defined by the current
 official Codex hook contract. Live stock-process execution remains a separate
@@ -70,7 +75,7 @@ gets no per-turn peer-delivery notice from this hook (it is armed only when
 expected, not an error): delivery remains durable but silent, the operator
 drains `peer_inbox` themselves on their own next user/model turn, and the
 `SessionStart` live-context observation only fires at
-startup/resume/`clear`, not per-turn.
+startup/resume/`clear`/`compact`, not per-turn.
 
 The sibling hydration package now renders the stock-Codex launcher-owned
 watcher, repo marketplace, and exact durable-inbox/paging instructions. Those
@@ -85,18 +90,117 @@ not rewrite Codex's private trust state behind that review boundary.
 
 | event | script | behavior |
 |---|---|---|
-| `SessionStart` (`startup`, `resume`, `clear`) | `step_zero_reminder.js` | fixed project-orientation reminder |
-| `SessionStart` (`startup`, `resume`, `clear`) | `session_start_context.py` | register-wide digest, measured inbox counts and current roles |
+| `SessionStart` (`startup`, `resume`, `clear`, `compact`) | `step_zero_reminder.js` | fixed project-orientation reminder |
+| `SessionStart` (`startup`, `resume`, `clear`, `compact`) | `session_start_context.py` | the solet's own principle statement, measured inbox counts and current roles |
 | `Stop` (background) | `context_status_reporter.py` | report the latest positive native context reading after the last compaction boundary |
 | `Stop` (synchronous) | `inbox_consumer.py` | observe the already-queued wake spool; block/continue on pending; report known pending/empty observations only |
+| `SessionStart` (`startup`, `resume`, `clear`), timeout 15 s | `recovery_codex.py` | say once if recovery is inactive or the store is over its cap; otherwise print nothing |
+| `PreToolUse` (`^Bash$`), timeout 15 s | `recovery_codex.py` | save the working tree before a discarding shell command; tell you only when it saved work this session did not make |
+| `PostToolUse` (`^(Bash\|apply_patch)$`), timeout 15 s | `recovery_codex.py` | journal this session's own edits (each file's absolute path and a SHA-256 digest, never its content, and the id of any stash the session created) so they are not reported as someone else's; prints nothing |
+| `Stop` (background, `"async": true`), timeout 120 s | `recovery_codex.py` | save the working tree at the end of every turn and prune on an hourly clock; prints nothing, ever |
+| `SessionEnd`, timeout 3 s | `recovery_codex.py` | a bonus save within Codex's short session-end budget; prints nothing |
 
 The knowledge-base reminder remains always armed. The live-context hook also
-runs for startup, resume and clear; absent services or identity produce explicit
+runs for startup, resume, clear and compact; absent services or identity produce explicit
 unavailable context. The knowledge-base reminder reads no prompts or peer
 messages. Live context fetches and JSON-parses complete peer_inbox responses,
 including message-body fields. For inbox data it relays only counts, bound-role
 labels, and observation/error text into context, never the message bodies.
 
+
+## Working-tree recovery (git-safety Change 4)
+
+`recovery_codex.py` is a thin adapter: it reads one hook payload, hands it to a
+shared engine, and prints only what Codex allows. The engine is the same code
+the Claude Code twin ships: twenty-three stdlib-only modules, copied
+byte-identical into `hooks/` from the repository's shared source and listed in
+the `MODULES` inventory of `working_tree_recovery.py`: `command_lex.py`,
+`command_resolve.py`, `command_types.py`, `command_walk.py`, `custody_store.py`,
+`discard_forms.py`, `recovery_capture.py`, `recovery_cli.py`,
+`recovery_content.py`, `recovery_deadline.py`, `recovery_events.py`,
+`recovery_git.py`, `recovery_journal.py`, `recovery_lifecycle.py`,
+`recovery_metadata.py`, `recovery_packets.py`, `recovery_rebuild.py`,
+`recovery_refs.py`, `recovery_restore.py`, `recovery_retention.py`,
+`recovery_rules.py`, `recovery_types.py` and `working_tree_recovery.py`. They are libraries, not
+handlers; `manifest_consistency_smoke.py` registers only the adapter.
+
+What it does:
+
+- Before a shell command that discards working-tree state (stash push, pop,
+  apply, drop or clear; checkout or restore of paths; reset `--hard`, `--merge`
+  or `--keep`; clean; switch `-f` or `--discard-changes`; rebase; branch `-D`;
+  worktree remove `--force`) it saves every file git can see, then lets the
+  command run. It never refuses.
+- When the discarded changes were not made by this session, it tells you and the
+  model what was saved and prints the exact command that puts it back. When they
+  were this session's own edits, it saves quietly.
+- At the end of every turn (the background `Stop` entry) it saves the working
+  tree again, and every other folder this session edited, so work survives a later discard by another session and a worktree
+  folder that is deleted afterwards.
+- Files git ignores are never saved. A path is kept out when the folder's current
+  ignore rules, or the ignore files a stash or deleted branch carries, match it.
+  Names of ignored paths can appear in a notice; their contents cannot.
+
+What it never does: refuse or block a command, print a `decision`,
+`permissionDecision`, `continue` or `stopReason`, read the transcript, make a
+network call, or, from a hook, write a commit, branch, stash, ref, index entry or
+object in your repository; only a restore you run yourself with `--refs`
+re-creates a stash or branch.
+
+Where saves live: a local store outside your repositories and synced folders,
+readable only by you. The default is `~/Library/Application Support/Solet/Recovery/v1`
+on macOS and `$XDG_DATA_HOME/Solet/Recovery/v1` elsewhere; `SOLET_RECOVERY_ROOT`
+overrides it (an empty value counts as unset), and a root inside a git repository, `~/Documents`, `~/Desktop`,
+`~/Downloads`, `~/.codex`, `~/.claude` or an iCloud folder is ignored in favour
+of the default. Content is stored once. A save is kept while its work is
+undelivered and for a grace period after (30 days by default); a pruning pass
+runs at most hourly at the end of a turn and can be run by hand. The default
+caps are 512 MiB, 50,000 files and 64 MiB per file per save and 5 GiB for the
+store, with a 10 GiB free-disk floor below which only index and tracked files are
+saved. The size, file-count, store, disk-floor, grace and trash limits and three of
+the time budgets (`hard_seconds`, `publication_seconds`, `untracked_seconds`) are
+fields of the store's `config.json`; the 60 second `Stop` budget, the 8 second
+deadline of the other events, the 2.5 second `SessionEnd` budget and the one second
+lock wait are fixed in the code.
+
+Getting work back: the notice prints the command. In general, run the engine
+with Python 3.11 or newer: `working_tree_recovery.py list`, `show <id>`,
+`restore <id> [--into DIR]` (add `--refs` to re-create a stash or deleted
+branch), and `forget`, `unforget`, `prune` and `purge` to manage the store.
+Restore never overwrites a newer file: it keeps your file and writes the saved
+copy under the store's `restored` folder. Removing the plugin leaves the store in
+place; delete that folder, or `forget` and `purge` saves, to remove saved work.
+
+Trust: these are new hook definitions, so Codex keeps them inactive until you
+trust them. After installing or updating to this version, open `/hooks`, review
+the five `recovery_codex.py` definitions (`SessionStart`, `PreToolUse`,
+`PostToolUse`, `Stop`, `SessionEnd`) and trust them. Until you do, recovery is
+off on Codex. Each definition can be revoked on its own in the same browser, and
+administrators can install managed hooks instead.
+
+Known differences from Claude Code: Codex's `SessionEnd` allows 3 seconds at
+most, so the session-end save is a bonus and the turn-end save is the one to rely
+on; commands run inside scripts, and input written to a running shell, are not
+classified, so the turn-end save is their backstop; Codex-created worktrees live
+under `$CODEX_HOME/worktrees` on a detached HEAD, which each save records; Codex
+has no native undo for shell commands, so recovery complements nothing there.
+
+Python: the adapter needs Python 3.11 or newer. On an older interpreter it exits 0
+before importing any engine module and says so once, at `SessionStart`. The `python3` in
+the command strings is rewritten to the clone's own interpreter by the Manager's
+hook-interpreter pin, like the other entries.
+
+What is not measured here: the payload fixtures in
+`recovery_codex_adapter_smoke.py` are synthetic and are validated against the
+hook schemas embedded in Codex 0.163.0. Four facts only a live Codex can show are
+assumptions, recorded by the separate live acceptance run: whether
+`tool_input.command` arrives as a string or an argument array (the adapter
+accepts both); the exact `tool_name` and `tool_input` of an `apply_patch`
+`PostToolUse` event (the adapter reads patch text or an object holding it); that
+a `PreToolUse` hook which times out lets the tool proceed; and the one-second
+default and three-second maximum of `SessionEnd`. If Codex routes the shell under
+a name other than `Bash`, the `PreToolUse` and `PostToolUse` matchers will not
+select it and the turn-end save is the only protection until they are corrected.
 
 ## Retired behaviours (inventory, not a replacement claim)
 
@@ -169,7 +273,10 @@ when a live Codex lane exists. This replaces the compat-symlink repair for
 `iss_9959c013` and `iss_eb36b76d`; its report records every restored version.
 
 The helper preserves the base version and replaces, rather than stacks, one
-`+codex.<cachebuster>` suffix. Re-open `/hooks`: only definitions whose
+`+codex.<cachebuster>` suffix. Newer Codex builds no longer install the helper
+under `.system`; when it is absent, set the suffix by hand in the same shape, the
+current UTC time as `YYYYMMDDHHMMSS`, replacing the old suffix rather than adding
+a second one. Re-open `/hooks`: only definitions whose
 normalized content changed should require fresh trust. A new Codex thread is the
 pickup boundary after reinstall.
 
@@ -200,15 +307,20 @@ Read [SECURITY.md](SECURITY.md) before trusting the hooks.
 ## Live session context — reviewer due diligence (2026-10-08)
 
 `session_start_context.py` replaces the static message and role reminders on
-SessionStart `startup`, `resume`, and `clear`. It performs two read operations:
+SessionStart `startup`, `resume`, `clear`, and `compact`. It performs two read operations:
 
-- `[PROJECT_SOLET_CLI, "resume-digest", "--limit", "1"]` reads the bounded,
-  **register-wide** digest. The default executable is
-  `$HOME/Workspace/project-solet/.venv/bin/psolet`; installations elsewhere
-  set `PROJECT_SOLET_CLI` to one executable path. The child resolves its normal
-  `PROJECT_SOLET_DATABASE_DSN` or Keychain credentials; the hook neither reads
-  credentials itself nor prints child stderr. Register previews are data,
-  not instructions or a substitute for full authoritative reads.
+- The article principles_statement.md (knowledge base ananta_platform, folder 24_operator_communication) is read
+  from the solet's own knowledge-base file,
+  `ananta/knowledge_bases/ananta_platform/24_operator_communication/principles_statement.md`, under the first of
+  these roots that holds it as a regular file: `CLAUDE_PROJECT_DIR` when set, the working directory, the tree the
+  bridge runs from (`<root>` of `<root>/.venv/bin/solet-bridge`, `<release>` of `<release>/venv/bin/solet-bridge`; a
+  bare `SOLET_BRIDGE` name is looked up in `PATH`) and that tree's `code` directory. That is one read of one file,
+  which no host load slows. Only when no root holds the file does the hook run
+  `[SOLET_BRIDGE, "call", "service_interface::knowledge_service::read_file", JSON]` for the same article. Either
+  way the hook emits the text under the `## Approved statement` heading verbatim after one label line naming the
+  article, capped at 8000 UTF-8 bytes; a longer article is clipped at a line
+  boundary with a one-line advisory. A file without that heading gives one typed `StatementMissing` line and no
+  bridge read, and a failed bridge read gives one typed `unavailable (ErrorClass)` line and no text.
 - `[SOLET_BRIDGE, "call", "plugin::agent_messaging_plugin::peer_inbox", JSON]`
   pages the instance and role sections with `observer: true`. `SOLET_BRIDGE`
   defaults to `solet-bridge` on PATH. The original `SOLET_NAME`,
@@ -228,14 +340,18 @@ Paging produces an observation over an interval, not an atomic cross-page
 snapshot; a binding change, repeated cursor, partial role failure or identity
 mismatch makes the count unavailable.
 
-The digest child has a three-second timeout, and all inbox pages share a
-separate three-second deadline. The manifest timeout is eight seconds. A failed
+The principles are read before the inbox. The inbox read is capped at 3.5
+seconds, and the bridge read of the principles, made only when no statement
+file is found, keeps its own 3.5-second cap, so the worst case is 3.5 seconds
+with the file and seven seconds without, under the thirty-second manifest
+timeout. A failed
 read adds one explicit `unavailable (ErrorClass)` line and exits zero; a missing
 identity is `MissingIdentity`, never zero messages. No cache or static reminder
-fallback exists. JSON serialization escapes all observed strings. The digest
-context is capped at 5800 UTF-8 bytes and inbox context at 1000, leaving room
-inside 8192 for the unchanged knowledge-base reminder. Over-budget output is
-reported as `ByteBudgetExceeded`, never silently clipped into apparent success.
+fallback exists. JSON serialization escapes all observed strings. Inbox context
+is capped at 1000 UTF-8 bytes and the principle text at 8000, leaving room
+for the unchanged knowledge-base reminder. Over-budget inbox output is
+reported as `ByteBudgetExceeded`, never silently clipped into apparent success;
+the principle text is clipped only with its one-line advisory.
 
 This stdlib Python 3.13 hook uses `subprocess.run` with argument arrays and no
 shell. It creates no files, performs no register writes, claims no role and

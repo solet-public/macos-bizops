@@ -75,17 +75,12 @@ class NewTemplateEngine:
         self.template_patterns = self.metadata_registry.get_template_patterns()
 
         if not self.template_patterns:
-            raise FrameworkError(
-                "Template patterns not found in metadata registry. "
-                "Ensure template_patterns.json is present in platform metadata schemas."
-            )
+            raise FrameworkError("Template patterns not found in metadata registry. Ensure template_patterns.json is present in platform metadata schemas.")
 
         # Type narrow self.template_patterns for logging
         # Note: At this point, template_patterns is guaranteed to be a non-empty dict
         # because we raised if it was falsy above
-        assert isinstance(self.template_patterns, dict), (
-            "Template patterns must be a dict after validation"
-        )
+        assert isinstance(self.template_patterns, dict), "Template patterns must be a dict after validation"
         template_types_raw = self.template_patterns.get("template_types", {})
         if isinstance(template_types_raw, dict):
             pass
@@ -95,13 +90,9 @@ class NewTemplateEngine:
         # Initialize TemplateFunctionRegistry if dependencies are available
         if self.state_service is not None:
             # Type narrow services for protocol compatibility
-            discovery_arg: object | None = (
-                self.discovery_service if self.discovery_service else None
-            )
+            discovery_arg: object | None = self.discovery_service if self.discovery_service else None
             memory_arg: object | None = self.memory_service if self.memory_service else None
-            knowledge_arg: object | None = (
-                self.knowledge_service if self.knowledge_service else None
-            )
+            knowledge_arg: object | None = self.knowledge_service if self.knowledge_service else None
             self.function_registry = TemplateFunctionRegistry(
                 state_service=self.state_service,
                 action_manager=self.action_manager,
@@ -116,9 +107,7 @@ class NewTemplateEngine:
         self._initialized = True
         return True
 
-    def resolve_templates(
-        self, action_def: dict[str, object], context: dict[str, object]
-    ) -> dict[str, object]:
+    def resolve_templates(self, action_def: dict[str, object], context: dict[str, object]) -> dict[str, object]:
         """
         Single consolidated template resolution method using metadata.
 
@@ -142,9 +131,7 @@ class NewTemplateEngine:
 
         try:
             resolution_order = self._get_resolution_order()
-            resolved_data = self._apply_resolution_order(
-                action_def, resolution_order, context, action_name
-            )
+            resolved_data = self._apply_resolution_order(action_def, resolution_order, context, action_name)
             self._validate_resolution_complete(resolved_data, action_name)
             return resolved_data
 
@@ -184,17 +171,12 @@ class NewTemplateEngine:
             resolved_result = self._resolve_template_type(resolved_data, template_type, context)
 
             if not isinstance(resolved_result, dict):
-                raise FrameworkError(
-                    f"Template resolution for type '{template_type}' returned "
-                    f"{type(resolved_result).__name__} instead of dict for action '{action_name}'"
-                )
+                raise FrameworkError(f"Template resolution for type '{template_type}' returned {type(resolved_result).__name__} instead of dict for action '{action_name}'")
             resolved_data = resolved_result
 
         return resolved_data
 
-    def _resolve_template_type(
-        self, data: object, template_type: str, context: dict[str, object]
-    ) -> object:
+    def _resolve_template_type(self, data: object, template_type: str, context: dict[str, object]) -> object:
         assert self.template_patterns is not None, "Template engine not initialized"
         assert isinstance(self.template_patterns, dict), "Template patterns must be a dict"
 
@@ -225,25 +207,15 @@ class NewTemplateEngine:
     ) -> object:
         """Recursively resolve templates in data structure."""
         if isinstance(data, dict):
-            return {
-                key: self._resolve_in_data_structure(
-                    value, pattern, resolver_name, context, _depth + 1
-                )
-                for key, value in data.items()
-            }
+            return {key: self._resolve_in_data_structure(value, pattern, resolver_name, context, _depth + 1) for key, value in data.items()}
         elif isinstance(data, list):
-            return [
-                self._resolve_in_data_structure(item, pattern, resolver_name, context, _depth + 1)
-                for item in data
-            ]
+            return [self._resolve_in_data_structure(item, pattern, resolver_name, context, _depth + 1) for item in data]
         elif isinstance(data, str):
             return self._resolve_in_string(data, pattern, resolver_name, context)
         else:
             return data
 
-    def _resolve_in_string(
-        self, text: str, pattern: str, resolver_name: str, context: dict[str, object]
-    ) -> object:
+    def _resolve_in_string(self, text: str, pattern: str, resolver_name: str, context: dict[str, object]) -> object:
         """Resolve templates within a string using metadata-defined pattern and resolver."""
         matches = re.findall(pattern, text)
         if not matches:
@@ -274,9 +246,7 @@ class NewTemplateEngine:
             resolved_text = re.sub(pattern, replace_match, text)
             return resolved_text
 
-    def _get_resolver(
-        self, resolver_name: str, _context: dict[str, object]
-    ) -> Callable[[str, dict[str, object]], object]:  # Reserved for interface compatibility
+    def _get_resolver(self, resolver_name: str, _context: dict[str, object]) -> Callable[[str, dict[str, object]], object]:  # Reserved for interface compatibility
         assert self.template_patterns is not None, "Template engine not initialized"
         assert isinstance(self.template_patterns, dict), "Template patterns must be a dict"
 
@@ -303,9 +273,7 @@ class NewTemplateEngine:
         # Return resolver with configuration
         return lambda match, ctx: resolver_method(match, ctx, resolver_config)
 
-    def _resolve_file_inclusion(
-        self, match: str, context: dict[str, object], config: dict[str, object]
-    ) -> object:
+    def _resolve_file_inclusion(self, match: str, context: dict[str, object], config: dict[str, object]) -> object:
         """Resolve file inclusion templates using metadata configuration."""
         filename = match
 
@@ -336,9 +304,7 @@ class NewTemplateEngine:
         except Exception as e:
             raise TemplateFileNotFoundError(filename, [str(file_path)], original_error=e) from e
 
-    def _resolve_function_execution(
-        self, match: str, context: dict[str, object], _config: dict[str, object]
-    ) -> object:
+    def _resolve_function_execution(self, match: str, context: dict[str, object], _config: dict[str, object]) -> object:
         """Resolve function execution templates using TemplateFunctionRegistry.
 
         Returns object (not str) to preserve dict/list types for proper JSON embedding.
@@ -347,10 +313,7 @@ class NewTemplateEngine:
         func_call = match
 
         if not self.function_registry:
-            raise TemplateResolutionError(
-                f"Function execution not available: {func_call}. "
-                "TemplateFunctionRegistry requires state_service dependency."
-            )
+            raise TemplateResolutionError(f"Function execution not available: {func_call}. TemplateFunctionRegistry requires state_service dependency.")
 
         try:
             typed_context = self._build_typed_context(context)
@@ -414,9 +377,7 @@ class NewTemplateEngine:
         runtime_args = runtime_args_raw if isinstance(runtime_args_raw, dict) else {}
 
         # Extract and normalize session_id (optional)
-        session_id_raw = runtime_args.get(CONTEXT_KEY_SESSION_ID) or context.get(
-            CONTEXT_KEY_SESSION_ID
-        )
+        session_id_raw = runtime_args.get(CONTEXT_KEY_SESSION_ID) or context.get(CONTEXT_KEY_SESSION_ID)
         session_id = normalize_session_id(session_id_raw)
 
         # Extract and normalize flow_id (required - will fail in TemplateFunctionContext if missing)
@@ -462,9 +423,7 @@ class NewTemplateEngine:
                 return result
         return result
 
-    def _resolve_variable_substitution(
-        self, match: str, context: dict[str, object], config: dict[str, object]
-    ) -> str | None:
+    def _resolve_variable_substitution(self, match: str, context: dict[str, object], config: dict[str, object]) -> str | None:
         """Resolve variable substitution using metadata-configured precedence."""
         var_name = match
 
@@ -512,9 +471,7 @@ class NewTemplateEngine:
             environment=environment,
         )
 
-    def _query_key_value_store(
-        self, var_name: str, _context: dict[str, object]
-    ) -> str | None:  # Reserved for interface compatibility
+    def _query_key_value_store(self, var_name: str, _context: dict[str, object]) -> str | None:  # Reserved for interface compatibility
         """Query key-value store for template variables."""
 
         if not self.state_service:
@@ -527,9 +484,7 @@ class NewTemplateEngine:
             if not hasattr(self.state_service, "get_key_value"):
                 return None
 
-            result = self.state_service.get_key_value(
-                namespace="template.variables", key=var_name, scope="GLOBAL"
-            )
+            result = self.state_service.get_key_value(namespace="template.variables", key=var_name, scope="GLOBAL")
 
             # Extract value from ActionResult format
             if result:
@@ -537,19 +492,20 @@ class NewTemplateEngine:
                     data_raw = result.get("data")
                     if isinstance(data_raw, dict):
                         kv_value_raw = data_raw.get("value")
-                        # Type narrow: explicitly check and assign to a typed variable
-                        if isinstance(kv_value_raw, str):
-                            kv_value: str = kv_value_raw
-                            return kv_value
+                        # Render a stored value the way template functions do:
+                        # text as is, object/list as JSON, anything else via str().
+                        if kv_value_raw is None:
+                            return None
+                        if isinstance(kv_value_raw, dict | list):
+                            return json.dumps(kv_value_raw)
+                        return str(kv_value_raw)
 
         except Exception:
             pass
 
         return None
 
-    def _resolve_hierarchical_context(
-        self, match: str, _context: dict[str, object], _config: dict[str, object]
-    ) -> str:  # Reserved for interface compatibility
+    def _resolve_hierarchical_context(self, match: str, _context: dict[str, object], _config: dict[str, object]) -> str:  # Reserved for interface compatibility
         """Resolve hierarchical context templates using metadata configuration."""
         context_pattern = match
 
@@ -557,9 +513,7 @@ class NewTemplateEngine:
         # For now, return a placeholder to demonstrate metadata-driven approach
         return f"[CONTEXT_RESULT:{context_pattern}]"
 
-    def _resolve_post_execution(
-        self, match: str, _context: dict[str, object], _config: dict[str, object]
-    ) -> str:  # Reserved for interface compatibility
+    def _resolve_post_execution(self, match: str, _context: dict[str, object], _config: dict[str, object]) -> str:  # Reserved for interface compatibility
         """Resolve post-execution templates using metadata configuration."""
         result_pattern = match
 
@@ -567,9 +521,7 @@ class NewTemplateEngine:
         # For now, return a placeholder to demonstrate metadata-driven approach
         return f"[POST_EXEC_RESULT:{result_pattern}]"
 
-    def resolve_post_execution_templates(
-        self, action_def: dict[str, object], execution_result: object
-    ) -> dict[str, object]:
+    def resolve_post_execution_templates(self, action_def: dict[str, object], execution_result: object) -> dict[str, object]:
         """Resolve <<VARIABLE>> post-execution templates with execution results.
 
         This method maintains API compatibility with legacy TemplateEngine for ActionManager.
@@ -579,9 +531,7 @@ class NewTemplateEngine:
 
         def substitute_post_execution_variables(obj: object) -> object:
             if isinstance(obj, dict):
-                return {
-                    key: substitute_post_execution_variables(value) for key, value in obj.items()
-                }
+                return {key: substitute_post_execution_variables(value) for key, value in obj.items()}
             elif isinstance(obj, list):
                 return [substitute_post_execution_variables(item) for item in obj]
             elif isinstance(obj, str):
@@ -592,11 +542,7 @@ class NewTemplateEngine:
                 if "<<RESULT>>" in obj:
                     import json
 
-                    result_str = (
-                        json.dumps(execution_result)
-                        if not isinstance(execution_result, str)
-                        else execution_result
-                    )
+                    result_str = json.dumps(execution_result) if not isinstance(execution_result, str) else execution_result
                     substituted = obj.replace("<<RESULT>>", result_str)
                     return substituted
                 # Future: Add other <<VARIABLE>> patterns here as needed
@@ -608,9 +554,7 @@ class NewTemplateEngine:
 
         # Type narrow the result
         if not isinstance(resolved_action_raw, dict):
-            raise FrameworkError(
-                f"Expected resolved_action to be dict, got {type(resolved_action_raw)}"
-            )
+            raise FrameworkError(f"Expected resolved_action to be dict, got {type(resolved_action_raw)}")
         return resolved_action_raw
 
     def _validate_resolution_complete(self, resolved_data: object, action_name: str) -> None:

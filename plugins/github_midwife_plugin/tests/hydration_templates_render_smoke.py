@@ -42,6 +42,9 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(_ROOT / "plugins/github_midwife_plugin/src"))
+
+from github_midwife_plugin.coordination_hook_installation import HOOK_FILENAMES  # noqa: E402
 
 _TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "knowledge_base" / "hydration_templates"
 _TEMPLATE_VARS = _TEMPLATES_DIR / "TEMPLATE_VARS.md"
@@ -387,17 +390,13 @@ def _missing_and_forbidden(
 # stopped occurring and this check went red for the first time -- correctly,
 # since it was never actually verifying these two hooks' real contract.
 #
-# heartbeat_report_alive.py (R4 vendoring, 2026-08-10) is armed on
-# AGENT_INSTANCE_ID, and its source never references AGENT_SESSION_LABEL at
-# all -- a clean fit for this bucket, same shape as the three above.
-# rotation_due_watch.py is NOT added here despite ALSO arming on
-# AGENT_INSTANCE_ID: its source legitimately contains the string
-# "AGENT_SESSION_LABEL" (it reads the label to enrich its notification TEXT,
-# never to arm), so it happens to satisfy the opposite branch's plain
-# substring check today -- correctly, by coincidence of what that branch
-# actually tests (string presence), not because it is truly label-gated.
-# Disclosed here so a future reader does not "fix" it into this set and
-# break that branch's real, if narrower, guarantee.
+# rotation_due_watch.py is in this set. It arms on AGENT_INSTANCE_ID (and the
+# coordination ownership receipt) and never reads the label. It used to be left
+# out because its source contained the string "AGENT_SESSION_LABEL" to enrich a
+# steward notice, which satisfied the opposite branch's plain substring check by
+# coincidence rather than because the hook was label-gated. That notice is gone:
+# the hook only reports the session's own context gauge, so the string is gone
+# too, and the hook is label-independent in fact.
 #
 # capture.py and session_context.py (R4 vendoring Package B, 2026-08-10)
 # arm on neither AGENT_SESSION_LABEL nor any other env var at all -- their
@@ -409,22 +408,11 @@ def _missing_and_forbidden(
 # wired there -- see manifest_consistency_smoke.py's
 # AGENT_INVOKED_CLI_UTILITIES design note), so they need no entry here.
 #
-# rotation_due_notice.py (L4b, 2026-08-17) is the same filesystem-presence
-# shape as capture.py/session_context.py, one step further out: its
-# precondition is neither an env var nor a directory but the PRESENCE OF A
-# MARKER FILE for this session generation, and its source references
-# AGENT_SESSION_LABEL nowhere. It cannot be label-gated without inventing a
-# dependency it does not have -- the sibling that DOES read the label
-# (rotation_due_watch.py) is the one that composes the notification text; this
-# one only carries that already-written text to the session. Belongs here for
-# the reason the bucket exists (it no-ops cleanly in an unlabeled user-scope
-# install), not as an exemption from the opposite branch.
-#
 # capture_session_mapping.py and headless_tool_allowlist_gate.py (0.8.0,
 # seed feedback #40/§51.1, 2026-08-24 -- newly REGISTERED in hooks.json this
 # release, previously never in this smoke's derived roster at all) are the
-# same env-presence shape as heartbeat_report_alive.py, on their OWN
-# spawn-only env vars rather than AGENT_INSTANCE_ID alone:
+# same env-presence shape, on their OWN spawn-only env vars rather than
+# AGENT_INSTANCE_ID alone:
 # capture_session_mapping.py no-ops unless BOTH
 # ANANTA_SESSION_MAPPING_SPOOL_DIR and AGENT_INSTANCE_ID are set;
 # headless_tool_allowlist_gate.py no-ops (allows) unless
@@ -436,16 +424,17 @@ _LABEL_INDEPENDENT_HOOKS = frozenset(
     {
         "session_start_context.py",
         "wake_waiter.py",
-        "heartbeat_report_alive.py",
+        "rotation_due_watch.py",
         "capture.py",
         "session_context.py",
-        "rotation_due_notice.py",
         "capture_session_mapping.py",
         "headless_tool_allowlist_gate.py",
         "session_cron_sentinel.py",
         "optional_hook_runner.py",
+        "recovery_claude.py",
     },
 )
+_RECEIPT_TRANSITION_HOOKS = frozenset({"heartbeat_report_alive.py"})
 _PLUGIN_HOOKS_DIR = _TEMPLATES_DIR.parents[1] / "claude_plugin" / "coordination-hooks" / "hooks"
 
 
@@ -488,6 +477,13 @@ def _check_settings_label_guards(settings: str) -> None:
                 f"plugin hook {name}: label-INDEPENDENT, armed by env-presence",
                 path.is_file() and "AGENT_SESSION_LABEL" not in body,
                 "this entrypoint is documented as NOT reading the label — if it gains a label guard, the arming boundary changed and TEMPLATE_VARS must too",
+            )
+            continue
+        if path.is_file() and name in _RECEIPT_TRANSITION_HOOKS and name not in HOOK_FILENAMES and "AGENT_SESSION_LABEL" not in body:
+            _check(
+                f"plugin hook {name}: outside the receipt-owned capability roster",
+                True,
+                "this registered transition hook is intentionally not required by the ownership receipt",
             )
             continue
         _check(
@@ -741,6 +737,25 @@ def _check_settings_hook_kb_guidance(settings: str) -> None:
     )
 
 
+def _check_claude_md_states_per_project_memory() -> None:
+    rendered = {name: _render((_TEMPLATES_DIR / f"{name}.template").read_text(encoding="utf-8")) for name in ("AGENTS.md", "CLAUDE.md")}
+    for snippet in (
+        "keeps its own memory for each project",
+        "~/.claude/projects/<encoded-cwd>/memory/",
+        "never sees it",
+    ):
+        _check(
+            "CLAUDE.md states the per-project Claude Code memory",
+            snippet in rendered["CLAUDE.md"],
+            f"missing {snippet!r} in rendered CLAUDE.md",
+        )
+    _check(
+        "AGENTS.md does not claim the Claude Code folder",
+        "~/.claude/projects/" not in rendered["AGENTS.md"],
+        "AGENTS.md must not mention the per-project Claude Code memory folder",
+    )
+
+
 def main() -> int:
     try:
         for launcher in ("claude_launcher.template", "codex_launcher.template"):
@@ -752,6 +767,7 @@ def main() -> int:
         _check_refresh_classes_match_disk_and_bundle()
         _check_all_templates()
         _check_no_mcp_first_generated_guidance()
+        _check_claude_md_states_per_project_memory()
     except SmokeFailureError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)

@@ -367,8 +367,9 @@ POST /api/v1/bridge/{bridge_id}/peer/send
   # forwarder's next drain, and whether it becomes a turn is client-side and is
   # NOT confirmed by this field (REL-06). There is no per-message
   # consumption-insurance apparatus anymore (the REL-05 direct-wake outbox
-  # retired with A4) — staleness is caught at the session level instead,
-  # via the recipient's own report_by / sweep_overdue_sessions contract.
+  # retired with A4), and no sweep replaced it: nothing on a clock watches a
+  # recipient. Read fleet_status or
+  # session_context_status on demand instead.
   # queued_watcher = the recipient is a no-MCP `<name> watch` binding: the same
   # queued event streams into the watch output (an idle session with the
   # `<name> wake` Stop hook installed starts a turn on it; a busy or hook-less
@@ -376,11 +377,11 @@ POST /api/v1/bridge/{bridge_id}/peer/send
   # it consumed.
 
 POST /api/v1/bridge/{bridge_id}/peer/send_by_name
-  body: { "name": "Git-Controller",
-          "content": "please commit ..." }
+  body: { "name": "Reviewer",
+          "content": "please review ..." }
   resp: { "delivery": "queued_notification" | "queued_wake" | "queued_watcher"
                     | "queued_for_replay",
-          "thread_id": "role:Git-Controller",
+          "thread_id": "role:Reviewer",
           "message_id": "...",
           "resolved_agent_id": "claude_code",
           "resolved_agent_instance_id": "agi-..." }
@@ -393,11 +394,11 @@ POST /api/v1/bridge/{bridge_id}/peer/send_by_name
   # replace the receiving binding. Resolution runs again on every send.
   # Unregistered OAuth bridges, missing/unknown attribution and ambiguous
   # session bindings are refused with a remedy; no sender identity is guessed.
-  # CLI: solet-bridge send-by-name Project-Solet-Main --content-file report.txt
+  # CLI: solet-bridge send-by-name Reviewer --content-file report.txt
   # Run inside the controller launcher, preserving AGENT_SESSION_ID. No
   # receiving bridge id is needed. The CLI prints the complete direct receipt
   # and exits nonzero on refusal; it never silently uses /process/call.
-  # The Git-Controller landing_report.py wrapper explicitly tries the queued
+  # In the platform's own development checkout, the Git-Controller landing_report.py wrapper explicitly tries the queued
   # peer_send_by_name process after a direct failure, and discloses that failure
   # in both the report and output. A timeout may follow persistence: reconcile
   # duplicate reports by their landing identity before manually resending.
@@ -445,7 +446,7 @@ and non-peer Codex events still use `notifications/claude/channel`.
 `peer_holds_role` and `peer_inbox` are platform processes, so a caller with no
 registered bridge reaches them through `process/call`, which runs on the
 serial action queue. A deploy (`apply_manifest` holds that queue for the whole
-action) or a slow `peer_send_by_name` therefore froze the Git-Controller
+action) or a slow `peer_send_by_name` therefore froze the platform's own development checkout's Git-Controller
 landing guard even though both reads are cheap state reads (iss_d97f6633). The bridge's HTTP surface stays responsive while the
 queue is held, so the same two reads are served directly:
 

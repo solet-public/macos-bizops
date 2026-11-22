@@ -1,0 +1,3 @@
+# The key-value test fakes and the bootstrap store pass the same case table as the real
+# store (r74 K2 a4, chg_90ddc12e), so a fake that stops behaving like the store fails here.
+ananta/tests/services/state_service/key_value_fake_contract_smoke.py

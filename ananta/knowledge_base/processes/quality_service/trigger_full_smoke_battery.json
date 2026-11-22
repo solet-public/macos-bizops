@@ -1,16 +1,16 @@
 {
   "process_key": "service_interface::quality_service::trigger_full_smoke_battery",
   "display_name": "Trigger Full Smoke Battery",
-  "description": "Registered dispatch returns data.job_id and data.status=queued before operation preflight. Read service_interface::job_service::get_job by that exact id until terminal: job.result is the complete original operation response and job.error retains a failure. Direct internal Python calls keep their complete synchronous results. Admission persists a bounded descriptor; loss of its owner-memory body requires reconciliation without automatic replay. Queue a full battery or retry pending work off the action queue. The trigger is a terminal EDGE_SINK that submits durable work and returns immediately.",
+  "description": "Registered dispatch returns data.job_id and data.status=queued before operation preflight. Read service_interface::job_service::get_job by that exact id until terminal: job.result is the complete original operation response and job.error retains a failure. Direct internal Python calls keep their complete synchronous results. Admission persists a bounded descriptor; loss of its owner-memory body requires reconciliation without automatic replay. Request a full battery run of the newest master commit; it runs once, after any run in progress. The trigger is a terminal EDGE_SINK that submits durable work and returns immediately.",
   "embedding_description": "Trigger Full Smoke Battery through an owned quality-service worker. Registered dispatch returns a canonical job id before registry, Git, hash, proof or campaign preflight. Retrieve its exact id for the original result or error; internal calls stay synchronous and uncertain effects are never replayed.",
   "result_processor_customizations": {
-    "action_label": "Queue a full battery or retry pending work off the action queue.",
+    "action_label": "Request a full battery run of the newest master commit; it runs once, after any run in progress.",
     "result_type": "trigger_full_smoke_battery_result",
-    "result_description": "Submission: data.job_id and data.status. Terminal job.result: Queue a full battery or retry pending work off the action queue.",
+    "result_description": "Submission: data.job_id and data.status. Terminal job.result: Request a full battery run of the newest master commit; it runs once, after any run in progress.",
     "output_action_guidance": "Keep the exact job id. Retrieve job_service.get_job until terminal before consuming operation fields; do not repeat effects after owner loss or an uncertain terminal write. Read the returned evidence and explicit uncertainty before choosing the next action."
   },
   "error_processor_customizations": {
-    "action_context": "Queue a full battery or retry pending work off the action queue.",
+    "action_context": "Request a full battery run of the newest master commit; it runs once, after any run in progress.",
     "error_interpretation": "Wrong immutable identity, unsafe paths, missing principal or stale expected_version are integrity failures. Unknown ancillary inputs produce advisories and disable unsafe reuse.",
     "recovery_guidance": "Use the current readback/version and the shared frozen-request producer. Retain original errors and history."
   }

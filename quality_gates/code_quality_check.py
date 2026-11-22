@@ -110,6 +110,8 @@ _SMOKE_CONTRACT_LINT_CHECK = _QUALITY_GATES_DIR / "smoke_contract_lint_gate.py"
 _SMOKE_CONTRACT_LINT_ALLOWLIST = _QUALITY_GATES_DIR / "smoke_contract_lint_gate_allowlist.txt"
 _TEMP_DIRECTORY_CHECK = _QUALITY_GATES_DIR / "temp_directory_census.py"
 _TEMP_DIRECTORY_ALLOWLIST = _QUALITY_GATES_DIR / "temp_directory_dispositions.json"
+_HOMUNCULUS_TERM_CHECK = _QUALITY_GATES_DIR / "homunculus_term_census.py"
+_HOMUNCULUS_TERM_ALLOWLIST = _QUALITY_GATES_DIR / "homunculus_term_dispositions.json"
 
 # Exit codes returned by the three wrapper scripts (see each script's
 # docstring): 0 = clean (or every finding allowlisted), 2 = one or more
@@ -705,6 +707,7 @@ _SMOKE_CONTRACT_LINT_GATE = _GateSpec(
 
 
 _TEMP_DIRECTORY_GATE = _GateSpec(name="temp_directory_census", description="temporary-directory lifecycle census", script=_TEMP_DIRECTORY_CHECK, allowlist=_TEMP_DIRECTORY_ALLOWLIST)
+_HOMUNCULUS_TERM_GATE = _GateSpec(name="homunculus_term_census", description="homunculus term census", script=_HOMUNCULUS_TERM_CHECK, allowlist=_HOMUNCULUS_TERM_ALLOWLIST)
 
 
 def _scope_roots(project_root: Path) -> list[Path]:
@@ -1454,6 +1457,7 @@ _BLOCKING_GATE_CHECKS: tuple[tuple[str, Callable[..., bool]], ...] = (
     ("schema_init", partial(_check_reasoned_source_gate, gate=_SCHEMA_INIT_GATE, timeout_seconds=300)),
     ("smoke_contract_lint", partial(_check_reasoned_source_gate, gate=_SMOKE_CONTRACT_LINT_GATE, timeout_seconds=120)),
     ("temp_directory_census", partial(_check_reasoned_source_gate, gate=_TEMP_DIRECTORY_GATE, timeout_seconds=None)),
+    ("homunculus_term_census", partial(_check_reasoned_source_gate, gate=_HOMUNCULUS_TERM_GATE, timeout_seconds=300)),
 )
 
 

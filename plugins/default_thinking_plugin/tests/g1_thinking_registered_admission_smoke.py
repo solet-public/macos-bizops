@@ -64,6 +64,12 @@ from default_thinking_plugin.wbs_authoring import WbsAuthoringService  # noqa: E
 _job_fixture: Any = importlib.import_module("async_job_atomic_completion_smoke")
 manager_fixture = _job_fixture.manager_fixture
 
+# Receipts are judged by structure, not by a clock: the receipt must be in hand while the provider leaf is still
+# parked on its release event. The park (30 s) outlasts the receipt guard (10 s), so an admission that waited for
+# the leaf still fails the guard, while a slow host cannot fail a receipt that was issued promptly.
+PARK_SECONDS = 30.0
+RECEIPT_GUARD_SECONDS = 10.0
+
 
 def registered_processes() -> dict[str, Any]:
     """Use shipped declarations for every fixture's referenced process key."""
@@ -195,12 +201,12 @@ def _real_poller(harness: Harness, action: QueuedActionProtocol) -> Any:
     return poller
 
 
-def _stored_poller_receipt(harness: Harness, action: QueuedActionProtocol, elapsed: float, callers: list[int]) -> dict[str, object]:
+def _stored_poller_receipt(harness: Harness, action: QueuedActionProtocol, release: threading.Event, callers: list[int]) -> dict[str, object]:
     """Check the bounded durable receipt while the provider leaf stays parked."""
     rows = harness.state.rows["action_results"]
     assert len(rows) == 1 and rows[0]["core__action_events_id"] == action.id
     response: dict[str, object] = json.loads(rows[0]["result_data"])
-    assert_owned_receipt(harness, action, response, elapsed, callers)
+    assert_owned_receipt(harness, action, response, release, callers)
     assert harness.completed == [], "the stored receipt must return before the parked job completes"
     assert harness.state.rows["flow_tokens"][0]["state"] == "waiting_job"
     return response
@@ -229,7 +235,7 @@ def template_admission() -> None:
         assert validated == [action.process_key], "real canonical validation must precede provider effects"
         callers.append(threading.get_ident())
         entered.set()
-        assert release.wait(5), "fixture must release the actual KB read"
+        assert release.wait(PARK_SECONDS), "fixture must release the actual KB read"
         return kb.read(path)
 
     def dispatch() -> None:
@@ -240,17 +246,16 @@ def template_admission() -> None:
         start = time.perf_counter()
         future = executor.submit(dispatch)
         try:
-            assert entered.wait(5), "valid setup must reach the actual template KB reader"
-            prompt = returned.wait(0.2)
+            assert entered.wait(PARK_SECONDS), "valid setup must reach the actual template KB reader"
+            prompt = returned.wait(RECEIPT_GUARD_SECONDS)
             elapsed = time.perf_counter() - start
             if prompt:
-                response = _stored_poller_receipt(harness, action, elapsed, callers)
+                response = _stored_poller_receipt(harness, action, release, callers)
         finally:
             release.set()
-        future.result(timeout=5)
+        future.result(timeout=PARK_SECONDS)
         harness.join()
     assert prompt, f"get_plan_template registered admission waited for its parked KB read; reached={callers!r}, response={response!r}"
-    assert elapsed < 0.05, f"canonical receipt exceeded 50 ms: {elapsed * 1000:.3f} ms"
     assert response["success"] is True and isinstance(response.get("data"), dict), response
     data: Any = response["data"]
     assert {"action_status", "data", "actions", "error", "timestamp"} <= response.keys()
@@ -414,10 +419,25 @@ def completion_cases() -> list[Case]:
     return cases
 
 
-def assert_owned_receipt(harness: Harness, action: QueuedActionProtocol, response: dict[str, object], elapsed: float, entries: list[int]) -> str:
+def playbook_cases() -> list[Case]:
+    """Allocate a playbook over owned state, context and content-store doubles."""
+    plugin: Any = DefaultThinkingPlugin()
+    plugin._state_service = SimpleNamespace(
+        generate_id=lambda prefix: f"{prefix}owned",
+        write_state=lambda **_kwargs: {"action_status": "completed", "data": {}},
+    )
+    plugin._context_management_service = SimpleNamespace(
+        registry=SimpleNamespace(create_context=lambda **_kwargs: "ctx-owned"),
+        events=SimpleNamespace(append_event=lambda **_kwargs: {"action_status": "completed"}),
+    )
+    plugin._content_storage = SimpleNamespace(store_event=lambda _context_id, content: ("owned-path", len(content)))
+    return [Case("create_playbook", plugin, {"goal": "owned goal"}, plugin._content_storage, "store_event")]
+
+
+def assert_owned_receipt(harness: Harness, action: QueuedActionProtocol, response: dict[str, object], release: threading.Event, entries: list[int]) -> str:
     """A bounded canonical receipt permits unrelated registered work."""
     assert response.get("success") is True and isinstance(response.get("data"), dict), response
-    assert elapsed < 0.05, elapsed
+    assert not release.is_set(), "receipt must be issued while the operation leaf is parked"
     data: Any = response["data"]
     job_id = str(data["job_id"])
     assert len(harness.state.rows["job"]) == 1
@@ -458,7 +478,7 @@ def matrix_case(case: Case) -> None:
     def leaf(*_args: object, **_kwargs: object) -> object:
         entries.append(threading.get_ident())
         entered.set()
-        assert release.wait(5), "fixture must release its operation leaf"
+        assert release.wait(PARK_SECONDS), "fixture must release its operation leaf"
         raise FrameworkError("owned collaborator failure", error_code="thinking.fixture_leaf_failure")
 
     try:
@@ -467,8 +487,8 @@ def matrix_case(case: Case) -> None:
             response = harness.processor.execute_action(action)
             elapsed = time.perf_counter() - start
             try:
-                assert entered.wait(5), f"{case.name}: valid fixture must reach {case.attribute}; jobs={harness.state.rows.get('job')}"
-                job_id = assert_owned_receipt(harness, action, response, elapsed, entries)
+                assert entered.wait(PARK_SECONDS), f"{case.name}: valid fixture must reach {case.attribute}; jobs={harness.state.rows.get('job')}"
+                job_id = assert_owned_receipt(harness, action, response, release, entries)
             finally:
                 release.set()
                 harness.join()
@@ -480,8 +500,8 @@ def matrix_case(case: Case) -> None:
 
 
 def all_selected_entries() -> None:
-    cases = artifact_cases() + wbs_cases() + plan_cases() + lifecycle_cases() + completion_cases()
-    assert len(cases) == 27 and {case.name for case in cases} == THINKING_REGISTERED_OPERATIONS
+    cases = artifact_cases() + wbs_cases() + plan_cases() + lifecycle_cases() + completion_cases() + playbook_cases()
+    assert len(cases) == 28 and {case.name for case in cases} == THINKING_REGISTERED_OPERATIONS
     failures: list[str] = []
     for case in cases:
         try:
@@ -504,7 +524,7 @@ def synchronous_fifo_and_reentrancy() -> None:
         if "outer" in path:
             order.append("outer")
             entered.set()
-            assert release.wait(5)
+            assert release.wait(PARK_SECONDS)
             nested.append(plugin.get_plan_template("plan_template::fixture::inner"))
         elif "direct" in path:
             order.append("direct")
@@ -515,13 +535,13 @@ def synchronous_fifo_and_reentrancy() -> None:
 
     with patch.object(plugin, "_read_from_plan_templates_kb", side_effect=read), ThreadPoolExecutor(max_workers=1) as executor:
         receipt = harness.processor.execute_action(harness.action("get_plan_template", {"template_key": "plan_template::fixture::outer"}))
-        assert receipt["success"] is True and entered.wait(5)
+        assert receipt["success"] is True and entered.wait(PARK_SECONDS)
         direct = executor.submit(harness.service.get_plan_template, "plan_template::fixture::direct")
         try:
             assert not direct_entered.wait(0.03), "the direct writer must not overtake the registered owner"
         finally:
             release.set()
-        result = direct.result(timeout=5)
+        result = direct.result(timeout=PARK_SECONDS)
         harness.join()
     assert result["found"] is False and "job_id" not in result
     assert nested[0]["found"] is False and order == ["outer", "inner", "direct"]

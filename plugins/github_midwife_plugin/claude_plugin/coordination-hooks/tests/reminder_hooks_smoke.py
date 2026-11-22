@@ -29,6 +29,7 @@ import importlib.util  # noqa: E402
 import io  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
+import tempfile  # noqa: E402
 from typing import Any  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
@@ -359,7 +360,7 @@ def check_live_context_null_stdin(res: Results) -> None:
         return
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    env = {"PROJECT_SOLET_CLI": "/nonexistent/psolet", "SOLET_BRIDGE": "/nonexistent/bridge"}
+    env = {"SOLET_BRIDGE": "/nonexistent/bridge"}
     codes: list[int] = []
     outputs: list[str] = []
     for stdin in (None, io.StringIO("{}")):
@@ -376,6 +377,66 @@ def check_live_context_null_stdin(res: Results) -> None:
     )
 
 
+def _development_register_names() -> tuple[str, ...]:
+    """The development register's CLI and project names, each spelled in two halves so this file never holds them."""
+    return ("pso" + "let", "project" + "_solet", "project" + "-solet")
+
+
+def check_live_context_reads_only_the_solet(res: Results) -> None:
+    """A shipped hook reads the solet it runs in: no name of the development register in its source or its output.
+
+    Purpose: a solet installed without that register must start a session with its own context and print nothing
+    about a tool it does not have. The hook runs as a process under an empty HOME and a minimal PATH, with no
+    register variable and no fleet identity, so only what the hook itself reads can reach the context.
+    """
+    names = _development_register_names()
+    source = (HOOKS_DIR / "session_start_context.py").read_text(encoding="utf-8").lower()
+    present = [name for name in names if name in source]
+    res.check(not present, "session_start_context.py source names no development register", f"found {present}")
+    with tempfile.TemporaryDirectory() as home, contextlib.chdir(home):  # an empty working directory too: the hook looks in it for the solet's own statement file
+        proc = run_hook(
+            "session_start_context.py",
+            env={"HOME": home, "PATH": "/usr/bin:/bin"},
+            stdin=json.dumps({"hook_event_name": "SessionStart", "source": "startup"}),
+        )
+    res.check(proc.returncode == 0, "clean-environment live context exits zero", f"exit {proc.returncode}")
+    payload = _parse(res, proc.stdout, "clean-environment live context output")
+    inner = payload.get("hookSpecificOutput") if payload is not None else None
+    context = inner.get("additionalContext") if isinstance(inner, dict) else None
+    if not isinstance(context, str):
+        res.check(False, "clean-environment live context carries additionalContext", repr(proc.stdout[:120]))
+        return
+    lowered = context.lower()
+    leaked = [name for name in (*names, "resume-digest", "register-wide") if name in lowered]
+    res.check(not leaked, "clean-environment live context names no development register", f"found {leaked}")
+    res.check(
+        context.split("\n") == ["peer_inbox count unavailable (MissingIdentity).", "Principles unavailable (FileNotFoundError)."],
+        "clean-environment live context is the inbox advisory and the principle advisory, nothing else",
+        repr(context),
+    )
+
+
+SESSION_START_SOURCES = ("startup", "resume", "clear", "compact")
+
+
+def check_live_context_answers_every_activation_source(res: Results) -> None:
+    """Each source the host sends gets the start block; a source nobody named gets nothing.
+
+    Purpose: after a compaction the host runs SessionStart again with source ``compact``, and the session is
+    only given its principles again if the hook answers that source as it answers a start.
+    """
+    with tempfile.TemporaryDirectory() as home:
+        env = {"HOME": home, "PATH": "/usr/bin:/bin"}
+        outputs = {source: run_hook("session_start_context.py", env=env, stdin=json.dumps({"hook_event_name": "SessionStart", "source": source})).stdout for source in (*SESSION_START_SOURCES, "unknown")}
+    for source in SESSION_START_SOURCES:
+        res.check(
+            outputs[source] != "" and outputs[source] == outputs["startup"],
+            f"live context answers source {source} as it answers startup",
+            repr(outputs[source][:120]),
+        )
+    res.check(outputs["unknown"] == "", "live context prints nothing for an unnamed source", repr(outputs["unknown"][:120]))
+
+
 def main() -> int:
     preflight()
     res = Results("coordination-hooks — reminder hooks")
@@ -388,6 +449,8 @@ def main() -> int:
     check_malformed_stdin_degrades(res)
     check_fixed_literal_claim(res)
     check_live_context_null_stdin(res)
+    check_live_context_reads_only_the_solet(res)
+    check_live_context_answers_every_activation_source(res)
     return res.finish()
 
 

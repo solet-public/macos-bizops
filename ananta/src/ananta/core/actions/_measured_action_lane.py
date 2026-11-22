@@ -75,7 +75,7 @@ MEASURED_PROCESS_KEYS: Final[frozenset[str]] = (
 # iss_bc364208: re-measured 2026-11-07 in profile/data/logs, retire_session
 # held the serial loop 18.9-23.8 s on every 11-06 retire and 19.0 s on 11-07
 # (48.9 s on 11-06 morning), and the spawn_session submission (admission plus
-# assignment binding before its launch job) 10.1-16.1 s; the bridge long poll
+# queue preparation before its launch job) 10.1-16.1 s; the bridge long poll
 # is 25 s. Session teardown and launch submission share their own FIFO lane, so
 # two of them never overlap and keep the order the serial loop gave them, while
 # ordinary actions (report_alive, peer_send, deliver_result) no longer wait.
@@ -86,7 +86,6 @@ SESSION_LIFECYCLE_PROCESS_KEYS: Final[frozenset[str]] = frozenset(
         "plugin::agent_messaging_plugin::spawn_session",
         "plugin::agent_messaging_plugin::terminate_session",
         "plugin::agent_messaging_plugin::retire_session",
-        "plugin::agent_messaging_plugin::retire_completed_lane_sessions",
     }
 )
 LANES: Final[Mapping[str, frozenset[str]]] = MappingProxyType(

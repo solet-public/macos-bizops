@@ -107,6 +107,10 @@ class _CodexAppServerClient:
     def alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
+    def wait_exit(self) -> int | None:
+        proc = self._proc
+        return None if proc is None else proc.wait()
+
     def send(self, text: str) -> None:
         self.insert(text)
         self.submit()
@@ -250,8 +254,7 @@ class _CodexAppServerClient:
             for line in proc.stdout:
                 self._dispatch_message(json.loads(line))
             raise _RpcError(
-                "Codex app-server closed stdout; stderr tail: "
-                + " | ".join(self._stderr_tail)[-2000:],
+                "Codex app-server closed stdout; stderr tail: " + " | ".join(self._stderr_tail)[-2000:],
             )
         except BaseException as exc:  # noqa: BLE001 - wake every blocked request
             self._fail_waiters(exc)

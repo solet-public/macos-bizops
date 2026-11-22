@@ -34,18 +34,16 @@ def _check(condition: object, label: str) -> None:
         print(f"FAIL {label}")
 
 
-def _resolve(
-    state: dict[str, Any], *, has_role_claim: bool = True
-) -> provenance.CallerProvenance:
+def _resolve(state: dict[str, Any], *, has_role_claim: bool = True) -> provenance.CallerProvenance:
     original_managed = provenance.read_managed_session
     original_claim = provenance.read_session_role_claim
     provenance.read_managed_session = lambda _service, instance: {  # type: ignore[assignment]
-        "id": "mgs-real-row", "agent_instance_id": instance, "agent_session_id": "ases-one"
+        "id": "mgs-real-row",
+        "agent_instance_id": instance,
+        "agent_session_id": "ases-one",
     }
     provenance.read_session_role_claim = (  # type: ignore[assignment]
-        (lambda _service, _session: {"id": "src-one"})
-        if has_role_claim
-        else (lambda _service, _session: None)
+        (lambda _service, _session: {"id": "src-one"}) if has_role_claim else (lambda _service, _session: None)
     )
     try:
         return provenance.resolve_caller_provenance(object(), state)  # type: ignore[arg-type]
@@ -64,10 +62,12 @@ def test_refuses_without_server_context() -> None:
 
 
 def test_uses_server_identity_and_actual_row_id() -> None:
-    result = _resolve({
-        "call_context": CallContext.for_operator(),
-        "inference_vertex_session_id": "agi-one",
-    })
+    result = _resolve(
+        {
+            "call_context": CallContext.for_operator(),
+            "inference_vertex_session_id": "agi-one",
+        }
+    )
     _check(result.managed_session_id == "mgs-real-row", "uses measured ledger row id")
     _check(result.agent_session_id == "ases-one", "returns managed-session agent id")
     _check(result.session_role_claim_id == "src-one", "includes resolvable role claim")
@@ -75,27 +75,39 @@ def test_uses_server_identity_and_actual_row_id() -> None:
 
 
 def test_normalizes_non_grammar_directed_by() -> None:
-    result = _resolve({
-        "call_context": CallContext.for_external("bad+principal"),
-        "caller_attribution_instance_id": "agi-attributed",
-    })
+    result = _resolve(
+        {
+            "call_context": CallContext.for_external("bad+principal"),
+            "caller_attribution_instance_id": "agi-attributed",
+        }
+    )
     _check(result.directed_by.startswith("sha256:"), "hashes non-grammar renderer output")
     _check(result.directed_by_encoding == "sha256(format_directed_by)", "reports mapping")
 
 
 def test_registered_edge_definition() -> None:
-    definition = AgentMessagingPlugin().get_edge_process_definitions()[
-        "resolve_caller_provenance"
-    ]
+    definition = AgentMessagingPlugin().get_edge_process_definitions()["resolve_caller_provenance"]
     _check(
         definition.name == "resolve_caller_provenance",
         "same-name EDGE definition is registered",
     )
     result_customizations = definition.result_processor_template_customizations
     _check(
-        result_customizations is not None
-        and result_customizations.result_type == "caller_provenance",
+        result_customizations is not None and result_customizations.result_type == "caller_provenance",
         "registered EDGE result type is caller_provenance",
+    )
+
+
+def test_fleet_stall_sweep_processes_are_not_declared() -> None:
+    removed_prefixes = ("sweep_fleet_stall", "read_fleet_stall", "clear_fleet_stall")
+    declared = AgentMessagingPlugin().get_edge_process_definitions()
+    _check(
+        not [name for name in declared if name.startswith(removed_prefixes)],
+        "no EDGE definition declares a fleet stall sweep process",
+    )
+    _check(
+        not [name for name in dir(AgentMessagingPlugin) if name.startswith(removed_prefixes)],
+        "the plugin class carries no fleet stall sweep verb",
     )
 
 
@@ -138,7 +150,9 @@ def test_roleless_provenance_result_stores_end_to_end() -> None:
     original_managed = provenance.read_managed_session
     original_claim = provenance.read_session_role_claim
     provenance.read_managed_session = lambda _service, instance: {  # type: ignore[assignment]
-        "id": "mgs-real-row", "agent_instance_id": instance, "agent_session_id": "ases-one"
+        "id": "mgs-real-row",
+        "agent_instance_id": instance,
+        "agent_session_id": "ases-one",
     }
     provenance.read_session_role_claim = lambda _service, _session: None  # type: ignore[assignment]
     plugin = AgentMessagingPlugin()
@@ -163,7 +177,7 @@ def test_roleless_provenance_result_stores_end_to_end() -> None:
     if not isinstance(result, dict):
         _check(False, "roleless resolve_caller_provenance returns data payload")
         return
-    schema = AgentMessagingPlugin.resolve_caller_provenance._platform_process_metadata.return_value_schema
+    schema = AgentMessagingPlugin.resolve_caller_provenance._platform_process_metadata.return_value_schema  # pyright: ignore[reportFunctionMemberAccess]
     context = ExecutionContext("roleless-caller-provenance")
     context.store_result("resolve", result, schema.to_dict())
     _check(
@@ -177,6 +191,7 @@ def main() -> int:
     test_uses_server_identity_and_actual_row_id()
     test_normalizes_non_grammar_directed_by()
     test_registered_edge_definition()
+    test_fleet_stall_sweep_processes_are_not_declared()
     test_store_result_honors_required_metadata()
     test_roleless_provenance_result_stores_end_to_end()
     print(f"caller_provenance_smoke: {_passed} passed, {len(_failed)} failed")

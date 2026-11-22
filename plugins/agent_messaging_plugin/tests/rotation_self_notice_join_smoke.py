@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
-"""Smoke for the L4c ROUTING JOIN (2026-08-18): the `agent_session_id` column
-that makes a watcher-held worker reachable from its own gauge row.
+"""Smoke for the `agent_session_id` ROUTING JOIN column (2026-08-18) on the
+session_context_status gauge table.
 
-★ WHY THIS FILE EXISTS SEPARATELY FROM `rotation_self_notice_smoke.py`, and
-why that separation is itself the finding. The existing 44-assertion L4c suite
-passes GREEN AND UNCHANGED against this landing -- and would pass equally
-against a build in which the join is dead code. That is not a criticism of it;
-it tests the leg's DECISIONS (band, latch, staleness) with a fake registry that
-resolves by instance id alone. The join is a WIRING fact, and a fake that
-answers the question you ask it cannot tell you whether the wiring exists. So
-everything here runs the REAL `PeerRegistry` over a REAL in-memory
-`peer_binding` store and a REAL `BridgeSessionManager`, and asserts on an event
-that really landed on the bridge -- construct, mutate, observe, rather than
-construct and inspect.
-
-★ THE CONTROL IS THE TEST. `test_the_join_is_what_does_the_work` runs the
-IDENTICAL scenario with the join column NULL and asserts it is unroutable. Any
-of these deliveries could otherwise be explained by "the instance lookup
-happened to work", which is precisely the pre-change build. One passing
-delivery proves nothing without the paired failure.
+The self-notice sweep that first read this column is gone (a session reads its
+own gauge when it chooses, through `session_context_status`), so what stays here
+is the column's own contract, which `fleet_status` and the session-id reverse
+lookup still rely on: the column is declared and nullable; the store and the
+`report_context_status` / `session_context_status` verbs round-trip it and
+preserve NULL as NOT REPORTED; the verb's raw-params mapping does not drop it;
+and both reporter-hook copies send it. The routing itself (a watch id resolving
+to the ledger-keyed row) is pinned in
+`session_context_status_watch_id_join_smoke.py`.
 
 Run:
     .venv/bin/python3 \
@@ -45,24 +37,14 @@ from ananta.interfaces.state_management_interface import (  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
     AGENT_ROLE_BINDING_NAMESPACE,
 )
-from ananta.services.store import Store, open_store  # noqa: E402
 
-from agent_messaging_plugin import rotation_self_notice as rsn  # noqa: E402
-from agent_messaging_plugin.bridge_sessions import BridgeSessionManager  # noqa: E402
 from agent_messaging_plugin.context_status_verbs import (  # noqa: E402
     report_context_status,
     session_context_status,
 )
-from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
-from agent_messaging_plugin.peer_registry import (  # noqa: E402
-    PeerRegistry,
-    PeerSessionAmbiguousError,
-)
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
-    PEER_BINDING_NAMESPACE,
     TABLE_SESSION_CONTEXT_STATUS,
-    get_peer_binding_schema,
     get_session_context_status_schema,
 )
 from agent_messaging_plugin.session_context_status_store import (  # noqa: E402
@@ -87,23 +69,20 @@ def _check(condition: object, label: str) -> None:
 # THE TWO IDS, held apart on purpose.
 #
 # A watcher-held worker's gauge row keys on its LEDGER id while its live bridge
-# binding keys on its WATCH id. The whole defect is that those are different
-# strings for one session. They are named here so that any test which
-# accidentally uses one where it means the other reads wrong on sight.
+# binding keys on its WATCH id: different strings for one session. They are
+# named here so that any test which uses one where it means the other reads
+# wrong on sight.
 #
 # ★ THE SESSION ID IS DELIBERATELY NOT `"ases-" + LEDGER`. The live launcher
-# does derive it that way today, and a join built by reconstructing the prefix
-# would pass every test that used a realistic-looking value -- including a live
-# one -- while never resolving anything through the registry. Choosing an
-# unrelated string is what makes this suite able to fail that implementation.
+# does derive it that way today, and a value that looked derivable would let a
+# test pass on a reconstruction. An unrelated string is what makes this suite
+# able to fail that implementation.
 # ---------------------------------------------------------------------------
 
 LEDGER_ID = "agi-ledger0000000000000000000000"
-WATCH_ID = "agi-watch-0f0f0f0f0f0f0f0f0f0f"
 SESSION_ID = "ases-deliberately-unrelated-to-the-ledger-id"
 
 SEAT_ID = "agi-seat00000000000000000000000"
-SEAT_SESSION_ID = "ases-seat-session"
 
 
 def _now() -> datetime:
@@ -111,59 +90,14 @@ def _now() -> datetime:
 
 
 def _fresh_stamp() -> str:
-    """A `measured_at` comfortably inside SELF_NOTICE_STALENESS_S.
-
-    Written NAIVE, like the live column: the DATETIME type drops the offset,
-    and the leg's own age arithmetic has to re-attach UTC. Using an aware
-    stamp here would quietly test an easier shape than production has.
-    """
+    """A recent `measured_at`, written NAIVE like the live column: the DATETIME
+    type drops the offset, so an aware stamp here would test an easier shape than
+    production has."""
     return (_now() - timedelta(seconds=60)).replace(tzinfo=None).isoformat()
 
 
 def _state() -> StateManagementInterface:
     return cast("StateManagementInterface", RealShapeState())
-
-
-def _registry_with(
-    bindings: list[tuple[str, str]],
-) -> tuple[PeerRegistry, BridgeSessionManager, dict[str, str]]:
-    """A REAL registry + REAL bridge manager, with one open bridge per binding.
-
-    ``bindings`` is ``[(agent_instance_id, agent_session_id), ...]``. Returns
-    the registry, the manager, and ``{agent_instance_id: bridge_id}`` so a test
-    can assert WHICH bridge received an event rather than merely that one did.
-    """
-    store: Store = open_store(
-        get_peer_binding_schema(),
-        namespace=PEER_BINDING_NAMESPACE,
-        backend="in_memory",
-    )
-    registry = PeerRegistry(bindings_store=store)
-    manager = BridgeSessionManager(
-        session_id_factory=lambda _name: "ags-join-smoke",
-        idle_timeout_s=3600,
-        max_pending_events=20,
-        long_poll_timeout_s=1,
-    )
-    bridges: dict[str, str] = {}
-    for index, (instance_id, session_id) in enumerate(bindings):
-        bridge = manager.open(solet_name="", parent_pid=None)
-        bridges[instance_id] = bridge.bridge_id
-        registry.register(
-            BridgeBinding(
-                bridge_id=bridge.bridge_id,
-                agent_id="claude_code",
-                agent_instance_id=instance_id,
-                # Distinct per binding: `register` hard-deletes any existing row
-                # sharing a non-empty session_label, so reusing one label would
-                # silently evict the previous binding and quietly reduce a
-                # two-session test to a one-session test.
-                session_label=f"lane-under-test-{index}",
-                parent_pid=None,
-                agent_session_id=session_id,
-            ),
-        )
-    return registry, manager, bridges
 
 
 def _write_gauge_row(
@@ -192,230 +126,10 @@ def _write_gauge_row(
     )
 
 
-class _RecordingMessagingService:
-    """The durable half, recorded rather than exercised (GAU-06 G2).
-
-    This file's subject is ROUTING -- which key resolves a session's binding --
-    so the durable write is stood in for rather than run against a real service
-    and repository. What it must NOT be is absent: the leg refuses to notify at
-    all without a messaging service, so omitting it here would make every
-    routing assertion in this file pass or fail for a reason that has nothing to
-    do with the join. The request SHAPE is asserted in
-    ``rotation_self_notice_smoke.py``, which is where it belongs.
-    """
-
-    def __init__(self) -> None:
-        self.sent: list[Any] = []
-
-    def peer_send(self, request: Any) -> object:
-        self.sent.append(request)
-        # Carries a thread_id because the writer PRUNES the thread it just
-        # wrote to (GAU-06 retention). A bare object() here is not a smaller
-        # stand-in, it is one the notify path cannot get past -- which is how
-        # this file went red the second time on the same change.
-        return SimpleNamespace(
-            thread_id=f"agt-rotation-{request.peer_agent_instance_id}",
-            message_id="agm-join-fake",
-            cursor=1,
-        )
-
-
-def _sweep(
-    state: StateManagementInterface,
-    registry: PeerRegistry,
-    manager: BridgeSessionManager,
-) -> rsn.SelfNoticeCounts:
-    return rsn.sweep_rotation_self_notice(
-        state,
-        now=_now(),
-        peer_registry=registry,
-        bridge_manager=manager,
-        agent_messaging_service=_RecordingMessagingService(),  # type: ignore[arg-type]
-        latch=rsn.BandEdgeLatch(),
-    )
-
-
-def _events_on(manager: BridgeSessionManager, bridge_id: str) -> list[Any]:
-    """Events really queued on that bridge.
-
-    Read as a plain list rather than through `events_after`, which DRAINS what
-    a cursor acknowledges -- a draining read would let one assertion change
-    what the next one sees, and these tests assert on the same bridge twice.
-    """
-    bridge = manager.get(bridge_id)
-    return list(bridge.pending_events) if bridge is not None else []
-
-
-# ---------------------------------------------------------------------------
-# The headline: the thing that was impossible before this landing.
-# ---------------------------------------------------------------------------
-
-def test_a_watcher_held_worker_is_reached_through_the_join() -> None:
-    """★ THE LANDING, end to end, through real wiring.
-
-    CATCHES: the join not being wired at any of its four joints -- the schema
-    column, the store write, the read back into the leg, or the registry
-    lookup. Any one of them missing and this row is unroutable exactly as it
-    was before.
-
-    The gauge row is keyed on the LEDGER id. The only live binding is keyed on
-    the WATCH id. `resolve_by_agent_instance_id(LEDGER_ID)` MUST miss -- that
-    is the defect -- so a delivery here can only have come through
-    `resolve_by_agent_session_id`.
-    """
-    state = _state()
-    registry, manager, bridges = _registry_with([(WATCH_ID, SESSION_ID)])
-    _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id=SESSION_ID)
-
-    _check(
-        registry.resolve_by_agent_instance_id(LEDGER_ID) is None,
-        "PREMISE: the ledger id resolves to NOTHING -- if this ever passes, the "
-        "test below stops being about the join and silently becomes trivial",
-    )
-
-    counts = _sweep(state, registry, manager)
-    _check(counts.appended == 1, "the watcher-held worker IS notified (was impossible)")
-    _check(
-        counts.unroutable == 0 and counts.undeliverable == 0,
-        "...and is not counted as a gap -- all three numbers pinned, since "
-        "appended==1 alone cannot rule out a second row being miscounted",
-    )
-
-    events = _events_on(manager, bridges[WATCH_ID])
-    _check(len(events) == 1, "exactly one event really landed on the WATCH binding's bridge")
-    _check(
-        bool(events) and events[0].event_type == rsn.EVENT_ROTATION_SELF_NOTICE,
-        "and it is a rotation_self_notice, not some other event",
-    )
-    _check(
-        bool(events) and events[0].content == "context is 336,000 — make sure everything is durable.",
-        "and its prose is the one-line durability notice",
-    )
-
-
-def test_the_join_is_what_does_the_work() -> None:
-    """★ THE CONTROL. Identical scenario, join column NULL.
-
-    Without this, the test above is consistent with "resolution succeeded for
-    some other reason" -- which is precisely what the pre-change build did on
-    bridge-held sessions. This is the pre-change build, reproduced on purpose:
-    it must still be unroutable, and it must still deliver nothing.
-
-    It also pins the SEMANTICS of NULL: a pre-upgrade reporter is a counted,
-    benign coverage gap, never a crash and never a silent skip.
-    """
-    state = _state()
-    registry, manager, bridges = _registry_with([(WATCH_ID, SESSION_ID)])
-    _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id=None)
-
-    counts = _sweep(state, registry, manager)
-    _check(counts.appended == 0, "a row with NO join is NOT notified -- the pre-change behaviour")
-    _check(counts.unroutable == 1, "...and is counted as unroutable, not silently skipped")
-    _check(
-        not _events_on(manager, bridges[WATCH_ID]),
-        "...and nothing was delivered to the bridge that a working join would have found",
-    )
-
-
-def test_the_join_is_resolved_not_reconstructed() -> None:
-    """★ THE RULING'S CENTRAL BOUND, made falsifiable.
-
-    CATCHES: `"ases-" + agent_instance_id`, `startswith("ases-")`, prefix
-    slicing -- any implementation that derives the session id from the ledger
-    id instead of resolving the stored one.
-
-    Such an implementation passes the headline test whenever the fixture uses a
-    realistic-looking id, which is why LEDGER_ID and SESSION_ID here share no
-    substring. Here the STORED join points at a session id that a reconstructor
-    could never produce, and the reconstructable value belongs to a DIFFERENT
-    live session. So a reconstructing build does not merely fail to deliver --
-    it delivers to the wrong session, and this test says which.
-    """
-    state = _state()
-    decoy_session_id = f"ases-{LEDGER_ID}"  # exactly what a reconstructor would build
-    registry, manager, bridges = _registry_with(
-        [(WATCH_ID, SESSION_ID), (SEAT_ID, decoy_session_id)],
-    )
-    _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id=SESSION_ID)
-
-    counts = _sweep(state, registry, manager)
-    _check(counts.appended == 1, "the stored join resolves")
-    _check(
-        len(_events_on(manager, bridges[WATCH_ID])) == 1,
-        "the notice went to the session the STORED join names",
-    )
-    _check(
-        not _events_on(manager, bridges[SEAT_ID]),
-        "★ and NOT to the session a reconstructed 'ases-'+ledger id would have "
-        "named -- a prefix-building implementation misroutes here instead of "
-        "merely failing, which is the harm the ruling names",
-    )
-
-
-def test_the_bridge_held_case_still_resolves_on_its_own_key() -> None:
-    """CATCHES: making the join MANDATORY -- i.e. a build that only consults
-    `agent_session_id` and so breaks every operator seat, the exact population
-    the leg was written for.
-
-    A seat's gauge row and binding share one id. It must resolve with the join
-    column NULL, because a seat reported by a pre-upgrade hook is still the
-    most important session on the fleet.
-    """
-    state = _state()
-    registry, manager, bridges = _registry_with([(SEAT_ID, SEAT_SESSION_ID)])
-    _write_gauge_row(state, agent_instance_id=SEAT_ID, agent_session_id=None)
-
-    counts = _sweep(state, registry, manager)
-    _check(counts.appended == 1, "a bridge-held seat resolves on its own key with NO join stored")
-    _check(
-        len(_events_on(manager, bridges[SEAT_ID])) == 1,
-        "...and really receives the notice",
-    )
-
-
-def test_an_empty_join_is_not_a_lookup() -> None:
-    """CATCHES: `str(row.get(...) or "")` at the read boundary, which maps NULL
-    to `""`.
-
-    An empty session id is not a session id. `resolve_by_agent_session_id`
-    returns None for it, so the outcome LOOKS right -- unroutable either way --
-    which is exactly why this is worth pinning: the bug would be invisible in
-    the counts and would only surface as a wasted lookup per row per tick,
-    forever.
-    """
-    state = _state()
-    registry, manager, _ = _registry_with([(WATCH_ID, SESSION_ID)])
-    _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id="")
-
-    counts = _sweep(state, registry, manager)
-    _check(counts.appended == 0, "an empty join does not resolve")
-    _check(counts.unroutable == 1, "...and is counted as the coverage gap it is")
-
-
-def test_two_bindings_for_one_session_id_fails_loud() -> None:
-    """CATCHES: swallowing `PeerSessionAmbiguousError` into `unroutable`.
-
-    A session holds at most one live bridge, so two bindings for one session id
-    is a corrupt registry. The leg's job is delivering a context measurement to
-    the RIGHT session; guessing between two candidates could deliver it to the
-    wrong one. Loud beats quiet here, and the rider's per-leg try/except is what
-    keeps loud from costing the sibling legs their tick.
-    """
-    state = _state()
-    registry, manager, _ = _registry_with([(WATCH_ID, SESSION_ID), (SEAT_ID, SESSION_ID)])
-    _write_gauge_row(state, agent_instance_id=LEDGER_ID, agent_session_id=SESSION_ID)
-
-    raised = False
-    try:
-        _sweep(state, registry, manager)
-    except PeerSessionAmbiguousError:
-        raised = True
-    _check(raised, "a duplicate session-id binding raises rather than being counted as a gap")
-
-
 # ---------------------------------------------------------------------------
 # The column itself, and the write/read round trip.
 # ---------------------------------------------------------------------------
+
 
 def test_the_column_is_declared_and_nullable() -> None:
     """CATCHES: the store writing a column the schema never declared.
@@ -440,8 +154,7 @@ def test_the_column_is_declared_and_nullable() -> None:
     _check("agent_session_id" in columns, "the join column is declared on the table")
     _check(
         "agent_session_id" in columns and not columns["agent_session_id"].not_null,
-        "...and is NULLABLE -- a NOT NULL add would fail the migration on the "
-        "populated live table",
+        "...and is NULLABLE -- a NOT NULL add would fail the migration on the populated live table",
     )
 
     state = _state()
@@ -450,8 +163,7 @@ def test_the_column_is_declared_and_nullable() -> None:
     written = next(iter(rows.values()))[0]
     _check(
         written.get("agent_session_id") == SESSION_ID,
-        "the store's write is accepted by the now-enforcing fake and persists "
-        "the join column",
+        "the store's write is accepted by the now-enforcing fake and persists the join column",
     )
 
 
@@ -492,8 +204,7 @@ def test_the_fake_enforces_this_tables_declared_schema() -> None:
     )
     _check(
         result.get("action_status") != "completed",
-        "an UNDECLARED column on session_context_status is rejected by the fake "
-        "(postgres would reject it live)",
+        "an UNDECLARED column on session_context_status is rejected by the fake (postgres would reject it live)",
     )
     _check(
         "not_a_declared_column" in str(result.get("error", {})),
@@ -543,8 +254,7 @@ def test_the_verb_round_trips_the_join_and_preserves_null() -> None:
     unreported = session_context_status(other, agent_instance_id=SEAT_ID)
     _check(
         unreported["agent_session_id"] is None,
-        "an unreported join reads back as None, NOT '' -- NOT REPORTED must "
-        "stay distinct from 'could not route'",
+        "an unreported join reads back as None, NOT '' -- NOT REPORTED must stay distinct from 'could not route'",
     )
 
 
@@ -579,15 +289,7 @@ def test_the_verb_round_trips_the_join_and_preserves_null() -> None:
 
 _CHECKOUT_HOOKS_DIR = REPO_ROOT / ".claude" / "hooks"
 _CHECKOUT_HOOK = _CHECKOUT_HOOKS_DIR / "rotation_due_watch.py"
-_VENDORED_HOOK = (
-    REPO_ROOT / "plugins" / "github_midwife_plugin" / "claude_plugin"
-    / "coordination-hooks" / "hooks" / "rotation_due_watch.py"
-)
-_CHECKOUT_NOTICE_HOOK = _CHECKOUT_HOOKS_DIR / "rotation_due_notice.py"
-_VENDORED_NOTICE_HOOK = (
-    REPO_ROOT / "plugins" / "github_midwife_plugin" / "claude_plugin"
-    / "coordination-hooks" / "hooks" / "rotation_due_notice.py"
-)
+_VENDORED_HOOK = REPO_ROOT / "plugins" / "github_midwife_plugin" / "claude_plugin" / "coordination-hooks" / "hooks" / "rotation_due_watch.py"
 
 
 def _dev_checkout_shape() -> bool:
@@ -629,7 +331,7 @@ def test_the_hook_actually_sends_the_join() -> None:
     for, and it is the one this landing is most exposed to: every assertion
     above passes against a build where the reporting hook never sends
     `agent_session_id`, because they all supply it themselves. The column
-    would exist, the store would persist it, the leg would resolve it, and the
+    would exist, the store would persist it, a reader would resolve it, and the
     live table would be entirely NULL.
 
     So this asserts on the payload the hook BUILDS, with the environment as the
@@ -655,8 +357,7 @@ def test_the_hook_actually_sends_the_join() -> None:
     # single fact this leg's green is otherwise silent about.
     _check(
         hook_path.is_file(),
-        f"[{surface} copy] the reporting hook exists in this tree shape "
-        f"and is the copy exercised below: {hook_path}",
+        f"[{surface} copy] the reporting hook exists in this tree shape and is the copy exercised below: {hook_path}",
     )
     if not hook_path.is_file():
         return
@@ -707,21 +408,17 @@ def test_the_hook_actually_sends_the_join() -> None:
     )
     _check(
         absent == {},
-        f"[{surface} copy] ...and OMITS the key entirely when it is unset -- omission "
-        "records NOT REPORTED, whereas '' would assert an empty session id",
+        f"[{surface} copy] ...and OMITS the key entirely when it is unset -- omission records NOT REPORTED, whereas '' would assert an empty session id",
     )
     _check(
         hook._REPORTER_GENERATION >= 3,  # noqa: SLF001 - >= so an honest future bump does not red
-        f"[{surface} copy] the reporter generation was bumped, so a NULL join can be "
-        "attributed to a stale reporter rather than a routing failure",
+        f"[{surface} copy] the reporter generation was bumped, so a NULL join can be attributed to a stale reporter rather than a routing failure",
     )
 
     source = hook_path.read_text()
     _check(
-        "_session_id_argument()" in source.split("def _session_id_argument")[0]
-        or "**_session_id_argument()" in source,
-        f"[{surface} copy] ...and the helper is actually SPLICED INTO the report payload "
-        "-- a helper nothing calls is the inert-knob defect wearing a test",
+        "_session_id_argument()" in source.split("def _session_id_argument")[0] or "**_session_id_argument()" in source,
+        f"[{surface} copy] ...and the helper is actually SPLICED INTO the report payload -- a helper nothing calls is the inert-knob defect wearing a test",
     )
 
 
@@ -754,15 +451,13 @@ def test_both_hook_copies_report_the_join() -> None:
     vendored = _VENDORED_HOOK
     _check(
         vendored.is_file(),
-        f"[vendored copy] the vendored copy of the reporting hook exists -- "
-        f"asserted in EVERY tree shape, it is what a born clone runs: {vendored}",
+        f"[vendored copy] the vendored copy of the reporting hook exists -- asserted in EVERY tree shape, it is what a born clone runs: {vendored}",
     )
     if not vendored.is_file():
         return
     vendored_source = vendored.read_text()
     _check(
-        "_SESSION_ID_ENV" in vendored_source
-        and "**_session_id_argument()" in vendored_source,
+        "_SESSION_ID_ENV" in vendored_source and "**_session_id_argument()" in vendored_source,
         f"[vendored copy] the VENDORED copy reports the join too: {vendored}",
     )
     # ★ COMPARE the two, never hardcode the value. An assertion written as
@@ -775,9 +470,7 @@ def test_both_hook_copies_report_the_join() -> None:
     vendored_generation = _reporter_generation_of(vendored_source)
     _check(
         vendored_generation is not None and vendored_generation >= 3,
-        f"[vendored copy] the SHIPPED copy's generation is at least 3, the generation "
-        f"that reports the join (vendored={vendored_generation}) -- asserted in EVERY "
-        "tree shape, because in a born clone this is the only copy there is",
+        f"[vendored copy] the SHIPPED copy's generation is at least 3, the generation that reports the join (vendored={vendored_generation}) -- asserted in EVERY tree shape, because in a born clone this is the only copy there is",
     )
 
     if not _dev_checkout_shape():
@@ -793,61 +486,18 @@ def test_both_hook_copies_report_the_join() -> None:
 
     _check(
         _CHECKOUT_HOOK.is_file(),
-        f"[dev-checkout shape] the checkout copy exists in a tree that has "
-        f"a .claude/hooks/ -- its absence HERE is drift, not a shape: {_CHECKOUT_HOOK}",
+        f"[dev-checkout shape] the checkout copy exists in a tree that has a .claude/hooks/ -- its absence HERE is drift, not a shape: {_CHECKOUT_HOOK}",
     )
     if not _CHECKOUT_HOOK.is_file():
         return
     checkout_generation = _reporter_generation_of(_CHECKOUT_HOOK.read_text())
     _check(
         checkout_generation is not None and checkout_generation == vendored_generation,
-        f"[dev-checkout shape] both copies carry the SAME generation "
-        f"(checkout={checkout_generation}, vendored={vendored_generation}) -- a split "
-        "generation makes a row unattributable to a reporter version, and only one "
-        "copy serves each tick",
+        f"[dev-checkout shape] both copies carry the SAME generation (checkout={checkout_generation}, vendored={vendored_generation}) -- a split generation makes a row unattributable to a reporter version, and only one copy serves each tick",
     )
     _check(
         checkout_generation is not None and checkout_generation >= 3,
-        f"[dev-checkout shape] ...and the CHECKOUT copy is at least 3 too "
-        f"(checkout={checkout_generation}), the generation that reports the join",
-    )
-
-
-def test_notice_hook_copies_are_identical() -> None:
-    """Keep the notice hook's checkout and shipped copies byte-identical.
-
-    The vendored copy is the package's executable hook, so its presence is
-    asserted in every tree shape. A born clone has no checkout copy to compare;
-    in a development checkout, the checkout leg must exist and match the
-    vendored bytes exactly.
-    """
-    _check(
-        _VENDORED_NOTICE_HOOK.is_file(),
-        f"[vendored notice copy] the shipped notice hook exists in every tree "
-        f"shape: {_VENDORED_NOTICE_HOOK}",
-    )
-    if not _VENDORED_NOTICE_HOOK.is_file():
-        return
-
-    if not _dev_checkout_shape():
-        print(
-            "  N/A   [born-clone shape] checkout-vs-vendored notice parity: "
-            f"no .claude/hooks/ in this tree ({_CHECKOUT_HOOKS_DIR}); the "
-            "vendored shipping assertion above DID run.",
-        )
-        return
-
-    _check(
-        _CHECKOUT_NOTICE_HOOK.is_file(),
-        f"[dev-checkout shape] the checkout notice hook exists beside the "
-        f"vendored copy: {_CHECKOUT_NOTICE_HOOK}",
-    )
-    if not _CHECKOUT_NOTICE_HOOK.is_file():
-        return
-    _check(
-        _CHECKOUT_NOTICE_HOOK.read_bytes() == _VENDORED_NOTICE_HOOK.read_bytes(),
-        "[dev-checkout shape] checkout and vendored notice hook copies are "
-        f"byte-identical: {_CHECKOUT_NOTICE_HOOK} == {_VENDORED_NOTICE_HOOK}",
+        f"[dev-checkout shape] ...and the CHECKOUT copy is at least 3 too (checkout={checkout_generation}), the generation that reports the join",
     )
 
 
@@ -867,9 +517,12 @@ def test_the_process_verb_mapping_does_not_drop_the_field() -> None:
     process method with a raw params dict, the shape the platform hands it.
     """
     state = RealShapeState()
-    plugin = cast("Any", SimpleNamespace(
-        _get_state_service=lambda: cast("StateManagementInterface", state),
-    ))
+    plugin = cast(
+        "Any",
+        SimpleNamespace(
+            _get_state_service=lambda: cast("StateManagementInterface", state),
+        ),
+    )
     result = AgentMessagingPlugin.report_context_status(
         plugin,
         {
@@ -898,13 +551,12 @@ def test_the_process_verb_mapping_does_not_drop_the_field() -> None:
     )
 
     view = session_context_status(
-        cast("StateManagementInterface", state), agent_instance_id=LEDGER_ID,
+        cast("StateManagementInterface", state),
+        agent_instance_id=LEDGER_ID,
     )
     _check(
         view["agent_session_id"] == SESSION_ID,
-        "★ the value survives the process verb's raw.get mapping -- without "
-        "this assertion the whole landing can be declared, stored, resolved "
-        "and still write NULL for every live session",
+        "★ the value survives the process verb's raw.get mapping -- without this assertion the whole landing can be declared, stored, resolved and still write NULL for every live session",
     )
 
 
@@ -914,25 +566,14 @@ def _run() -> int:
     # A reader who sees only the per-line "[checkout copy]" / "[vendored copy]"
     # tags can still reconstruct this; printing it here means they do not have
     # to, and a run pasted into a report carries its own tree shape with it.
-    shape = (
-        f"dev-checkout (.claude/hooks/ present: {_CHECKOUT_HOOKS_DIR})"
-        if _dev_checkout_shape()
-        else f"born-clone (no .claude/ in this tree: {REPO_ROOT})"
-    )
+    shape = f"dev-checkout (.claude/hooks/ present: {_CHECKOUT_HOOKS_DIR})" if _dev_checkout_shape() else f"born-clone (no .claude/ in this tree: {REPO_ROOT})"
     print(f"Measured tree shape: {shape}")
     tests = [
-        test_a_watcher_held_worker_is_reached_through_the_join,
-        test_the_join_is_what_does_the_work,
-        test_the_join_is_resolved_not_reconstructed,
-        test_the_bridge_held_case_still_resolves_on_its_own_key,
-        test_an_empty_join_is_not_a_lookup,
-        test_two_bindings_for_one_session_id_fails_loud,
         test_the_column_is_declared_and_nullable,
         test_the_fake_enforces_this_tables_declared_schema,
         test_the_verb_round_trips_the_join_and_preserves_null,
         test_the_hook_actually_sends_the_join,
         test_both_hook_copies_report_the_join,
-        test_notice_hook_copies_are_identical,
         test_the_process_verb_mapping_does_not_drop_the_field,
     ]
     for test in tests:

@@ -1,0 +1,2 @@
+# Hermetic fake-router proof that migrate_to_solet.py --scan-stale reports a router binding held by a pre-rename process, read-only.
+plugins/macos_self_deployment_plugin/tests/migrate_to_solet_router_binding_smoke.py

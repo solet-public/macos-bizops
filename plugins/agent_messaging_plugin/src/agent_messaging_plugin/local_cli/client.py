@@ -119,11 +119,28 @@ class SoletIdentityError(RuntimeError):
 
 
 class BridgeCallError(RuntimeError):
-    """A bridge HTTP call returned an error status or an unusable body."""
+    """A bridge HTTP call returned an error status or an unusable body.
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    ``code`` is the response body's own code (``None`` when the body is not
+    JSON) and ``status_code`` is the HTTP status of that response; both are
+    ``None`` when the failure is not an error response (a malformed success
+    body, a missing bridge).
+    """
+
+    def __init__(self, message: str, *, code: str | None = None, status_code: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.status_code = status_code
+
+
+class BridgeRefusedError(BridgeCallError):
+    """The bridge answered a dispatch with a 4xx: the call was refused.
+
+    Raised only by :meth:`BridgeClient.process_call`. A 4xx there means the
+    bridge rejected the request before queueing anything, so the sender knows
+    the call was NOT accepted. The same 4xx on a later result poll says nothing
+    about the dispatch, which is why only the dispatch raises this type.
+    """
 
 
 class RoleClaimRejectedError(RuntimeError):
@@ -516,7 +533,12 @@ class BridgeClient(_QueueFreePeerReads, _JobWaiter):
             body["reason"] = reason
         if bridge_wait_attached:
             body["bridge_wait_attached"] = True
-        return self._post(f"{API_PREFIX}/{self._require_bridge()}/process/call", body)
+        try:
+            return self._post(f"{API_PREFIX}/{self._require_bridge()}/process/call", body)
+        except BridgeCallError as error:
+            if error.status_code is not None and httpx.codes.is_client_error(error.status_code):
+                raise BridgeRefusedError(str(error), code=error.code, status_code=error.status_code) from error
+            raise
 
     def process_result(self, action_id: str) -> dict[str, Any]:
         """Snapshot-read a dispatched action's stored result."""
@@ -741,6 +763,7 @@ class BridgeClient(_QueueFreePeerReads, _JobWaiter):
             raise BridgeCallError(
                 f"{path} failed ({response.status_code}): {response.text}",
                 code=code if isinstance(code, str) else None,
+                status_code=response.status_code,
             )
         body = response.json()
         if not isinstance(body, dict):

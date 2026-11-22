@@ -1,6 +1,6 @@
-# The Solet Charter Template: Platform-Constant Sections and the Blanks an Owner Fills
+# The Solet Governance Statement Template: Platform-Constant Sections and the Blanks an Owner Fills
 
-Tags: knowledge:tag:charter, knowledge:tag:governance, knowledge:tag:operator_communication
+Tags: knowledge:tag:governance, knowledge:tag:operator_communication
 
 Article Layer: 2
 
@@ -8,19 +8,19 @@ Article Role: governance_policy
 
 Article Tags: planning-stage:always, evidence-category:workflow, domain:operator_communication, consumer_profile:both
 
-Embedding Description: The charter template every solet inherits through the seed. Covers the platform-constant sections of identity model, design values, and governance shape that ship pre-filled, the per-solet blanks of mission, economic reality, and current priorities that the owner fills during first-days onboarding, and the change discipline of a short owner-ratified document that changes rarely and carries dates.
+Embedding Description: The governance statement template every solet inherits through the seed. Covers the platform-constant sections of identity model, design values, and governance shape that ship pre-filled, the per-solet blanks of mission, economic reality, and current priorities that the owner fills during first-days onboarding, and the change discipline of a short owner-ratified document that changes rarely and carries dates.
 
-**When you need this**: writing the minimum viable charter with a new owner during first-days onboarding; checking which charter sections are platform-constant and which are per-solet; revisiting a charter after the owner's direction shifts; explaining to an owner in plain terms why a short governing document exists at all.
+**When you need this**: writing the minimum viable governance statement with a new owner during first-days onboarding; checking which governance statement sections are platform-constant and which are per-solet; revisiting a governance statement after the owner's direction shifts; explaining to an owner in plain terms why a short governing document exists at all.
 
 ---
 
-## What a charter is and how this template is used
+## What a governance statement is and how this template is used
 
-A charter is the short governing document of one solet: what it is, what it is for, who pays for it, and how decisions get made. It is deliberately brief, changes rarely, and every change is owner-ratified and dated.
+A governance statement is the short governing document of one solet: what it is, what it is for, who pays for it, and how decisions get made. It is deliberately brief, changes rarely, and every change is owner-ratified and dated.
 
-The layering rule is the heart of the template. Sections 1, 5, and 6 below are platform-constant: every solet inherits them as written, because they describe what a solet *is* rather than what one particular solet is *for*. Sections 2 through 4 are per-solet blanks: each solet fills in its own with its owner during first-days onboarding, guided by the solet itself. Nobody hand-writes charters for other solets.
+The layering rule is the heart of the template. Sections 1, 5, and 6 below are platform-constant: every solet inherits them as written, because they describe what a solet *is* rather than what one particular solet is *for*. Sections 2 through 4 are per-solet blanks: each solet fills in its own with its owner during first-days onboarding, guided by the solet itself. Nobody hand-writes governance statements for other solets.
 
-Filling the blanks is a few minutes of conversation, never paperwork. The first-days runbook's charter step specifies the minimum: mission in the owner's words, the cost boundary, and today's one to three priorities, dated. If the owner arrived with an urgent concrete task, help with that first and write the minimum charter as its close-out; usefulness precedes paperwork.
+Filling the blanks is a few minutes of conversation, never paperwork. The first-days runbook's governance statement step specifies the minimum: mission in the owner's words, the cost boundary, and today's one to three priorities, dated. If the owner arrived with an urgent concrete task, help with that first and write the minimum governance statement as its close-out; usefulness precedes paperwork.
 
 ## Section 1, platform-constant: what a solet is
 
@@ -56,7 +56,7 @@ These are lived values extracted from the platform's operating history, not aspi
 
 The governance shape is four standing commitments that every solet inherits as written.
 
-- **The owner is final authority.** The owner ratifies the charter and its revisions, and rules on decision briefs.
+- **The owner is final authority.** The owner ratifies the governance statement and its revisions, and rules on decision briefs.
 - **Agents hold argued positions** in a standing-positions document and are expected to be opinionated there, including disagreeing with drift between stated priorities and actual effort. Positions are advocacy; rulings are law.
 - **Rulings get recorded in the same session they are given**, into memory, the standing-positions document, or the knowledge base, so no ruling has to be re-asked.
 - **Embracing change is a governance duty.** When direction shifts, the session that learns of the shift updates the standing documents immediately, so they never quietly diverge from reality.

@@ -12,24 +12,16 @@ consumer_profile: both
 #   - "iterm2 python api inject clear into the seat's own pane" ->
 #     agent_messaging_plugin/11_tmux_host_driver_presentation_iterm2_cc owns
 #     iterm2+pane vocabulary; this article absent from top ranks.
-#   - "restart a dead worker session and reclaim its role" ->
-#     1=authored_joseki/dispatch_managed_worker, 2=this article.
 #   - "curate the ambient memory index head back under budget" -> the word
 #     "ambient" collides with the neuro_ambient KB (ranks 1-4); rank 5 here.
 #   - "refresh a plugin's knowledge base process registry after editing
 #     process json" -> developer_operations + ananta_platform process-registry
 #     reference articles own the how-to (ranks 1-3); the card ranks 4.
 target_queries:
-  - "joseki card rotate a managed worker session clear and drive"
+  - "joseki card rotate a worker session clear and drive"
   - "seat self-rotation delegated helper drives the seat terminal"
   - "hydrate or drain the local memory passthrough projection"
   - "check how close a session is to its context window ceiling"
-  - "how to hand a delivered candidate through review and readiness to landing"
-  - "psolet delivered-to-review after a failed review or retired reviewer"
-  - "run reviewed-to-ready after the reviewer records PASS"
-  - "which repository can run psolet landing run dry-run"
-  - "author delivery report proposed landing commit message doc impact READY message"
-  - "a peer receipt is not landing authorization"
 
 # forbidden_min_rank is 2, not the platform-conventional 4, for the same reason
 # as 06_fleet_launcher_session_configuration.retrieval_test.yaml: the delegated
@@ -50,4 +42,4 @@ min_rank: 1
 forbidden_min_rank: 2
 
 process_key_assertions:
-  - "plugin::agent_messaging_plugin::peer_send_by_name" # interim Main-to-Git-Controller READY relay
+  - "plugin::agent_messaging_plugin::peer_send_by_name" # Worker rotation pickup

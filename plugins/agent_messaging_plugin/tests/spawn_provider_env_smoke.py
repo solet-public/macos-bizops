@@ -2,8 +2,7 @@
 """Per-spawn provider overlay: request parsing, host applicability, host spec, and one end-to-end spawn.
 
 Offline. The end-to-end leg uses the lifecycle smoke's in-memory state and fake
-host drivers (imported as a module, as spawn_first_go_smoke does), with lane
-worktree provisioning stubbed out because it needs an APP_HOME-derived checkout.
+host drivers (imported as a module).
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [
@@ -25,12 +23,15 @@ sys.path[:0] = [
 import session_lifecycle_verbs_smoke as base  # noqa: E402
 
 from agent_messaging_plugin import session_hosts  # noqa: E402
-from agent_messaging_plugin.plugin import _spawn_session_request_from_params  # noqa: E402
-from agent_messaging_plugin.register_unit_client import VerbError  # noqa: E402
+from agent_messaging_plugin.plugin import (  # noqa: E402
+    _SessionLifecyclePolicyConfig,
+    _spawn_session_request_from_params,
+)
 from agent_messaging_plugin.spawn_provider_env import (  # noqa: E402
     provider_env_host_spec,
     refuse_unapplied_provider_env,
 )
+from agent_messaging_plugin.verb_errors import VerbError  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -47,28 +48,28 @@ def _check(condition: object, label: str) -> None:
 
 
 _BASE_RAW: dict[str, object] = {
-    "role_class": "fixture",
-    "lane_id": "lane-provider-env",
-    "unit_id": "unt_provider_fixture",
-    "work_class": "dev",
-    "budget_line": "fixture",
     "agent_runtime": "claude_code",
+    "model": "fixture-model",
+    "effort": "high",
+    "workspace": "/",
+    "first_message": "fixture first message",
 }
+_POLICY = _SessionLifecyclePolicyConfig()
 _BEDROCK = {"CLAUDE_CODE_USE_BEDROCK": "1"}
 _PROXY_VALUE = "https://provider.example.invalid"
 _PROXY = {"ANTHROPIC_BASE_URL": _PROXY_VALUE}
 
 
 def test_parse_is_request_local() -> None:
-    first = _spawn_session_request_from_params({**_BASE_RAW, "provider_env": _BEDROCK}, "operator:test")
-    second = _spawn_session_request_from_params({**_BASE_RAW, "provider_env": _PROXY}, "operator:test")
-    unset = _spawn_session_request_from_params(dict(_BASE_RAW), "operator:test")
+    first = _spawn_session_request_from_params({**_BASE_RAW, "provider_env": _BEDROCK}, {"call_context": None}, _POLICY)
+    second = _spawn_session_request_from_params({**_BASE_RAW, "provider_env": _PROXY}, {"call_context": None}, _POLICY)
+    unset = _spawn_session_request_from_params(dict(_BASE_RAW), {"call_context": None}, _POLICY)
     _check(first.provider_env == _BEDROCK and second.provider_env == _PROXY, "two requests each carry their own overlay")
     _check(unset.provider_env == {} and unset.provider_env is not first.provider_env, "an omitted overlay parses to a fresh empty mapping")
     first.provider_env["INJECTED"] = "x"
     _check("INJECTED" not in second.provider_env and "INJECTED" not in unset.provider_env, "mutating one request's overlay leaves the others untouched")
     try:
-        _spawn_session_request_from_params({**_BASE_RAW, "provider_env": {"ANTHROPIC_BASE_URL": 1}}, "operator:test")
+        _spawn_session_request_from_params({**_BASE_RAW, "provider_env": {"ANTHROPIC_BASE_URL": 1}}, {"call_context": None}, _POLICY)
     except VerbError as exc:
         _check(exc.code == "provider_env_invalid", "a non-string overlay value is refused as provider_env_invalid")
     else:
@@ -76,9 +77,9 @@ def test_parse_is_request_local() -> None:
 
 
 def test_host_applicability_matrix() -> None:
-    claude = _spawn_session_request_from_params({**_BASE_RAW, "provider_env": _PROXY}, "operator:test")
+    claude = _spawn_session_request_from_params({**_BASE_RAW, "provider_env": _PROXY}, {"call_context": None}, _POLICY)
     codex = replace(claude, agent_runtime="codex")
-    unset = _spawn_session_request_from_params(dict(_BASE_RAW), "operator:test")
+    unset = _spawn_session_request_from_params(dict(_BASE_RAW), {"call_context": None}, _POLICY)
     refused: dict[str, str] = {}
     for label, request, host in (
         ("tmux", claude, "tmux"),
@@ -98,8 +99,8 @@ def test_host_applicability_matrix() -> None:
 
 
 def test_host_spec_entry() -> None:
-    claude = _spawn_session_request_from_params({**_BASE_RAW, "provider_env": _PROXY}, "operator:test")
-    unset = _spawn_session_request_from_params(dict(_BASE_RAW), "operator:test")
+    claude = _spawn_session_request_from_params({**_BASE_RAW, "provider_env": _PROXY}, {"call_context": None}, _POLICY)
+    unset = _spawn_session_request_from_params(dict(_BASE_RAW), {"call_context": None}, _POLICY)
     entry = provider_env_host_spec(claude)
     _check(dict(entry) == {"provider_env": _PROXY}, "a non-empty overlay is the only key of the host spec entry")
     _check(dict(provider_env_host_spec(unset)) == {}, "an ordinary spawn adds no host spec key")
@@ -154,16 +155,15 @@ def test_end_to_end_host_spec_carries_overlay_and_result_does_not_echo_it() -> N
     session_hosts._REGISTRY[key] = capturing  # noqa: SLF001 -- test seam
     overlay_value = "host-spec-fixture-value-5510"
     try:
-        with patch.object(base.lifecycle_verbs, "_provision_worktree_for_request", lambda *_a, **_k: None):
-            result = base.spawn_session(
-                state,
-                base._spawn_req(
-                    host="tmux",
-                    visibility="tmux",
-                    lane_id="lane-provider-env-host-spec",
-                    provider_env={"PROVIDER_FIXTURE_KEY": overlay_value},
-                ),
-            )
+        result = base.spawn_session(
+            state,
+            base._spawn_req(
+                host="tmux",
+                visibility="tmux",
+                label="label-provider-env-host-spec",
+                provider_env={"PROVIDER_FIXTURE_KEY": overlay_value},
+            ),
+        )
         _check(
             len(capturing.specs) == 1 and capturing.specs[0].get("provider_env") == {"PROVIDER_FIXTURE_KEY": overlay_value},
             "the tmux host spawn spec carries the provider overlay",

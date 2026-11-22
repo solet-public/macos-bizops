@@ -25,6 +25,8 @@ import tempfile
 import threading
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +50,7 @@ from agent_messaging_plugin.schema import (  # noqa: E402
     CELL_ACCEPTANCE_CROSSCHECK_CONFLICT,
     CELL_ACCEPTANCE_WITHDRAWN,
     TABLE_MODEL_CAPABILITY_CELL,
+    TABLE_MODEL_CAPABILITY_OBSERVATION,
     TABLE_MODEL_CAPABILITY_REFRESH_RUN,
 )
 
@@ -87,8 +90,19 @@ def _leaderboard(rows: Sequence[Sequence[str]]) -> str:
     return "<html><body><table><tbody>" + "".join(_row_html(row) for row in (*rows, *_FILLER_ROWS)) + "</tbody></table></body></html>"
 
 
-def _detail_fixture(score: str, cost: str) -> str:
-    return ("<html><body>Model summary|Intelligence|Updated|#|45| / |202|" + score + "|Artificial Analysis Intelligence Index|blah|" + cost + "|Cost per Intelligence Index task|blah</body></html>").replace("|", "<span></span>")  # tag-strip collapses these right back to '|' delimiters
+def _detail_fixture(score: str, cost: str, *, title: str = "") -> str:
+    head = f"<head><title>{title}</title></head>" if title else ""
+    return ("<html>" + head + "<body>Model summary|Intelligence|Updated|#|45| / |202|" + score + "|Artificial Analysis Intelligence Index|blah|" + cost + "|Cost per Intelligence Index task|blah</body></html>").replace("|", "<span></span>")  # tag-strip collapses these right back to '|' delimiters
+
+
+def _own_page_fixture(name: str, score: str, cost: str) -> str:
+    """A model's own detail page, titled as the live ones were up to 2026-11-13T23:15Z (recorded: 'Claude Sonnet 5.5 (high) - Intelligence, Performance & Price Analysis')."""
+    return _detail_fixture(score, cost, title=f"{name} - Intelligence, Performance &amp; Price Analysis | Artificial Analysis")
+
+
+def _family_fixture(family: str, score: str, cost: str) -> str:
+    """The page every detail URL has served since 2026-11-14T05:30Z (recorded: 'Claude Sonnet 5.5 Models - Intelligence, Performance & Price Comparison'): the family's, with its top-effort values."""
+    return _detail_fixture(score, cost, title=f"{family} Models - Intelligence, Performance &amp; Price Comparison | Artificial Analysis")
 
 
 def _handler(request: httpx.Request) -> httpx.Response:
@@ -162,7 +176,7 @@ def _check_single_source_cells(cells: list[dict[str, Any]]) -> None:
     fable_max = _find_cell(cells, "claude-fable-5-1", "max")
     sonnet_note = str(sonnet_max["disagreement_note"])
     _check(sonnet_max["acceptance"] == CELL_ACCEPTANCE_ACCEPTED and sonnet_max["capability_score"] == 38.0, "sonnet-5 max: detail fetch 404'd -> the leaderboard alone is accepted, no longer pending forever")
-    _check(sonnet_note.startswith("single source: detail page unavailable (http_error") and "404" in sonnet_note, "and the note says it is a single source and why")
+    _check(sonnet_note.startswith("single source: detail page unavailable (not_listed: the detail page was unavailable)"), "the cell note names its single-source fallback; the source-failure row above retains HTTP 404")
     _check(fable_max["acceptance"] == CELL_ACCEPTANCE_ACCEPTED and "parse_error" in str(fable_max["disagreement_note"]), "fable-5.1 max: a detail page that does not parse is the same single-source case, named")
     _check(sonnet_max["provider"] == "anthropic", "provider comes from the Claude Code adapter")
     _check(not [c for c in cells if c["acceptance"] == "pending_crosscheck"], "the refresh writes no pending_crosscheck cell")
@@ -191,7 +205,7 @@ def test_accepted_cell_is_immediately_servable() -> None:
     """Closes the loop this whole fix exists for: a real refresh run's accepted cell is exactly what unblocks `select_dispatch_tier`."""
     state = RealShapeState()
     _refresh(state, _handler)
-    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 30, "billing_objective": "metered_usd"}, now=_NOW)
+    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 30}, now=_NOW)
     _check(picked["selected"]["model"] == "gpt-6-astra" and picked["selected"]["effort"] == "max", "the cheapest cell the refresh accepted is what the selector now serves")
 
 
@@ -236,7 +250,7 @@ def test_a_new_model_is_selectable_with_no_code_change() -> None:
             _check(high["acceptance"] == CELL_ACCEPTANCE_ACCEPTED and len(high["agreeing_observation_ids"]) == 4, "two agreeing artifacts accept the exact score and cost")
         else:
             _check(high["acceptance"] == CELL_ACCEPTANCE_ACCEPTED and len(high["agreeing_observation_ids"]) == 2 and "single source" in str(high["disagreement_note"]), "one artifact accepts with a note naming the missing corroboration")
-        picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 50, "billing_objective": "metered_usd"}, now=datetime.now(UTC) + timedelta(minutes=1))
+        picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 50}, now=datetime.now(UTC) + timedelta(minutes=1))
         _check((picked["selected"]["model"], picked["selected"]["effort"]) == ("gpt-6.1-sol", "high"), "the accepted fresh cell is selectable under the existing provider policy")
 
 
@@ -264,6 +278,76 @@ def test_detail_score_parses_with_and_without_updated_token() -> None:
     _check(differing.fetch_status == "ok" and differing.value_number == 51.0, "a differing score is read as-is for the reconciler to compare")
     out_of_range = score_reading("Intelligence|#|28| / |226|250" + tail)
     _check(out_of_range.fetch_status == "parse_error" and out_of_range.value_number is None, "a score outside 0-100 is a parse_error, not a value")
+
+
+def test_a_family_page_is_not_a_detail_reading() -> None:
+    """The detail URL now serves the model family's page, whose score and cost are the family's top-effort values.
+    Read as this cell's own page it disagrees with every lower effort's leaderboard row (a gate nobody can pass,
+    rul_becb4bed); it is no reading at all, named as such, and a model's own page is still a reading."""
+    row = fetch.LeaderboardRow("Claude Sonnet 5.5 (high)", "Claude Sonnet 5.5", "high", "anthropic", "42", "$1.64", "claude-sonnet-5-5-high", "fixture")
+    cell = fetch.DiscoveredCell("claude_code", "anthropic", "claude-sonnet-5-5", "high", row, None)
+    at = "2026-11-14T11:15:00+00:00"
+    family = fetch.parse_model_detail_html(_family_fixture("Claude Sonnet 5.5", "55", "$10.02"), cell=cell, fetched_at=at)
+    _check(len(family) == 1 and (family[0].metric, family[0].fetch_status, family[0].value_number) == ("intelligence_index", "not_listed", None), "a family page is one not_listed score reading carrying no value")
+    _check(family[0].value_text == fetch.FAMILY_PAGE_NO_DETAIL == "family page: no per-effort detail", "and it names why")
+    _check(not any(reading.metric == "cost_per_task_usd" for reading in family), "the family's top-effort cost is not read either")
+    bare = fetch.parse_model_detail_html(_detail_fixture("55", "$10.02", title="Claude Sonnet 5.5 Models - Intelligence, Performance & Price Comparison | Artificial Analysis"), cell=cell, fetched_at=at)
+    _check(len(bare) == 1 and bare[0].fetch_status == "not_listed", "the title is recognised with a bare ampersand as well")
+    own = fetch.parse_model_detail_html(_own_page_fixture("Claude Sonnet 5.5 (high)", "42", "$1.64"), cell=cell, fetched_at=at)
+    _check([(reading.metric, reading.fetch_status, reading.value_number) for reading in own] == [("intelligence_index", "ok", 42.0), ("cost_per_task_usd", "ok", 1.64)], "a model's own page, titled with its effort, is still read as both metrics")
+    untitled = fetch.parse_model_detail_html(_detail_fixture("42", "$1.64"), cell=cell, fetched_at=at)
+    _check(untitled[0].fetch_status == "ok" and untitled[0].value_number == 42.0, "a page of any other shape is read as it always was: only the recognised family title is refused")
+
+
+_FAMILY_PAGE_ROWS: tuple[tuple[str, str, str, str, str, str], ...] = (
+    ("Claude Sonnet 5 (max)", "1M", "Anthropic", "38", "$5.09", "claude-sonnet-5"),
+    ("Claude Opus 5 (low)", "1M", "Anthropic", "39", "$1.10", "claude-opus-5-low"),
+)
+
+
+def _family_page_handler(request: httpx.Request) -> httpx.Response:
+    """A non-max effort's URL serves the family page, a max effort's URL serves its own agreeing page."""
+    path = request.url.path
+    if path == "/leaderboards/models":
+        return httpx.Response(200, text=_leaderboard(_FAMILY_PAGE_ROWS))
+    if path == "/models/claude-opus-5-low":
+        return httpx.Response(200, text=_family_fixture("Claude Opus 5", "55", "$10.02"))  # 16 points above its row: a conflict if it were read
+    if path == "/models/claude-sonnet-5":
+        return httpx.Response(200, text=_own_page_fixture("Claude Sonnet 5 (max)", "38", "$5.09"))
+    return httpx.Response(404, text="not found")
+
+
+def _check_family_page_cell(cells: list[dict[str, Any]]) -> None:
+    opus_low = _find_cell(cells, "claude-opus-5", "low")
+    note = str(opus_low["disagreement_note"])
+    _check(opus_low["acceptance"] == CELL_ACCEPTANCE_ACCEPTED and opus_low["capability_score"] == 39.0 and opus_low["cost_per_task_usd"] == 1.10, "a non-max cell whose detail URL serves the family page is accepted with its own leaderboard values")
+    _check(note.startswith("single source: detail page unavailable (") and fetch.FAMILY_PAGE_NO_DETAIL in note, "and the note says it is a single source and that the page was the family's")
+    _check(len(opus_low["agreeing_observation_ids"]) == 2, "it cites only the leaderboard's score and cost")
+
+
+def _check_own_page_cell(cells: list[dict[str, Any]]) -> None:
+    sonnet_max = _find_cell(cells, "claude-sonnet-5", "max")
+    _check(sonnet_max["acceptance"] == CELL_ACCEPTANCE_ACCEPTED and sonnet_max["capability_score"] == 38.0, "a max cell with a real agreeing detail page is accepted with the agreed score")
+    _check(len(sonnet_max["agreeing_observation_ids"]) == 4 and not sonnet_max["disagreement_note"], "and still takes the two-source path: four readings, no single-source note")
+
+
+def _check_family_page_run(state: RealShapeState, result: dict[str, Any]) -> None:
+    _check(result["cells_accepted"] == 2 and result["cells_conflicted"] == 0 and result["sources_failed"] == [], "the run counts both accepted, none conflicted, and no source failed (the family page was fetched fine)")
+    observations = state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_OBSERVATION)
+    family = [row for row in observations if row["source_id"] == fetch.SOURCE_MODEL_DETAIL_HTML and row["model"] == "claude-opus-5"]
+    _check(len(family) == 1 and (family[0]["fetch_status"], family[0]["value_number"], family[0]["value_text"]) == ("not_listed", None, fetch.FAMILY_PAGE_NO_DETAIL), "the family page is kept as evidence, named, with no value")
+
+
+def test_a_family_page_leaves_the_leaderboard_alone_and_a_models_own_page_still_corroborates() -> None:
+    """The refresh end to end: a non-max effort's URL serves the family page (the family's top-effort values), the max
+    effort's URL serves its own agreeing page. The non-max cell is accepted from its own leaderboard row with the
+    single-source note; the max cell still takes the two-source path."""
+    state = RealShapeState()
+    result = _refresh(state, _family_page_handler)
+    cells = read_cells(_typed(state))
+    _check_family_page_cell(cells)
+    _check_own_page_cell(cells)
+    _check_family_page_run(state, result)
 
 
 def _seed_cell(state: RealShapeState, model: str, effort: str, *, acceptance: str = CELL_ACCEPTANCE_ACCEPTED, clock: str | None = None) -> None:
@@ -306,7 +390,7 @@ def test_the_refresh_runs_the_harness_pass_with_the_real_lists() -> None:
     _check(rows[("claude-sonnet-5", "max")]["acceptance"] == CELL_ACCEPTANCE_WITHDRAWN and result["withdrawn_left"] == ["claude_code/claude-sonnet-5@max"], "a withdrawal made by a person survives a refresh whose readings reach the cell")
     _check(any("claude-gone" in line and "does not list" in line for line in result["advisories"]), "the absent models are named in the advisories")
     _check("withdrawn: the harness no longer lists them" in str(state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_REFRESH_RUN)[-1]["note"]), "the run row's note carries the harness pass")
-    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 30, "billing_objective": "metered_usd"}, now=datetime.now(UTC) + timedelta(minutes=1))
+    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 30}, now=datetime.now(UTC) + timedelta(minutes=1))
     _check(picked["excluded"]["not_accepted"] >= 2, "the selector counts the withdrawn cells as not_accepted")
 
 
@@ -323,7 +407,7 @@ def test_the_roster_is_gone() -> None:
     _check(not [name for name in names if hasattr(fetch, name)], "no hand-kept roster, slug rule or roster enumeration remains in the fetch module")
 
 
-def _operation_fixture(plugin: Any) -> tuple[Any, Any]:
+def _operation_fixture(plugin: Any) -> tuple[Any, Any, Any]:
     root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(root / "ananta/tests/core/actions"))
     from ananta.core.state.async_job_manager import AsyncJobManager
@@ -336,7 +420,7 @@ def _operation_fixture(plugin: Any) -> tuple[Any, Any]:
             record = {"created_at": datetime.now(UTC).isoformat(), **data["record"]}
             return super().write_state(namespace, {**data, "record": record}, calling_service, calling_namespace)
 
-    ledger = Ledger()
+    ledger = cast(Any, Ledger())
     ledger.rows["flows"] = [{"id": "smoke-flow", "status": "active", "trigger_type": "bridge_process_call"}]
     manager = AsyncJobManager(ledger, FlowRuntimeGraph(ledger))
     plugin.logger = logging.getLogger(plugin.name)
@@ -344,7 +428,7 @@ def _operation_fixture(plugin: Any) -> tuple[Any, Any]:
         plugin.orchestrator_ref = SimpleNamespace(async_job_manager=manager)
     else:
         plugin.orchestrator_ref.async_job_manager = manager
-    return manager, JobService(ledger, manager)
+    return manager, JobService(ledger, manager), ledger
 
 
 def _wait_operation(plugin: Any, service: Any, job_id: str, verb: str) -> dict[str, Any]:
@@ -375,54 +459,107 @@ def _assert_operation_outcome(job: dict[str, Any], verb: str, expected: dict[str
         assert job["error"] is None
 
 
-def prove_queued_operation(plugin: Any, verb: str, params: dict[str, Any], boundary: Any, attribute: str, value: Any, expected: dict[str, Any] | None, *, failure: bool = False) -> dict[str, Any]:
+def _assert_queued_before_work_completion(receipt: Any, work_completed: threading.Event, verb: str) -> None:
+    assert "job_id" in receipt.get("data", {}), f"{verb}: queued_receipt_before_work_completion: {receipt}"
+    assert not work_completed.is_set(), f"{verb}: queued_receipt_after_work_completion: {receipt}"
+
+
+def _assert_one_persisted_request(ledger: Any, job_id: str, verb: str) -> None:
+    with ledger.lock:
+        requests = [row for row in ledger.rows.get("job_payload", []) if row["payload_type"] == "request"]
+    assert len(requests) == 1 and requests[0]["job_id"] == job_id, f"{verb}: exactly_one_persisted_request_while_parked: {requests!r}"
+
+
+def _negative_control_inline_work() -> None:
+    """Run the real dispatch path with work executed inline before its receipt."""
+    from agent_messaging_plugin import plugin as module
+
+    plugin = module.AgentMessagingPlugin()
+    with patch.object(plugin, "_get_state_service", return_value=object()):
+        prove_queued_operation(plugin, "refresh_model_capability_catalog", {"trigger": "manual"}, module, "catalog_refresh", {"status": "ok"}, {"status": "ok"}, inline_work=True)
+
+
+def prove_queued_operation(plugin: Any, verb: str, params: dict[str, Any], boundary: Any, attribute: str, value: Any, expected: dict[str, Any] | None, *, failure: bool = False, inline_work: bool = False) -> dict[str, Any]:
     """Real platform dispatch and job retrieval, with only the work boundary replaced."""
     from ananta.core.actions.action_processor import ActionProcessor
     from ananta.core.plugins.plugin_manager import PluginManager
 
-    manager, service = _operation_fixture(plugin)
+    manager, service, ledger = _operation_fixture(plugin)
     touched: list[int] = []
+    entered = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    caller_thread: list[int] = []
 
     def slow(*args: Any, **kwargs: Any) -> Any:
         touched.append(threading.get_ident())
-        time.sleep(0.1)
-        if isinstance(value, Exception):
-            raise value
-        return value(*args, **kwargs) if callable(value) else value
+        entered.set()
+        assert release.wait(5), f"{verb}: worker_gate_timeout: touched={touched!r} release={release.is_set()}"
+        try:
+            if isinstance(value, Exception):
+                raise value
+            return value(*args, **kwargs) if callable(value) else value
+        finally:
+            completed.set()
 
     action = SimpleNamespace(id="queued-operation", process_key=f"plugin::{plugin.name}::{verb}", session_id="smoke-session", flow_id="smoke-flow", context_id=None, source_plugin=None, flow_token_id=None)
     processor = ActionProcessor(PluginManager())
-    with patch.object(boundary, attribute, side_effect=slow):
-        started = time.perf_counter()
-        receipt: Any = processor._execute_plugin_method(plugin, verb, params, cast(Any, action))  # pyright: ignore[reportPrivateUsage]
-        elapsed = time.perf_counter() - started
-        assert "job_id" in receipt.get("data", {}), f"{verb}: queued_receipt_before_work_completion: {receipt}"
-        assert elapsed < 0.05, f"{verb}: fast_return_bound: {elapsed}"
-        assert receipt["data"]["status"] == "queued"
-        job_id = receipt["data"]["job_id"]
-        request = manager.get_job_payload(job_id, "request")["data"]["payload"]
-        assert request["parameters"] == params, f"{verb}: durable_original_request"
-        job = _wait_operation(plugin, service, job_id, verb)
-    assert touched and threading.get_ident() not in touched, f"{verb}: work_must_run_off_caller"
+
+    def submit() -> Any:
+        caller_thread.append(threading.get_ident())
+        return processor._execute_plugin_method(plugin, verb, params, cast(Any, action))  # pyright: ignore[reportPrivateUsage]
+
+    def inline_submit(_plugin: Any, action_name: str, parameters: dict[str, Any], state: dict[str, Any], operation: Any) -> dict[str, Any]:
+        receipt = manager.create_job(
+            plugin_name=_plugin.name,
+            action_name=action_name,
+            request_data={"notes": f"{_plugin.name}.{action_name}", "parameters": parameters},
+            job_metadata={"session_id": state["session_id"], "flow_id": state["flow_id"]},
+        )
+        assert receipt["action_status"] == "completed", receipt
+        release.set()
+        operation(parameters)
+        return {"data": {"job_id": receipt["data"]["job_id"], "status": "queued"}}
+
+    with patch.object(boundary, attribute, side_effect=slow), patch.object(plugin._operation_jobs, "submit", side_effect=inline_submit) if inline_work else nullcontext():
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="queued-operation-caller") as executor:
+            started = time.perf_counter()
+            future = executor.submit(submit)
+            assert entered.wait(5), f"{verb}: worker_did_not_enter: touched={touched!r}"
+            try:
+                receipt = future.result(timeout=5)
+                elapsed = time.perf_counter() - started
+                _assert_queued_before_work_completion(receipt, completed, verb)
+                assert receipt["data"]["status"] == "queued"
+                job_id = receipt["data"]["job_id"]
+                _assert_one_persisted_request(ledger, job_id, verb)
+                request = manager.get_job_payload(job_id, "request")["data"]["payload"]
+                assert request["parameters"] == params, f"{verb}: durable_original_request"
+                state = service.get_job(job_id)["data"]["result"]["job"]
+                assert state["status"] not in {"completed", "error"}, f"{verb}: terminal_before_release: {state}"
+                result_read = manager.get_job_payload(job_id, "result")
+                assert result_read.get("action_status") != "completed", f"{verb}: result_before_release: {result_read}"
+            finally:
+                release.set()
+            job = _wait_operation(plugin, service, job_id, verb)
+    assert touched and caller_thread and caller_thread[0] not in touched, f"{verb}: work_must_run_off_caller"
     _assert_operation_outcome(job, verb, expected, value, failure)
-    print(f"  PASS  {plugin.name}.{verb}: fast receipt, persisted request, worker, job_service result/error")
+    print(f"  PASS  {plugin.name}.{verb}: queued receipt before parked work, persisted request, worker, job_service result/error (elapsed={elapsed:.6f}s)")
     return job
 
 
 def test_born_async_fleet_messaging_verbs() -> None:
     from agent_messaging_plugin import plugin as module
 
-    report = {"verdict": "not_stalled", "ready_and_owned_count": 2, "produced_count": 1, "advisories": []}
+    report = {"status": "ok", "advisories": []}
     for verb, attribute, params in (
         ("refresh_model_capability_catalog", "catalog_refresh", {"trigger": "manual"}),
         ("seed_model_capability_catalog", "catalog_seed", {}),
-        ("sweep_fleet_stall", "run_fleet_stall_sweep", {}),
-        ("sweep_fleet_stall_cron", "run_fleet_stall_sweep", {}),
     ):
         for failure in (False, True):
             plugin = module.AgentMessagingPlugin()
-            error = module.CatalogError("controlled_failure", "controlled failure") if "catalog" in verb else module.FleetStallSweepError("controlled failure")
-            with patch.object(plugin, "_get_state_service", return_value=object()), patch.object(plugin, "_fleet_stall_register_reader", return_value=object()):
+            error = module.CatalogError("controlled_failure", "controlled failure")
+            with patch.object(plugin, "_get_state_service", return_value=object()):
                 prove_queued_operation(plugin, verb, params, module, attribute, error if failure else report, {} if failure else report, failure=failure)
 
 
@@ -437,10 +574,15 @@ def _check(condition: object, label: str) -> None:
 
 
 def main() -> int:
+    if "--negative-control" in sys.argv:
+        _negative_control_inline_work()
+        return 0
     print("model_capability_refresh_smoke")
     test_born_async_fleet_messaging_verbs()
     test_the_roster_is_gone()
     test_detail_score_parses_with_and_without_updated_token()
+    test_a_family_page_is_not_a_detail_reading()
+    test_a_family_page_leaves_the_leaderboard_alone_and_a_models_own_page_still_corroborates()
     test_refresh_accepts_conflicts_and_names_single_sources()
     test_accepted_cell_is_immediately_servable()
     test_second_refresh_never_downgrades_a_prior_acceptance_on_thin_evidence()

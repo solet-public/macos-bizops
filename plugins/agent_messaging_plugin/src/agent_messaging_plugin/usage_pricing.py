@@ -350,14 +350,10 @@ def _cell_cost(row: Mapping[str, Any], cell: tuple[str, str, str]) -> float | No
 
 
 def estimate_for(
-    selection_receipt: Mapping[str, Any] | None,
     observed_tuples: Sequence[Mapping[str, Any] | tuple[str, str, str]],
     cells: Sequence[Mapping[str, Any]],
 ) -> Estimate:
-    """Use a selector cell estimate or look up the observed tuple in the catalog."""
-    if selection_receipt is not None:
-        return _receipt_estimate(selection_receipt)
-
+    """Look up the tuples the session actually ran in the catalog."""
     for observed in observed_tuples:
         cell = _observed_cell(observed)
         if cell is None:
@@ -366,16 +362,6 @@ def estimate_for(
         if estimate.usd is not None:
             return estimate
     return Estimate(None, "none", None)
-
-
-def _receipt_estimate(receipt: Mapping[str, Any]) -> Estimate:
-    cell = _selected_cell(receipt)
-    if cell is None:
-        return Estimate(None, "none", None)
-    selected = receipt.get("selected")
-    selected_cost = _count(selected.get("cost_per_task_usd")) if isinstance(selected, Mapping) else None
-    receipt_cost = selected_cost if selected_cost is not None else _count(receipt.get("cost_per_task_usd"))
-    return Estimate(None if receipt_cost is None else float(receipt_cost), "receipt", cell)
 
 
 def _observed_cell(observed: Mapping[str, Any] | tuple[str, str, str]) -> tuple[str, str, str] | None:

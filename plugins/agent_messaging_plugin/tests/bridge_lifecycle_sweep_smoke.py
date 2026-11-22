@@ -32,12 +32,6 @@ the roleless lane + the 40+ zombie-row class). Cases:
      regression-guarded. (A4, 2026-08-04: the REL-05 deaf-wake reconciler
      rider retired from this tick; D1's session sweep is the surviving rider
      this case now asserts survives a raising INF-02 sweep.)
-     ★ L4 (2026-08-17): the same guard now covers the rotation-surface rider.
-     It needs the guard MORE than the others do: the rider is wrapped in its
-     own try/except, so an un-wiring that leaves a duck-typed self without the
-     attribute raises INSIDE the guard and is logged, not failed — the tick
-     goes green while no notice is ever delivered. Asserting invocation is the
-     only thing that can tell "composed" from "composed and swallowed".
 
 Run:
     SOLET_NAME=<name>-test .venv/bin/python3 \
@@ -167,15 +161,12 @@ def _sweeper_cases() -> None:
     expired = sweeper.sweep_once()
     live_ids = {b.bridge_id for b in manager.list_active()}
     _check(
-        expired == [stale.bridge_id] and cleaned == [stale.bridge_id]
-        and live_ids == {fresh.bridge_id},
+        expired == [stale.bridge_id] and cleaned == [stale.bridge_id] and live_ids == {fresh.bridge_id},
         "B1 idle bridge expired + fully cleaned; fresh bridge untouched",
     )
 
     manager2 = _manager(idle_timeout_s=0)
-    manager2.open(solet_name="example-test").last_seen_at = (
-        datetime.now(UTC) - timedelta(seconds=5)
-    ).isoformat()
+    manager2.open(solet_name="example-test").last_seen_at = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
     ticked = threading.Event()
     sweeper2 = BridgeLifecycleSweeper(
         bridge_manager=manager2,
@@ -237,7 +228,12 @@ class _World:
         )
 
     def _notice(
-        self, *, peer_id: str, peer_agent_instance_id: str, prose: str, kind: str,
+        self,
+        *,
+        peer_id: str,
+        peer_agent_instance_id: str,
+        prose: str,
+        kind: str,
     ) -> bool:
         del peer_id, prose
         self.notices.append((peer_agent_instance_id, kind))
@@ -264,7 +260,8 @@ class _World:
     def holder_agi(self) -> str | None:
         try:
             return resolve_role_binding_v4(
-                cast("Any", self.state), SYS_AUTONOMIC_SLOT,
+                cast("Any", self.state),
+                SYS_AUTONOMIC_SLOT,
             ).agent_instance_id
         except RoleBindingVacantError:
             return None
@@ -335,8 +332,7 @@ def _purge_cases() -> None:
     registry = _Registry()
     removed = purge_preboot_bindings(registry)
     _check(
-        removed == 3 and sorted(registry.unregistered) == ["br-a", "br-b"]
-        and registry.rows == {},
+        removed == 3 and sorted(registry.unregistered) == ["br-a", "br-b"] and registry.rows == {},
         "D1 every pre-boot row purged, per source bridge",
     )
 
@@ -377,9 +373,7 @@ def _close_route_convergence_cases() -> None:
         bridge_id = opened.json()["bridge_id"]
         closed = client.post(f"/api/v1/bridge/{bridge_id}/close", json={})
     _check(
-        closed.status_code == 200
-        and calls == ["clear", "autonomic", "unregister"]
-        and manager.get(bridge_id) is None,
+        closed.status_code == 200 and calls == ["clear", "autonomic", "unregister"] and manager.get(bridge_id) is None,
         "E1 POST /close → identical cleanup sequence + bridge closed",
     )
 
@@ -424,20 +418,15 @@ def _sweep_tick_forwarded_rider_cases() -> None:
     fake_self = SimpleNamespace(
         _autonomic_assignment=autonomic,
         _run_session_lifecycle_sweep=lambda: swept.append("d1_sweep"),
-        _run_rotation_surface_sweep=lambda: swept.append("l4_rotation_surface"),
-
     )
     AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self))  # noqa: SLF001
     _check(
-        "forwarded.sweep_serve_timeouts" in calls
-        and "forwarded.gc_terminal_rows" in calls,
+        "forwarded.sweep_serve_timeouts" in calls and "forwarded.gc_terminal_rows" in calls,
         "F1 _on_sweep_tick INVOKES both INF-06 forwarded riders (sweep + GC)",
     )
     _check(
-        swept == ["d1_sweep", "l4_rotation_surface"],
-        "F1 _on_sweep_tick invokes the D1 session sweep AND the L4 rotation-surface "
-        "rider -- an un-invoked rider delivers no notice "
-        "however well it is tested",
+        swept == ["d1_sweep"],
+        "F1 _on_sweep_tick invokes the D1 session sweep -- an un-invoked rider does no work however well it is tested",
     )
 
     # A raising INF-02 completion sweep must NOT skip the forwarded riders or
@@ -454,21 +443,15 @@ def _sweep_tick_forwarded_rider_cases() -> None:
     fake_self2 = SimpleNamespace(
         _autonomic_assignment=autonomic2,
         _run_session_lifecycle_sweep=lambda: swept.append("d1_sweep"),
-        _run_rotation_surface_sweep=lambda: swept.append("l4_rotation_surface"),
-
     )
     AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self2))  # noqa: SLF001
     _check(
-        "forwarded.sweep_serve_timeouts" in calls
-        and "forwarded.gc_terminal_rows" in calls
-        and swept == ["d1_sweep", "l4_rotation_surface"],
-        "F2 a RAISING INF-02 sweep does not skip the forwarded riders / D1 sweep / "
-        "L4 rotation surface",
+        "forwarded.sweep_serve_timeouts" in calls and "forwarded.gc_terminal_rows" in calls and swept == ["d1_sweep"],
+        "F2 a RAISING INF-02 sweep does not skip the forwarded riders / D1 sweep",
     )
 
-    # F3 — the fault-isolation runs BOTH ways: a raising D1 sweep must not cost
-    # the tick its L4 notices, and a raising L4 rider must not cost the D1
-    # sweep. The two are separate try/excepts precisely so neither can.
+    # F3 — a raising D1 sweep is logged by the tick's own guard and never
+    # escapes it: the sweeper's single outer guard would otherwise abort the tick.
     def _d1_boom() -> None:
         raise RuntimeError("D1 sweep fault")
 
@@ -481,32 +464,11 @@ def _sweep_tick_forwarded_rider_cases() -> None:
     fake_self3 = SimpleNamespace(
         _autonomic_assignment=autonomic3,
         _run_session_lifecycle_sweep=_d1_boom,
-        _run_rotation_surface_sweep=lambda: swept.append("l4_rotation_surface"),
-
     )
     AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self3))  # noqa: SLF001
     _check(
-        swept == ["l4_rotation_surface"],
-        "F3 a RAISING D1 sweep does not skip the L4 rotation-surface rider",
-    )
-
-    def _l4_boom() -> None:
-        raise RuntimeError("L4 rotation-surface fault")
-
-    swept.clear()
-    fake_self4 = SimpleNamespace(
-        _autonomic_assignment=SimpleNamespace(
-            completions=SimpleNamespace(sweep_serve_timeouts=lambda: None),
-            forwarded=_ForwardedRiderSpy(calls),
-        ),
-        _run_session_lifecycle_sweep=lambda: swept.append("d1_sweep"),
-        _run_rotation_surface_sweep=_l4_boom,
-
-    )
-    AgentMessagingPlugin._on_sweep_tick(cast("Any", fake_self4))  # noqa: SLF001
-    _check(
-        swept == ["d1_sweep"],
-        "F3 a RAISING L4 rotation-surface rider does not skip the D1 sweep",
+        "forwarded.gc_terminal_rows" in calls and swept == [],
+        "F3 a RAISING D1 sweep does not escape _on_sweep_tick",
     )
 
 

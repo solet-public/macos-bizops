@@ -1,4 +1,4 @@
-Tags: seat, running_log, handoff, obligations, rotation, authorizations, coordinator, git_controller, durable_knowledge
+Tags: seat, running_log, handoff, obligations, rotation, authorizations, coordinator, landing_seat, durable_knowledge
 
 Article Layer: 2
 
@@ -6,7 +6,7 @@ Embedding Description: What a seat's running log must contain across a rotation 
 
 # Seat Running-Log Convention
 
-A seat (a primary or driving session, a coordinator, Git-Controller, a long-running lane) keeps a running log across its own lifetime: a single growing file under `workbench/`, newest entry last, that lets the seat itself — and whichever session inherits the role after a rotation, restart, or `/clear` — reconstruct what happened without replaying the full conversation transcript.
+A seat (a primary or driving session, a coordinator, the platform's own development checkout's Git-Controller, a long-running lane) keeps a running log across its own lifetime: a single growing file under `workbench/`, newest entry last, that lets the seat itself — and whichever session inherits the role after a rotation, restart, or `/clear` — reconstruct what happened without replaying the full conversation transcript.
 
 **Before this article existed, this convention was transmitted only by example.** No durable article specified what a running log must contain; each seat wrote one because the previous seat's log looked a certain way, and the shape drifted informally from instance to instance. That gap was discovered measured (R1, 2026-08-17, below) rather than assumed — a repo-wide search for "running log" outside `workbench/` returned zero hits in `ananta/knowledge_bases/`, `plugins/*/knowledge_base/`, or `knowledge_bases/`. This article is the fix: the durable surface a fresh seat can read instead of inferring the shape from a predecessor's file.
 
@@ -32,7 +32,7 @@ The creation-time requirement is the entire point. An obligation recorded only w
 
 Write an OBLIGATIONS entry the instant the obligation exists, before doing anything else with it:
 
-- **Readiness owed** — the seat has told another party (a peer, Git-Controller) that it will make a unit ready to land, but has not recorded that unit's `psolet db landing-authorization ready` receipt yet. Since `iss_ffee3a36` that receipt is the whole landing authorization; no message authorizes a landing. Record: which unit, who is waiting, and the readiness event id once recorded (which retires the entry).
+- **Readiness owed** — the seat has told another party (a peer, or the platform's own development checkout's Git-Controller) that it will make a candidate ready to land, but has not recorded the candidate's `landing-authorization ready` receipt yet. Since `iss_ffee3a36` that receipt is the whole landing authorization; no message authorizes a landing. Record: which candidate, who is waiting, and the readiness event id once recorded (which retires the entry).
 - **Ruling owed** — the seat has been asked a question that requires its decision, and has not yet answered. Record: who asked, what the question is, by when if there's a deadline.
 - **Retirement owed** — the seat has committed to closing something out (retiring a stale binding, releasing a held resource, tearing down a transient grant) and has not yet done so.
 
@@ -40,7 +40,7 @@ Each entry is retired in place (struck through or moved to a "retired this cycle
 
 ### Motivating incident (R1, measured 2026-08-17)
 
-`lane-release-pointer` reached gate-green with a commit request at Git-Controller at 03:53Z. The predecessor seat's approval for that request existed only as an in-conversation act — never sent as a first-party message Git-Controller could read in its own inbox. Git-Controller correctly refused the lane's relayed quotation of that approval (a relayed assent is never a substitute for a first-party authorization — see the git-controller-commit skill's pre-authorization exception). The seat then rotated without ever sending the authorization it owed. The lane escalated twice and eventually handed off with the work still blocked. The authorization was finally sent roughly **8 hours 20 minutes** after the work went gate-green, by the *next* seat, once it reconstructed what was owed. (That message-based intake has since been replaced by register-state readiness, `iss_ffee3a36`; the lesson about carrying an owed act across a rotation is unchanged.)
+In the platform's own development checkout, `lane-release-pointer` reached gate-green with a commit request at Git-Controller at 03:53Z. The predecessor seat's approval for that request existed only as an in-conversation act — never sent as a first-party message Git-Controller could read in its own inbox. Git-Controller correctly refused the lane's relayed quotation of that approval (a relayed assent is never a substitute for a first-party authorization — see the git-controller-commit skill's pre-authorization exception). The seat then rotated without ever sending the authorization it owed. The lane escalated twice and eventually handed off with the work still blocked. The authorization was finally sent roughly **8 hours 20 minutes** after the work went gate-green, by the *next* seat, once it reconstructed what was owed. (That message-based intake has since been replaced by register-state readiness, `iss_ffee3a36`; the lesson about carrying an owed act across a rotation is unchanged.)
 
 The v9/v10 running logs in use at the time had a section for authorizations the seat had **issued** — a record of what it had done — and no section for authorizations the seat still **owed** — a record of what it still had to do. The seat could account for its past actions but had nowhere to carry an open commitment forward. The OBLIGATIONS slot above is the fix: a pending authorization is seat state, and seat state that lives only in a conversation dies with the session holding it.
 
@@ -50,7 +50,7 @@ On 2026-08-17, within hours of this slot being written, the same wave that
 specified it produced its own instances of it — recorded at creation time,
 not reconstructed after the fact:
 
-- The seat deferred restarting a long-lived Git-Controller process (the R6
+- The seat deferred restarting a long-lived Git-Controller process in the platform's own development checkout (the R6
   incident above involves the same seat) rather than interrupt a live
   landing wave with a kill-and-relaunch. The deferral itself was written
   down as a retirement owed the moment it was decided, in the seat's own
@@ -75,4 +75,4 @@ A seat's running-log file under `workbench/`, and every predecessor of it, is an
 ## 4) Related conventions
 
 - `coordinator_dispatch_discipline.md` — the analogous discipline for a coordinator's outbound dispatches (declare `expected_path` / `expected_completion_signal` at dispatch time, not reconstructed at watchdog time). The OBLIGATIONS slot is the seat-level counterpart: declare what you owe at the moment you come to owe it.
-- The Git-Controller commit procedure's register-state authorization (`iss_ffee3a36`) — the consumer-side rule that makes readiness load-bearing: both Git-Controllers act only on a unit whose `landing-authorization intake` answers `ready: true`, never on a message, relay or citation. An OBLIGATIONS entry for "readiness owed" exists because the obligation isn't discharged until that receipt is actually recorded.
+- The platform's own development checkout's Git-Controller commit procedure, with its state-backed authorization (`iss_ffee3a36`) — the consumer-side rule that makes readiness load-bearing: both Git-Controllers act only on a candidate whose `landing-authorization intake` answers `ready: true`, never on a message, relay or citation. An OBLIGATIONS entry for "readiness owed" exists because the obligation isn't discharged until that receipt is actually recorded.

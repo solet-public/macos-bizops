@@ -168,7 +168,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal, cast
@@ -279,10 +279,10 @@ _CHILD_ENVIRONMENT_KEYS: tuple[str, ...] = (
     "SOLET_WORKSPACE_ROOT",
     "XDG_RUNTIME_DIR",
     "HOME",
-    "PROJECT_SOLET_DESK_TEST_DSN",
     "PRIVATE_TEST_PG_MANIFEST",
     battery_admission.DIRECTORY_ENV,
     battery_admission.INHERITED_ENV,
+    "HOST_HEAVY_LEASE_DIR",
 )
 # These are not caller configuration.  The runner-under-test receives them
 # from ``run_smokes_host_lock_smoke.py`` and must carry them to its child: that
@@ -546,9 +546,17 @@ def _candidate_path_exists(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+_RUNNER_SCRATCH_PREFIX = "workbench/.scratch/"
+
+
+def _is_runner_scratch(root: Path, path: Path) -> bool:
+    """Runner scratch is a byproduct other smokes create and delete, not candidate source."""
+    return path.relative_to(root).as_posix().startswith(_RUNNER_SCRATCH_PREFIX)
+
+
 def _indexed_candidate_paths(root: Path, output: bytes) -> tuple[Path, ...]:
-    """Resolve existing index entries, excluding an unstaged deletion."""
-    return tuple(path for item in output.split(b"\0") if item for path in (root / item.decode("utf-8"),) if _candidate_path_exists(path))
+    """Resolve existing index entries, excluding an unstaged deletion and runner scratch."""
+    return tuple(path for item in output.split(b"\0") if item for path in (root / item.decode("utf-8"),) if not _is_runner_scratch(root, path) and _candidate_path_exists(path))
 
 
 def _candidate_paths_for_digest(root: Path) -> tuple[Path, ...]:
@@ -561,8 +569,8 @@ def _candidate_paths_for_digest(root: Path) -> tuple[Path, ...]:
     validation below.
     A focused fixture or an intentionally Git-free candidate has no such
     index, so it falls back to a complete recursive census.  Generated venv
-    and cache artifacts are excluded in both cases: they are runner byproducts,
-    not candidate source bytes.
+    and cache artifacts and ``workbench/.scratch`` are excluded in both cases:
+    they are runner byproducts, not candidate source bytes.
     """
     # Listing a minimal born-seed runner needs no candidate/Git dependencies.
     from quality_gates.git_environment import scrubbed_git_environment
@@ -585,7 +593,7 @@ def _candidate_paths_for_digest(root: Path) -> tuple[Path, ...]:
         names[:] = sorted(name for name in names if name not in ignored_directories)
         for filename in sorted(filenames):
             path = Path(directory) / filename
-            if path.suffix in {".pyc", ".pyo"}:
+            if path.suffix in {".pyc", ".pyo"} or _is_runner_scratch(root, path):
                 continue
             paths.append(path)
     return tuple(sorted(paths))
@@ -966,20 +974,36 @@ def _read_serial_only(schedule: Path) -> frozenset[str]:
     return frozenset(entries)
 
 
+def _declared_source_candidates(root: Path, entry: object) -> tuple[str, list[Path]]:
+    """Validate one declaration entry and expand its target-tree paths."""
+    if not isinstance(entry, dict) or entry.get("kind") not in {"required", "glob", "optional"} or not isinstance(entry.get("path"), str):
+        raise ValueError(f"invalid lane source root entry: {entry!r}")
+    kind = entry["kind"]
+    path = entry["path"]
+    relative = Path(path)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise OSError(f"lane source root escapes target tree: {path}")
+    candidates = sorted(root.glob(path)) if kind == "glob" else [root / relative]
+    return kind, candidates
+
+
 def _import_roots(root: Path) -> list[Path]:
-    """Enumerate this runner tree's sources ahead of installed editable roots."""
+    """Read this tree's declared sources ahead of installed editable roots."""
     root = root.resolve()
-    platform = root / "ananta" / "src"
-    if not platform.is_dir() or not os.access(platform, os.R_OK | os.X_OK):
-        raise OSError(f"required source root missing or unreadable: {platform}")
-    roots = [platform]
-    plugins = root / "plugins"
-    if plugins.is_dir():
-        roots.extend(sorted(child / "src" for child in plugins.iterdir() if (child / "src").is_dir()))
-    for package in ("solet_setup_contracts", "solet_cli"):
-        source = root / package / "src"
-        if source.is_dir():
-            roots.append(source)
+    declaration = root / "quality_gates" / "lane_source_roots.json"
+    data = json.loads(declaration.read_text(encoding="utf-8"))
+    if data.get("version") != 1 or not isinstance(data.get("roots"), list):
+        raise ValueError(f"invalid lane source roots declaration: {declaration}")
+    roots: list[Path] = []
+    for entry in data["roots"]:
+        kind, candidates = _declared_source_candidates(root, entry)
+        for source in candidates:
+            if not source.resolve().is_relative_to(root):
+                raise OSError(f"lane source root escapes target tree: {source}")
+            if kind == "required" and (not source.is_dir() or not os.access(source, os.R_OK | os.X_OK)):
+                raise OSError(f"required source root missing or unreadable: {source}")
+            if source.is_dir():
+                roots.append(source)
     return roots
 
 
@@ -1020,6 +1044,7 @@ def _run_one(
     python: Path,
     smoke: Path,
     supervisor: _SmokeProcessSupervisor | None = None,
+    capture: Mapping[str, Any] | None = None,
 ) -> tuple[_Verdict, str, int]:
     """Run a single smoke to its natural exit; return (verdict, captured_output, exit_code).
 
@@ -1031,16 +1056,21 @@ def _run_one(
     this runner can or should second-guess.
     """
     active_supervisor = supervisor or _scratch_runtime().select_supervisor(lambda: _SmokeProcessSupervisor(_MAX_SMOKE_STARTS_PER_WINDOW, _SMOKE_START_WINDOW_SECONDS))
-    proc = _start_smoke(python, smoke, active_supervisor)
+    proc = _start_smoke(python, smoke, active_supervisor, capture)
     return _wait_for_smoke(proc, active_supervisor, smoke)
 
 
-def _start_smoke(python: Path, smoke: Path, supervisor: _SmokeProcessSupervisor) -> subprocess.Popen[str]:
-    """Start one smoke in a session owned by the supervisor."""
+def _start_smoke(python: Path, smoke: Path, supervisor: _SmokeProcessSupervisor, capture: Mapping[str, Any] | None = None) -> subprocess.Popen[str]:
+    """Start one smoke in a session owned by the supervisor, under the recorder's worker when its attempt is captured."""
+    command = [str(python), str(smoke)]
+    if capture is not None and (record := capture.get(smoke.relative_to(_REPO_ROOT).as_posix())) is not None:
+        from quality_gates.smoke_read_store import worker_command
+
+        command = worker_command(python, _REPO_ROOT, smoke, record)
     supervisor.reserve_start()
     with _scratch_runtime().defer_signals():
         proc = subprocess.Popen(
-            [str(python), str(smoke)],
+            command,
             cwd=_REPO_ROOT,
             env=_child_environment(python),
             stdout=subprocess.PIPE,
@@ -1119,6 +1149,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--list", action="store_true", help="List the register and exit.")
     parser.add_argument("--proof-request", type=Path, help="Run the computed platform-smoke-proof/v1 selection with clean-only reuse.")
     parser.add_argument("--proof-output", type=Path, help="Write the selected-run structured receipt.")
+    parser.add_argument("--record-reads", action="store_true", help="With --proof-request: run each miss under the read recorder so a clean pass can leave a certificate (slower).")
     parser.add_argument("--results-output", type=Path, help="Retain all original full-battery attempts for a scheduled campaign.")
     parser.add_argument(
         "--campaign",
@@ -1157,15 +1188,21 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _capture_kwargs(capture: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Name a capture only when there is one, so a fixture that wraps ``_run_timed`` or ``_run_suite`` keeps its call shape."""
+    return {} if capture is None else {"capture": capture}
+
+
 def _run_timed(
     python: Path,
     entry: str,
     supervisor: _SmokeProcessSupervisor,
+    capture: Mapping[str, Any] | None = None,
 ) -> tuple[_Verdict, str, float, int | None]:
     """Run one smoke; return ``(verdict, output, elapsed_seconds, exit_code)``."""
     start = time.monotonic()
     try:
-        verdict, output, exit_code = _run_one(python, _REPO_ROOT / entry, supervisor)
+        verdict, output, exit_code = _run_one(python, _REPO_ROOT / entry, supervisor, capture)
     except SmokeStartRateError as exc:
         verdict, output, exit_code = "failed", f"START-RATE-FUSE: {exc}", None
     return verdict, output, time.monotonic() - start, exit_code
@@ -1293,6 +1330,7 @@ def _run_serial_phase(
     python: Path,
     serial_entries: list[str],
     supervisor: _SmokeProcessSupervisor,
+    capture: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, tuple[_Verdict, str, float, int | None]], float]:
     """Run each serial smoke under the per-user host lock, releasing between smokes.
 
@@ -1310,7 +1348,7 @@ def _run_serial_phase(
         handle, waited = _acquire_host_serial_lock()
         host_lock_wait_seconds += waited
         try:
-            results[entry] = _run_timed(python, entry, supervisor)
+            results[entry] = _run_timed(python, entry, supervisor, **_capture_kwargs(capture))
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
             handle.close()
@@ -1349,6 +1387,7 @@ def _run_suite(
     *,
     smoke_results: dict[str, _SmokeResult] | None = None,
     harness: list[str] | None = None,
+    capture: Mapping[str, Any] | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str], float]:
     """Run every smoke in ``entries``; return ``(skipped, failures, missing, harness, host_lock_wait_seconds)``.
 
@@ -1376,10 +1415,10 @@ def _run_suite(
     print(f"Running {len(entries)} gate-eligible smokes (no execution deadline; each runs to its natural exit)\n")
     present_set, pooled, serial_entries = _phase_entries(entries, serial_only)
     supervisor = _scratch_runtime().select_supervisor(lambda: _SmokeProcessSupervisor(_MAX_SMOKE_STARTS_PER_WINDOW, _SMOKE_START_WINDOW_SECONDS))
-    serial_results, host_lock_wait_seconds = _run_serial_phase(python, serial_entries, supervisor)
+    serial_results, host_lock_wait_seconds = _run_serial_phase(python, serial_entries, supervisor, capture)
 
     def _run_unit(unit: tuple[str, ...]) -> list[tuple[_Verdict, str, float, int | None]]:
-        return [_run_timed(python, entry, supervisor) for entry in unit]
+        return [_run_timed(python, entry, supervisor, **_capture_kwargs(capture)) for entry in unit]
 
     units = _schedule_units(pooled)
     workers = max(1, jobs)
@@ -1444,7 +1483,9 @@ def _run_suite_with_environment(
     harness: list[str] | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str], float]:
     """Admit this battery before running each selected smoke once."""
-    with battery_admission.admit(args.jobs, getattr(args, "priority", None)):
+    register = getattr(args, "register", None)
+    job_kind = "full_battery" if register is not None and register.resolve() == _DEFAULT_REGISTER.resolve() else "landing_battery"
+    with battery_admission.admit(args.jobs, getattr(args, "priority", None), job_kind=job_kind, reference_workers=_DEFAULT_JOBS):
         return _run_admitted_suite(entries, args, serial_only, smoke_results=smoke_results, harness=harness)
 
 
@@ -1497,8 +1538,8 @@ def _run_selected_suite(
     smoke_results: dict[str, _SmokeResult] | None = None,
     harness: list[str] | None = None,
 ) -> tuple[list[str], list[str], list[str], list[str], float]:
-    """Run each selected smoke once on the chosen interpreter."""
-    return _run_suite(python, entries, args.jobs, serial_only, smoke_results=smoke_results, harness=harness)
+    """Run each selected smoke once on the chosen interpreter, recording the reads of those the caller's capture names."""
+    return _run_suite(python, entries, args.jobs, serial_only, smoke_results=smoke_results, harness=harness, **_capture_kwargs(getattr(args, "read_capture", None)))
 
 
 def _summarize(

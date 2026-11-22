@@ -106,7 +106,7 @@ def selected_declarations_and_owner_aliases() -> None:
     for provider in {*_REGISTERED_JOB_OPERATIONS, *_REGISTERED_OWNER_ALIASES}:
         module = importlib.import_module(f"ananta.services.{provider}.interfaces.public")
         scanner._scan_module_classes(module, module.__name__, processes)
-    assert sum(map(len, _REGISTERED_JOB_OPERATIONS.values())) == 180
+    assert sum(map(len, _REGISTERED_JOB_OPERATIONS.values())) == 186
     assert sum(map(len, _REGISTERED_OWNER_ALIASES.values())) == 16
     for provider, names in {**_REGISTERED_JOB_OPERATIONS, **_REGISTERED_OWNER_ALIASES}.items():
         for name in names:
@@ -119,7 +119,7 @@ def selected_declarations_and_owner_aliases() -> None:
         for provider, names in _REGISTERED_OWNER_ALIASES.items():
             for name in names:
                 owner_alias_case(processes, provider, name, names, temporary)
-    print("PASS 179_explicit_framework_entries, 16_bound_owner_alias_contracts, unchanged_point_reader_and_serial_ledger_owner")
+    print("PASS 186_explicit_framework_entries, 16_bound_owner_alias_contracts, unchanged_point_reader_and_serial_ledger_owner")
 
 
 def assert_selected_declaration(entry: Any) -> None:
@@ -195,6 +195,79 @@ def owner_alias_case(processes: dict[str, Any], provider: str, name: str, names:
     result = manager.get_job_payload(job_id, "result")["data"]
     assert isinstance(result, dict) and isinstance(result["payload"], dict)
     assert result["payload"]["data"]["operation"] == name
+
+
+class LedgerSchedulerDouble:
+    """Parks the clear-by-tag call, so only an admitted verb can return meanwhile."""
+
+    def __init__(self) -> None:
+        self.clear_threads: list[str] = []
+        self.entered, self.release = threading.Event(), threading.Event()
+
+    def clear_scheduled_actions_by_tag(self, tag: str) -> dict[str, object]:
+        self.clear_threads.append(threading.current_thread().name)
+        self.entered.set()
+        self.release.wait(2)
+        return {"data": {"cleared_count": 0, "tag": tag}}
+
+    def create_cron_schedule(self, **values: object) -> dict[str, object]:
+        return {"data": {"schedule_id": "sched-owned"}}
+
+
+def ledger_schedule_admission() -> None:
+    """The three ledger schedule-install verbs return a receipt before the scheduler clear runs.
+
+    A scheduler double parks the clear-by-tag call on an event. A synchronous
+    verb cannot return while it is parked; an admitted one returns the receipt
+    at once and runs the unchanged body on the registered owner worker thread.
+    """
+    processes: dict[str, Any] = {}
+    module = importlib.import_module("ananta.services.session_ledger_service.interfaces.public")
+    ServiceInterfaceScanner(InvocationSchemaGenerator())._scan_module_classes(module, module.__name__, processes)
+    verbs = {"ensure_periodic_poll_schedule": "ledger:periodic_poll", "ensure_periodic_summarize_schedule": "ledger:periodic_summarize", "ensure_periodic_embed_schedule": "ledger:periodic_embed"}
+    for verb, default_tag in verbs.items():
+        ledger_schedule_case(processes, verb, default_tag)
+    print("PASS ledger_schedule_admission: three_verbs_receipt_before_clear, owner_worker_runs_body, direct_call_unchanged")
+
+
+def ledger_schedule_case(processes: dict[str, Any], verb: str, default_tag: str) -> None:
+    """Admit one verb through the real processor and read back receipt, thread, result and routing."""
+    from ananta.core.event_orchestrator import EventOrchestrator
+    from ananta.core.orchestration.execution_context import ExecutionContextManager
+    from ananta.services.discovery_service.service import DiscoveryService
+    from ananta.services.session_ledger_service.service import SessionLedgerService
+
+    state, manager, token_id, _completed = manager_fixture()
+    scheduler = LedgerSchedulerDouble()
+    service: Any = SessionLedgerService.__new__(SessionLedgerService)
+    service._scheduling_service = scheduler
+    orchestrator: Any = EventOrchestrator.__new__(EventOrchestrator)
+    orchestrator.async_job_manager = manager
+    orchestrator.action_recorder = None
+    orchestrator.get_service = lambda name: service
+    discovery: Any = DiscoveryService.__new__(DiscoveryService)
+    discovery.processes = processes
+    contexts = ExecutionContextManager()
+    contexts.create_context("flow")
+    processor = ActionProcessor(PluginManager(), state_service=cast(Any, state), orchestrator=orchestrator, process_registry={"processes": processes}, execution_context_manager=contexts, discovery_service=discovery)
+    completions: list[tuple[str, str]] = []
+    manager.set_registered_completion_handler(lambda action_id, status, _result, _error: completions.append((action_id, status)))
+    action = FixtureAction("action", f"service_interface::session_ledger_service::{verb}", "{}", "ledger schedule admission", "now", session_id="s", flow_id="flow", flow_token_id=token_id)
+    response = cast(dict[str, Any], processor.execute_action(action))
+    receipt: Any = response.get("data")
+    assert response["success"] is True and sorted(receipt or {}) == ["job_id", "status"], f"{verb} ran before returning a receipt: {response}"
+    assert scheduler.entered.wait(2) and not scheduler.release.is_set(), f"{verb} receipt must return while the scheduler clear is parked"
+    scheduler.release.set()
+    thread = manager._owners["session_ledger_service"]._thread
+    assert thread is not None
+    thread.join(5)
+    assert not thread.is_alive(), f"{verb} owner worker did not finish"
+    assert scheduler.clear_threads == ["registered-session_ledger_service"], (verb, scheduler.clear_threads)
+    payload = cast(dict[str, Any], manager.get_job_payload(str(receipt["job_id"]), "result"))["data"]["payload"]
+    assert (payload["schedule_id"], payload["tag"]) == ("sched-owned", default_tag), (verb, payload)
+    assert completions == [("action", "completed")], (verb, completions)
+    direct = getattr(service, verb)()
+    assert direct["schedule_id"] == "sched-owned" and "job_id" not in direct, (verb, direct)
 
 
 def plugin_result(data: dict[str, object]) -> dict[str, object]:
@@ -396,7 +469,7 @@ def scheduler_plugin_case(provider: str, verb: str, health: Any, scheduler: Any)
 
 def conditional_response_routing() -> None:
     """The same async declaration routes bounded results and defers owned jobs."""
-    key = "plugin::agent_messaging_plugin::report_managed_dispatch"
+    key = "plugin::conditional-route-fixture::report"
     for has_job in (False, True):
         state, manager, token_id, _completed = manager_fixture()
         state.rows["action_events"] = [{"id": "action", "flow_token_id": token_id}]
@@ -932,6 +1005,7 @@ def main() -> int:
     scheduler_plugin_single_admission()
     ordinary_plugin_admission()
     selected_declarations_and_owner_aliases()
+    ledger_schedule_admission()
     conditional_response_routing()
     test_continuation_guards_preserve_owned_token_routing()
     test_registered_route_and_explicit_handler_precedence()

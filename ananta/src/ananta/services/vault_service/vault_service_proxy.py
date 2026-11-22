@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 from ananta.core.domain.types import ActionResult
 from ananta.core.services.call_context import CallContext
 from ananta.interfaces.credential_contracts import MetadataRequest, MetadataResult, UseRequest, UseResult
+from ananta.services.vault_service.interfaces.public import ExternalKeychainReader, ExternalKeychainReadError
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from ananta.interfaces.vault_service_interface import VaultServiceInterface
@@ -214,6 +215,13 @@ class VaultServiceProxy:
     def metadata(self, request: MetadataRequest) -> MetadataResult:
         """Project approved metadata under the same bound caller context."""
         return self._vault_service.metadata(request, call_context=self._call_context)
+
+    def read_external_keychain(self, service: str) -> str | None:
+        """Read an approved external credential under this bound caller."""
+        provider = self._vault_service
+        if not isinstance(provider, ExternalKeychainReader):
+            raise ExternalKeychainReadError("The bound vault cannot read external Keychain items.")
+        return provider.read_external_keychain(service, call_context=self._call_context)
 
     def delete(self, key: str) -> ActionResult:
         return self._vault_service.delete(key, call_context=self._call_context)

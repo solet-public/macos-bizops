@@ -860,12 +860,22 @@ class SessionLedgerIngestAPI(ABC):
                 type=ParameterType.BOOLEAN,
                 required=False,
                 description="False previews counts without mutation; True irreversibly deletes eligible orphan event-text blobs.",
-            )
+            ),
+            "after": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description="Where this batch starts: the next_after pair [created_at, id] an earlier call returned. Omit it to start at the oldest metadata row.",
+            ),
+            "budget_seconds": ParameterMetadata(
+                type=ParameterType.FLOAT,
+                required=False,
+                description="Seconds one batch may run, from 1 to 60 (default 20). The call stops after the row that uses up the budget.",
+            ),
         },
         return_value_schema=registered_job_return_schema(
             ReturnValueSchema(
                 type=ParameterType.OBJECT,
-                description="Operator reclaim counts: confirmed, scanned_count, candidate_count, candidate_bytes, deleted_count, deleted_bytes, ambiguous_count, skipped_locked, excluded_count.",
+                description="Operator reclaim counts for one batch: confirmed, scanned_count, candidate_count, candidate_bytes, deleted_count, deleted_bytes, ambiguous_count, skipped_locked, excluded_count; plus started_at, elapsed_seconds, complete, next_after, position_created_at and slowest_row_seconds. Pass next_after back as after until complete is true.",
                 properties={
                     "confirmed": ParameterMetadata(type=ParameterType.BOOLEAN),
                     **{
@@ -881,6 +891,12 @@ class SessionLedgerIngestAPI(ABC):
                             "excluded_count",
                         )
                     },
+                    "started_at": ParameterMetadata(type=ParameterType.STRING, description="ISO 8601 UTC time this batch started."),
+                    "elapsed_seconds": ParameterMetadata(type=ParameterType.FLOAT, description="Seconds this batch ran; it may exceed budget_seconds by the time of one row."),
+                    "complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when the metadata rows are exhausted; false when the budget stopped the batch."),
+                    "next_after": ParameterMetadata(type=ParameterType.LIST, description="[created_at, id] of the last row handled, to pass back as after; null when complete."),
+                    "position_created_at": ParameterMetadata(type=ParameterType.STRING, description="created_at of the last row handled; null when complete."),
+                    "slowest_row_seconds": ParameterMetadata(type=ParameterType.FLOAT, description="Longest time one row took in this batch."),
                 },
             )
         ),
@@ -896,10 +912,12 @@ class SessionLedgerIngestAPI(ABC):
     def reclaim_orphan_event_text_blobs(
         self,
         confirm: bool = False,
+        after: list[str] | None = None,
+        budget_seconds: float = 20.0,
         *,
         call_context: CallContext | None = None,
     ) -> dict[str, Any]:
-        """Dry-run-default, irreversible confirmed reclaim of old orphan text."""
+        """Dry-run-default, irreversible confirmed reclaim of old orphan text, one bounded batch per call."""
 
     @service_interface_process(
         is_async=True,
@@ -1187,6 +1205,7 @@ class SessionLedgerPollingDriverAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="ensure_periodic_poll_schedule",
         is_discoverable=False,  # boot-only; invoked by starting_actions, not the model
         provider=_PROVIDER,
@@ -1203,31 +1222,33 @@ class SessionLedgerPollingDriverAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Periodic-poll schedule ensure result.",
-            type=ParameterType.OBJECT,
-            properties={
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="One of: created, already_present, normalized.",
-                ),
-                "schedule_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Active schedule id (may be empty when normalize-only).",
-                ),
-                "tag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Schedule tag in use.",
-                ),
-                "cadence_minutes": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="The cadence applied.",
-                ),
-                "cleared_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Stale/duplicate schedules cleared during normalization.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Periodic-poll schedule ensure result.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="One of: created, already_present, normalized.",
+                    ),
+                    "schedule_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Active schedule id (may be empty when normalize-only).",
+                    ),
+                    "tag": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Schedule tag in use.",
+                    ),
+                    "cadence_minutes": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="The cadence applied.",
+                    ),
+                    "cleared_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Stale/duplicate schedules cleared during normalization.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Ensure Periodic Ledger Poll",
@@ -2281,6 +2302,7 @@ class SessionLedgerSummarizeAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="ensure_periodic_summarize_schedule",
         is_discoverable=False,  # boot-only; invoked by starting_actions, not the model
         provider=_PROVIDER,
@@ -2297,31 +2319,33 @@ class SessionLedgerSummarizeAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Periodic summarize-schedule ensure result.",
-            type=ParameterType.OBJECT,
-            properties={
-                "status": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="One of: created, already_present, normalized.",
-                ),
-                "schedule_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Active schedule id.",
-                ),
-                "tag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Schedule tag in use.",
-                ),
-                "cadence_minutes": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Cadence applied.",
-                ),
-                "cleared_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Stale/duplicate schedules cleared.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Periodic summarize-schedule ensure result.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "status": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="One of: created, already_present, normalized.",
+                    ),
+                    "schedule_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Active schedule id.",
+                    ),
+                    "tag": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Schedule tag in use.",
+                    ),
+                    "cadence_minutes": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Cadence applied.",
+                    ),
+                    "cleared_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Stale/duplicate schedules cleared.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Ensure Periodic Ledger Auto-Summarize",
@@ -3074,6 +3098,7 @@ class SessionLedgerEmbeddingDrainAPI(ABC):
         """
 
     @service_interface_process(
+        is_async=True,
         name="ensure_periodic_embed_schedule",
         is_discoverable=False,  # boot-only; invoked by starting_actions, not the model
         provider=_PROVIDER,
@@ -3090,31 +3115,33 @@ class SessionLedgerEmbeddingDrainAPI(ABC):
                 required=False,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Periodic event-embedding-drain schedule ensure result.",
-            type=ParameterType.OBJECT,
-            properties={
-                "outcome": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description=("``created`` (fresh) or ``normalized`` (stale/duplicate schedules cleared first)."),
-                ),
-                "schedule_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Active schedule id.",
-                ),
-                "tag": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Schedule tag in use.",
-                ),
-                "cadence_minutes": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Cadence applied.",
-                ),
-                "cleared_count": ParameterMetadata(
-                    type=ParameterType.INTEGER,
-                    description="Stale/duplicate schedules cleared.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Periodic event-embedding-drain schedule ensure result.",
+                type=ParameterType.OBJECT,
+                properties={
+                    "outcome": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description=("``created`` (fresh) or ``normalized`` (stale/duplicate schedules cleared first)."),
+                    ),
+                    "schedule_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Active schedule id.",
+                    ),
+                    "tag": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Schedule tag in use.",
+                    ),
+                    "cadence_minutes": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Cadence applied.",
+                    ),
+                    "cleared_count": ParameterMetadata(
+                        type=ParameterType.INTEGER,
+                        description="Stale/duplicate schedules cleared.",
+                    ),
+                },
+            )
         ),
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Ensure Periodic Ledger Event-Embedding Drain",

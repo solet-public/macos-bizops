@@ -87,7 +87,8 @@ def _parse(value: object) -> datetime | None:
 
 
 def _lifecycle_tick(
-    state: StateManagementInterface, agent_instance_id: str,
+    state: StateManagementInterface,
+    agent_instance_id: str,
 ) -> tuple[datetime | None, bool, str]:
     """``(last report_alive, lifecycle row was readable, agent_session_id)``.
 
@@ -157,38 +158,28 @@ def classify_gauge_series(
     if series_age_s <= GAUGE_SERIES_STALL_S:
         return (
             SERIES_HEALTHY,
-            f"the newest history row is {series_age_s:,.0f}s old, inside the "
-            f"{GAUGE_SERIES_STALL_S:,.0f}s stall bound",
+            f"the newest history row is {series_age_s:,.0f}s old, inside the {GAUGE_SERIES_STALL_S:,.0f}s stall bound",
         )
     if not lifecycle_readable:
         return (
             SERIES_UNDETERMINED,
-            f"the series has been stalled {series_age_s:,.0f}s and no "
-            "managed_session row could be read, so whether this session is "
-            "still working is not established here",
+            f"the series has been stalled {series_age_s:,.0f}s and no managed_session row could be read, so whether this session is still working is not established here",
         )
     if last_alive is None:
         return (
             SERIES_UNDETERMINED,
-            f"the series has been stalled {series_age_s:,.0f}s and the "
-            "lifecycle row carries no report_by window, so its last "
-            "report_alive is not derivable -- absence of the WINDOW is not "
-            "evidence of absence of a TICK",
+            f"the series has been stalled {series_age_s:,.0f}s and the lifecycle row carries no report_by window, so its last report_alive is not derivable -- absence of the WINDOW is not evidence of absence of a TICK",
         )
     alive_age_s = (now - last_alive).total_seconds()
     if alive_age_s <= GAUGE_SERIES_STALL_S:
         return (
             SERIES_STOPPED,
-            f"the series has been stalled {series_age_s:,.0f}s while "
-            f"report_alive landed {alive_age_s:,.0f}s ago -- this session works "
-            "and its gauge is dark",
+            f"the series has been stalled {series_age_s:,.0f}s while report_alive landed {alive_age_s:,.0f}s ago -- this session works and its gauge is dark",
         )
     if watcher_present is None:
         return (
             SERIES_IDLE,
-            f"the series has been stalled {series_age_s:,.0f}s and report_alive "
-            f"is {alive_age_s:,.0f}s old -- both clocks stopped together, so "
-            "nobody is driving this session; it is not faulty",
+            f"the series has been stalled {series_age_s:,.0f}s and report_alive is {alive_age_s:,.0f}s old -- both clocks stopped together, so nobody is driving this session; it is not faulty",
         )
     if watcher_present:
         return (
@@ -203,10 +194,7 @@ def classify_gauge_series(
         )
     return (
         SERIES_ABSENT,
-        f"the series has been stalled {series_age_s:,.0f}s, report_alive is "
-        f"{alive_age_s:,.0f}s old, AND no live watcher-presence row was "
-        "found -- this reads ABSENT: the process itself appears gone, a "
-        "materially different fact from alive-but-undriven.",
+        f"the series has been stalled {series_age_s:,.0f}s, report_alive is {alive_age_s:,.0f}s old, AND no live watcher-presence row was found -- this reads ABSENT: the process itself appears gone, a materially different fact from alive-but-undriven.",
     )
 
 
@@ -236,13 +224,11 @@ def confirm_gauge_stopped(
     """GAU-19 -- never escalate a STOPPED verdict on ONE sample.
 
     :func:`classify_gauge_series` is a SINGLE-sample classifier by
-    construction, and that single sample can land inside the inter-hook race
-    window: ``rotation_due_watch.py`` (gauge write) and
-    ``heartbeat_report_alive.py`` (report_alive write) are two independent
-    PostToolUse subprocesses that complete on the same tool call in
-    unguaranteed order, so a sample taken between their two completions reads
-    a healthy session's textbook STOPPED signature -- report_alive just
-    landed, the gauge still carrying the PREVIOUS write. Raising the stall
+    construction, and that single sample can land inside a race window: the
+    gauge write (``rotation_due_watch.py``, PostToolUse) and the report_alive
+    write are separate writes with no guaranteed order, so a sample taken
+    between them reads a healthy session's textbook STOPPED signature --
+    report_alive just landed, the gauge still carrying the PREVIOUS write. Raising the stall
     bound cannot escape this: the register's own live specimen read 1,281s
     stale against a 900s bound and resolved 20s later, far past any
     plausible threshold bump.
@@ -261,9 +247,7 @@ def confirm_gauge_stopped(
     if second_now <= first_now:
         raise VerbError(
             "non_monotonic_reads",
-            f"second read ({second_now.isoformat()}) is not after the first "
-            f"({first_now.isoformat()}) -- confirmation requires two reads "
-            "separated in real time, not two labels on the same moment.",
+            f"second read ({second_now.isoformat()}) is not after the first ({first_now.isoformat()}) -- confirmation requires two reads separated in real time, not two labels on the same moment.",
         )
     gap_s = (second_now - first_now).total_seconds()
     first_state, first_why = classify_gauge_series(
@@ -275,15 +259,12 @@ def confirm_gauge_stopped(
     if first_state != SERIES_STOPPED:
         return (
             False,
-            f"first read classified {first_state!r}, not STOPPED -- nothing "
-            "to confirm",
+            f"first read classified {first_state!r}, not STOPPED -- nothing to confirm",
         )
     if gap_s < min_confirm_gap_s:
         return (
             False,
-            f"only {gap_s:.0f}s between reads, below the "
-            f"{min_confirm_gap_s:.0f}s confirm gap -- inconclusive, re-check "
-            "later rather than escalate on a too-fast re-read",
+            f"only {gap_s:.0f}s between reads, below the {min_confirm_gap_s:.0f}s confirm gap -- inconclusive, re-check later rather than escalate on a too-fast re-read",
         )
     second_state, second_why = classify_gauge_series(
         newest_recorded_at=second_newest_recorded_at,
@@ -294,29 +275,16 @@ def confirm_gauge_stopped(
     if second_state != SERIES_STOPPED:
         return (
             False,
-            f"second read ({gap_s:.0f}s later) classified {second_state!r} "
-            f"({second_why}) -- the first STOPPED reading was the "
-            "inter-hook race window, not a freeze",
+            f"second read ({gap_s:.0f}s later) classified {second_state!r} ({second_why}) -- the first STOPPED reading was the inter-hook race window, not a freeze",
         )
-    if (
-        first_last_alive is None
-        or second_last_alive is None
-        or second_last_alive <= first_last_alive
-    ):
+    if first_last_alive is None or second_last_alive is None or second_last_alive <= first_last_alive:
         return (
             False,
-            "report_alive did not advance between reads -- this session may "
-            "have gone IDLE rather than stayed working-and-gauge-dark; a "
-            "confirmed STOPPED requires report_alive to keep landing across "
-            "both reads",
+            "report_alive did not advance between reads -- this session may have gone IDLE rather than stayed working-and-gauge-dark; a confirmed STOPPED requires report_alive to keep landing across both reads",
         )
     return (
         True,
-        f"STOPPED confirmed across two reads {gap_s:.0f}s apart: the series "
-        f"was stalled at both reads ({first_why}) ({second_why}), while "
-        f"report_alive advanced from {first_last_alive.isoformat()} to "
-        f"{second_last_alive.isoformat()} -- the session is working and its "
-        "gauge is genuinely dark",
+        f"STOPPED confirmed across two reads {gap_s:.0f}s apart: the series was stalled at both reads ({first_why}) ({second_why}), while report_alive advanced from {first_last_alive.isoformat()} to {second_last_alive.isoformat()} -- the session is working and its gauge is genuinely dark",
     )
 
 
@@ -403,7 +371,8 @@ def _rotations(entries: list[dict[str, Any]]) -> int:
 
 
 def _series_identity(
-    state: StateManagementInterface, agent_instance_id: str,
+    state: StateManagementInterface,
+    agent_instance_id: str,
 ) -> tuple[str, str]:
     """``(the id the series is keyed on, how it was reached)``.
 
@@ -427,11 +396,7 @@ def _gap_reason(agent_instance_id: str) -> str:
     reporting gap from the GAU-07 lookup miss that made healthy watcher-held
     sessions read as gauge-less for a day.
     """
-    return (
-        f"no session_context_status history on file for {agent_instance_id!r}. "
-        "This id was ALSO resolved through the peer binding (the watch-id "
-        "join) and still matched no series."
-    )
+    return f"no session_context_status history on file for {agent_instance_id!r}. This id was ALSO resolved through the peer binding (the watch-id join) and still matched no series."
 
 
 def session_context_status_history(

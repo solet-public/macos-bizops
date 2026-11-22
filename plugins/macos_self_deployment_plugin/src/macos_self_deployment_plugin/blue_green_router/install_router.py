@@ -60,6 +60,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from ananta.core.runtime.port_manager import write_private_port_file  # noqa: E402
+
 from macos_self_deployment_plugin.blue_green_router.service_install import (  # noqa: E402
     LAUNCHD_TEMPLATE_NAME,
     LOG_DIR,
@@ -114,8 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"install_router: {exc}", file=sys.stderr)
         return 1
     print(
-        f"install_router: OK — router for solet={args.solet_name!r} "
-        f"is up on port {args.public_port}",
+        f"install_router: OK — router for solet={args.solet_name!r} is up on port {args.public_port}",
     )
     return 0
 
@@ -135,8 +136,7 @@ def _find_free_router_port() -> int:
         except OSError:
             continue
     raise InstallError(
-        f"no available router port in "
-        f"{DYNAMIC_ROUTER_PORT_START}-{DYNAMIC_ROUTER_PORT_END}",
+        f"no available router port in {DYNAMIC_ROUTER_PORT_START}-{DYNAMIC_ROUTER_PORT_END}",
     )
 
 
@@ -152,7 +152,9 @@ def _runtime_dir(args: argparse.Namespace) -> Path:
 
 
 def _write_router_port_files(
-    solet_name: str, port: int, runtime_dir: Path,
+    solet_name: str,
+    port: int,
+    runtime_dir: Path,
 ) -> tuple[Path, Path]:
     """Write the router's chosen public port to both discovery files.
 
@@ -173,55 +175,53 @@ def _write_router_port_files(
     """
     runtime_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
     router_port_file = runtime_dir / f"{solet_name}.router.port"
-    router_port_file.write_text(str(port))
-    router_port_file.chmod(0o600)
+    write_private_port_file(router_port_file, port)
     bridge_port_file = runtime_dir / f"{solet_name}.bridge.port"
-    bridge_port_file.write_text(str(port))
-    bridge_port_file.chmod(0o600)
+    write_private_port_file(bridge_port_file, port)
     return router_port_file, bridge_port_file
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="install_router",
-        description=(
-            "Install the local blue-green router under launchd/systemd. "
-            "Idempotent: re-running on an installed system is a no-op success."
-        ),
+        description=("Install the local blue-green router under launchd/systemd. Idempotent: re-running on an installed system is a no-op success."),
     )
     parser.add_argument("solet_name", help="Solet name (e.g. 'iris').")
     parser.add_argument(
-        "--public-port", type=int, default=None,
-        help=(
-            f"Public bridge port. Operator-debug override; the canonical "
-            f"path leaves this unset so install_router scans the dynamic "
-            f"range {DYNAMIC_ROUTER_PORT_START}-{DYNAMIC_ROUTER_PORT_END} "
-            f"for a free port (per operator directive D-BRIDGE-1: all port "
-            f"assignment dynamic)."
-        ),
+        "--public-port",
+        type=int,
+        default=None,
+        help=(f"Public bridge port. Operator-debug override; the canonical path leaves this unset so install_router scans the dynamic range {DYNAMIC_ROUTER_PORT_START}-{DYNAMIC_ROUTER_PORT_END} for a free port (per operator directive D-BRIDGE-1: all port assignment dynamic)."),
     )
     parser.add_argument(
-        "--plist-path", type=Path, default=None,
+        "--plist-path",
+        type=Path,
+        default=None,
         help="Override default ~/Library/LaunchAgents/<label>.plist (smoke only).",
     )
     parser.add_argument(
-        "--unit-path", type=Path, default=None,
+        "--unit-path",
+        type=Path,
+        default=None,
         help="Override default ~/.config/systemd/user/<unit>.service (smoke only).",
     )
     parser.add_argument(
-        "--socket-path", type=Path, default=None,
+        "--socket-path",
+        type=Path,
+        default=None,
         help="Override default ~/.ananta/runtime/<name>.router.sock (smoke only).",
     )
     parser.add_argument(
-        "--log-dir", type=Path, default=None,
+        "--log-dir",
+        type=Path,
+        default=None,
         help="Override default ~/.ananta/logs (smoke only).",
     )
     parser.add_argument(
-        "--runtime-dir", type=Path, default=None,
-        help=(
-            "Override default ~/.ananta/runtime for the port-discovery files "
-            "and the router daemon's WorkingDirectory (smoke only)."
-        ),
+        "--runtime-dir",
+        type=Path,
+        default=None,
+        help=("Override default ~/.ananta/runtime for the port-discovery files and the router daemon's WorkingDirectory (smoke only)."),
     )
     return parser.parse_args(argv)
 
@@ -251,7 +251,10 @@ def _build_context(args: argparse.Namespace) -> dict[str, str]:
 
 
 def _ensure_dirs(
-    plist_or_unit_path: Path, socket_path: Path, log_dir: Path, runtime_dir: Path,
+    plist_or_unit_path: Path,
+    socket_path: Path,
+    log_dir: Path,
+    runtime_dir: Path,
 ) -> None:
     plist_or_unit_path.parent.mkdir(parents=True, exist_ok=True)
     socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -292,7 +295,9 @@ def _wait_for_label_gone(service_target: str) -> None:
     while time.monotonic() < deadline:
         result = subprocess.run(
             ["launchctl", "print", service_target],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if result.returncode != 0:
             return
@@ -334,9 +339,7 @@ def _run_supervisor(
     )
     if result.returncode not in allow_exit_codes:
         raise InstallError(
-            f"{program} {' '.join(args)} exited {result.returncode}\n"
-            f"stdout: {result.stdout.rstrip()}\n"
-            f"stderr: {result.stderr.rstrip()}",
+            f"{program} {' '.join(args)} exited {result.returncode}\nstdout: {result.stdout.rstrip()}\nstderr: {result.stderr.rstrip()}",
         )
     return result
 
@@ -356,8 +359,7 @@ def _verify_router_up(socket_path: Path) -> None:
                 last_error = f"mgmt status() returned unexpected payload: {status!r}"
         time.sleep(VERIFY_POLL_INTERVAL_SECONDS)
     raise InstallError(
-        f"router did not become ready within {VERIFY_DEADLINE_SECONDS}s at "
-        f"{socket_path}: {last_error}",
+        f"router did not become ready within {VERIFY_DEADLINE_SECONDS}s at {socket_path}: {last_error}",
     )
 
 

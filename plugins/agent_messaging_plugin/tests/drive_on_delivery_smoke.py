@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import current_thread
@@ -55,7 +56,6 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.models import RoleMessagePersisted, TextPart  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from codex_eventual_pickup_smoke import _State  # noqa: E402 -- production-shaped transaction fixture
@@ -64,6 +64,7 @@ import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.bridge_sessions import (  # noqa: E402
     DEFAULT_BINDING_LIVENESS_WINDOW_S,
 )
+from agent_messaging_plugin.channel_support import channel_carries_message  # noqa: E402
 from agent_messaging_plugin.delivery_drive import (  # noqa: E402
     CodexPickupStore,
     drive_queue_snapshot,
@@ -77,6 +78,7 @@ from agent_messaging_plugin.local_cli.spool import (  # noqa: E402
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.peer_dispatch import (  # noqa: E402
     DELIVERY_QUEUED_NOTIFICATION,
+    DELIVERY_QUEUED_WAKE,
     DELIVERY_QUEUED_WATCHER,
     dispatch_peer_send,
     dispatch_role_send,
@@ -85,11 +87,15 @@ from agent_messaging_plugin.peer_registry import PeerUnreachableError  # noqa: E
 from agent_messaging_plugin.peer_role_management import ResolvedRole  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     CONDITION_DEADLINE,
+    CONDITION_SESSION_TERMINAL,
     LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
     LIFECYCLE_OVERDUE,
     LIFECYCLE_PARKED,
     LIFECYCLE_SPAWNING,
+)
+from agent_messaging_plugin.session_lifecycle_control import (  # noqa: E402
+    _fire_session_terminal_dependencies,  # noqa: PLC2701 -- the terminal-edge fire is a private helper; its notice is the behaviour under test
 )
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
@@ -106,9 +112,7 @@ from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
 )
 from agent_messaging_plugin.session_sweep import (  # noqa: E402
     EVENT_SESSION_DEPENDENCY_WAKE,
-    EVENT_SESSION_OVERDUE_NOTICE,
     sweep_deadline_dependencies,
-    sweep_overdue_sessions,
 )
 
 _passed = 0
@@ -200,7 +204,7 @@ def _install_fake_host(
         park_interrupt=park_interrupt,
         raise_on_delivery_drive_thread=raise_on_delivery_drive_thread,
     )
-    session_hosts._REGISTRY[_TEST_HOST] = driver  # noqa: SLF001 -- test-only monkeypatch
+    session_hosts._REGISTRY[_TEST_HOST] = driver  # noqa: SLF001 -- test-only monkeypatch  # pyright: ignore[reportArgumentType]
     return driver
 
 
@@ -260,6 +264,32 @@ class _FakePeerRegistry:
         del agent_instance_id
 
 
+class _FakeWakeAdapter:
+    """The native wake adapter a live Claude bridge registers: ``wake`` queues
+    the channel event on the recipient's bridge and returns that bridge's id."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def wake(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        return "agc-recipient"
+
+
+class _AdapterPeerRegistry(_FakePeerRegistry):
+    """A registry with a native wake adapter registered, so a send to a
+    non-watcher recipient reports ``queued_wake`` (the existing fakes return
+    no adapter and stay on ``queued_notification``)."""
+
+    def __init__(self, binding: BridgeBinding | None = None) -> None:
+        super().__init__(binding)
+        self.adapter = _FakeWakeAdapter()
+
+    def wake_adapter_for(self, agent_id: str) -> _FakeWakeAdapter:  # type: ignore[override]
+        del agent_id
+        return self.adapter
+
+
 class _FaultNthQueryState(RealShapeState):
     """Return a real-shape provider failure on one selected read call."""
 
@@ -312,14 +342,28 @@ class _FakeMultiPeerRegistry:
     recipient ``_FakePeerRegistry`` above — a real mini-registry, not a
     hardcoded stub."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, adapter: _FakeWakeAdapter | None = None) -> None:
         self._by_instance: dict[str, BridgeBinding] = {}
+        self._adapter = adapter
 
-    def register(self, agent_instance_id: str, *, bridge_id: str) -> None:
-        self._by_instance[agent_instance_id] = _bound_binding(
-            agent_instance_id,
-            bridge_id=bridge_id,
+    def register(
+        self,
+        agent_instance_id: str,
+        *,
+        bridge_id: str,
+        wake_capable: bool = True,
+        watcher_declared: bool = False,
+    ) -> None:
+        self._by_instance[agent_instance_id] = replace(
+            _bound_binding(agent_instance_id, bridge_id=bridge_id),
+            wake_capable=wake_capable,
+            watcher_declared=watcher_declared,
         )
+
+    def wake_adapter_for(self, agent_id: str) -> _FakeWakeAdapter | None:
+        """The native wake adapter, when this registry was built with one."""
+        del agent_id
+        return self._adapter
 
     def resolve(self, agent_id: str, agent_instance_id: str | None) -> BridgeBinding:
         del agent_id
@@ -557,7 +601,7 @@ def test_wake_incapable_role_send_writes_no_spool() -> None:
         pickup is not None and pickup["pending"] and pickup["phase"] == "pending_resolution" and pickup["reason"] == "not_managed",
         "unmanaged Codex role recipient retains a truthful pending pickup projection",
     )
-    history = CodexPickupStore(state).history("arm-wc-role-test")
+    history: list[dict[str, Any]] = CodexPickupStore(state).history("arm-wc-role-test")
     _check(
         [event["version"] for event in history] == [1, 2] and history[0]["evidence"]["phase"] == "queued" and history[1]["evidence"]["phase"] == "pending_resolution" and history[1]["evidence"]["reason"] == "not_managed",
         "unmanaged role lookup appends evidence without claiming pane submission or inbox pickup",
@@ -604,9 +648,10 @@ def _send(
     state: StateManagementInterface,
     *,
     binding: BridgeBinding | None = None,
+    registry: _FakePeerRegistry | None = None,
 ) -> tuple[Any, _FakeBridgeManager]:
     manager = _FakeBridgeManager()
-    registry = _FakePeerRegistry(binding)
+    registry = registry or _FakePeerRegistry(binding)
     outcome = dispatch_peer_send(
         bridge_manager=manager,  # type: ignore[arg-type]
         peer_registry=registry,  # type: ignore[arg-type]
@@ -640,10 +685,8 @@ def _insert(
         state,
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id,
-            lane_id="lane-dod",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="b1",
+            label="delivery-target",
+            session_origin="spawned",
             host=host,
         ),
     )
@@ -1114,7 +1157,7 @@ def test_watcher_identity_ambiguity_never_drives() -> None:
 
 
 def test_state_service_none_never_raises() -> None:
-    """Optional-collaborator degrade (mirrors sweep_overdue_sessions's own
+    """Optional-collaborator degrade (mirrors the sweeps' own
     convention): state_service=None must not crash dispatch_peer_send — the
     drive is best-effort and simply has nothing to drive without a state
     handle."""
@@ -1222,87 +1265,315 @@ def test_sweep_deadline_edge_drives_a_live_managed_waiter() -> None:
         _remove_fake_host()
 
 
-def test_sweep_overdue_steward_notice_unmanaged_steward_byte_unchanged() -> None:
-    """Ruling 2 (2026-08-04 sign-off): the unmanaged-steward path (an
-    operator-launched steward with no managed_session row of its own — the
-    common case, e.g. the seat) must be byte-unchanged by this lane:
-    drive_on_delivery's SessionNotFoundError no-op covers it silently, the
-    existing steward notice still fires exactly as before."""
-    overdue_worker = "agi-sweep-overdue-worker01"
-    unmanaged_steward = "agi-sweep-unmanaged-steward01"
-    state = _state()
-    _insert(state, host="operator", agent_instance_id=overdue_worker)
+# ---------------------------------------------------------------------------
+# prb_57c118ad (r74 K3-B1): the send seam skips the "delivery waiting" pane
+# notice when the recipient's live channel carries the message. The notice
+# exists to wake a session with no other way to learn of the message; a Claude
+# session on a live MCP bridge already has the queued channel event. Legs
+# (a)/(d)/(e) are the new behaviour; (b)/(c) pin the sessions that keep the
+# notice (no surfacing channel; pull-consumer watcher).
+# ---------------------------------------------------------------------------
+
+
+def _managed_live(state: StateManagementInterface, *, agent_instance_id: str = _RECIPIENT_AGI) -> None:
+    _insert(state, agent_instance_id=agent_instance_id)
     transition_lifecycle_state(
         state,
-        agent_instance_id=overdue_worker,
+        agent_instance_id=agent_instance_id,
         from_state=LIFECYCLE_SPAWNING,
         to_state=LIFECYCLE_LIVE,
         directed_by="test:none",
     )
-    state.update_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {"table": "managed_session", "filters": {"agent_instance_id": overdue_worker}},
-        {
-            "spawned_by_instance_id": unmanaged_steward,
-            "report_by": "2020-01-01T00:00:00+00:00",
-        },
-    )
-    registry = _FakeMultiPeerRegistry()
-    registry.register(unmanaged_steward, bridge_id="agc-unmanaged-steward")
-    manager = _FakeBridgeManager()
-    marked = sweep_overdue_sessions(state, peer_registry=registry, bridge_manager=manager)  # type: ignore[arg-type]
-    _check(marked == 1, f"sweep_overdue_sessions marked exactly 1 row overdue (got {marked})")
-    _check(
-        len(manager.events) == 1 and manager.events[0][1] == EVENT_SESSION_OVERDUE_NOTICE,
-        "the existing overdue-steward notice STILL fires — byte-unchanged for an unmanaged steward",
-    )
 
 
-def test_sweep_overdue_steward_notice_drives_a_managed_steward() -> None:
-    """Companion to the byte-unchanged leg: a MANAGED steward (itself a
-    spawned session with its own managed_session row) gets the extra
-    drive-on-delivery nudge on the same steward-notice path."""
-    overdue_worker = "agi-sweep-overdue-worker02"
-    managed_steward = "agi-sweep-managed-steward01"
+def test_channel_carried_message_gets_no_pane_notice() -> None:
+    """(a) A managed, live, non-watcher Claude recipient whose bridge is
+    wake_capable and has a native wake adapter: the message is queued on its
+    channel, so nothing is typed into its pane and nothing is scheduled."""
     driver = _install_fake_host()
     try:
         state = _state()
-        _insert(state, agent_instance_id=managed_steward)
-        transition_lifecycle_state(
-            state,
-            agent_instance_id=managed_steward,
-            from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE,
-            directed_by="test:none",
+        _managed_live(state)
+        registry = _AdapterPeerRegistry(_binding())
+        outcome, manager = _send(state, registry=registry)
+        payload = outcome.to_payload()
+        _check(outcome.delivery == DELIVERY_QUEUED_WAKE, "(a) the send reports queued_wake: the channel event is queued")
+        _check(len(registry.adapter.calls) == 1, "(a) the native wake adapter queued the channel event exactly once")
+        _check(
+            payload.get("drive_on_delivery") == "driver_not_needed",
+            "(a) a channel-carried message reports driver_not_needed, not a drive it never ran",
         )
-        _insert(state, host="operator", agent_instance_id=overdue_worker)
-        transition_lifecycle_state(
-            state,
-            agent_instance_id=overdue_worker,
-            from_state=LIFECYCLE_SPAWNING,
-            to_state=LIFECYCLE_LIVE,
-            directed_by="test:none",
+        # Wait for whatever drive was scheduled (none after the fix), so "nothing
+        # typed" is read after a drive could have typed, never before.
+        finished = _await_drive(outcome)
+        _check(driver.channel.sent == [], "(a) no 'delivery waiting' notice reaches the recipient's pane")
+        _check(
+            CodexPickupStore(state).read(outcome.message_id) is None,
+            "(a) no pickup row is written for a message the channel carries",
         )
+        _check(
+            finished is not None and finished[0] == "driver_not_needed" and finished[1] is not None and "live channel, which carries it" in finished[1],
+            "(a) the outcome is recorded by message id with its own detail text",
+        )
+        _check("send_status" not in payload, "(a) the sender-visible payload carries no NOT DELIVERED annotation")
+        _check(not manager.events, "(a) the adapter, not append_event, carried the message")
+    finally:
+        _remove_fake_host()
+
+
+def test_channel_without_surfacing_still_gets_pane_notice() -> None:
+    """(b) wake_capable=False (a Claude bridge on a provider that ignores
+    development channels): the queued event is never surfaced, so the notice
+    is that session's only wake and is typed exactly as before."""
+    driver = _install_fake_host()
+    try:
+        state = _state()
+        _managed_live(state)
+        registry = _AdapterPeerRegistry(replace(_binding(), wake_capable=False))
+        outcome, _manager = _send(state, registry=registry)
+        _check(outcome.delivery == DELIVERY_QUEUED_WAKE, "(b) the send still reports queued_wake")
+        _check(
+            outcome.to_payload().get("drive_on_delivery") == "driver_scheduled",
+            "(b) wake_capable=false: the drive is scheduled as before",
+        )
+        finished = _await_drive(outcome)
+        _check(finished is not None and finished[0] == "driver_sent", "(b) the finished drive records driver_sent")
+        _check(
+            len(driver.channel.sent) == 1 and "drain peer_inbox" in driver.channel.sent[0],
+            "(b) wake_capable=false: exactly one pane notice reaches the channel",
+        )
+    finally:
+        _remove_fake_host()
+
+
+def test_watcher_with_adapter_still_gets_pane_notice() -> None:
+    """(c) A watcher is a pull consumer: its channel surfaces nothing, so the
+    notice stays, adapter registered or not."""
+    driver = _install_fake_host()
+    try:
+        state = _state()
+        spawned_instance_id = "agi-spawned-watch-worker"
+        stable_session_id = "ases-agi-spawned-watch-worker"
+        watcher_instance_id = f"agi-watch-{watch_instance_digest(stable_session_id)}"
+        _insert(state, agent_instance_id=spawned_instance_id)
         state.update_state(
             AGENT_ROLE_BINDING_NAMESPACE,
-            {"table": "managed_session", "filters": {"agent_instance_id": overdue_worker}},
+            {"table": "managed_session", "filters": {"agent_instance_id": spawned_instance_id, "is_deleted": 0}},
+            {"agent_session_id": stable_session_id},
+        )
+        transition_lifecycle_state(
+            state,
+            agent_instance_id=spawned_instance_id,
+            from_state=LIFECYCLE_SPAWNING,
+            to_state=LIFECYCLE_LIVE,
+            directed_by="test:none",
+        )
+        registry = _AdapterPeerRegistry(_binding(agent_instance_id=watcher_instance_id, agent_session_id=stable_session_id))
+        outcome, _manager = _send(state, registry=registry)
+        _await_drive(outcome)
+        _check(outcome.delivery == DELIVERY_QUEUED_WATCHER, "(c) a watcher recipient is labelled queued_watcher")
+        _check(
+            len(driver.channel.sent) == 1 and "drain peer_inbox" in driver.channel.sent[0],
+            "(c) the watcher still gets its pane notice: a pull consumer has no channel that surfaces the message",
+        )
+    finally:
+        _remove_fake_host()
+
+
+def test_role_send_channel_carried_gets_no_pane_notice() -> None:
+    """(d) The role-send twin of (a), through dispatch_role_send's own call."""
+    driver = _install_fake_host()
+    try:
+        state = _state()
+        _managed_live(state)
+        binding = _binding(agent_session_id="ases-role-twin")
+        registry = _AdapterPeerRegistry(binding)
+        role = ResolvedRole(
+            name="Channel-Role",
+            agent_id=binding.agent_id,
+            agent_instance_id=binding.agent_instance_id,
+            session_label=binding.session_label,
+        )
+        state.upsert_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
             {
-                "spawned_by_instance_id": managed_steward,
-                "report_by": "2020-01-01T00:00:00+00:00",
+                "table": "role_binding",
+                "conflict_columns": ["external_id"],
+                "record": {
+                    "external_id": "role:Channel-Role",
+                    "role": "Channel-Role",
+                    "holder_kind": "session",
+                    "agent_instance_id": binding.agent_instance_id,
+                    "agent_session_id": binding.agent_session_id,
+                    "holder_identity": {"agent_id": "claude_code", "session_label": "Channel-Role"},
+                    "claim_epoch": 1,
+                },
             },
         )
-        registry = _FakeMultiPeerRegistry()
-        registry.register(managed_steward, bridge_id="agc-managed-steward")
         manager = _FakeBridgeManager()
-        marked = sweep_overdue_sessions(state, peer_registry=registry, bridge_manager=manager)  # type: ignore[arg-type]
-        _check(marked == 1, f"sweep_overdue_sessions marked exactly 1 row overdue (got {marked})")
-        _check(
-            len(manager.events) == 1 and manager.events[0][1] == EVENT_SESSION_OVERDUE_NOTICE,
-            "the existing overdue-steward notice still fires",
+        outcome = dispatch_role_send(
+            bridge_manager=manager,  # type: ignore[arg-type]
+            peer_registry=registry,  # type: ignore[arg-type]
+            agent_messaging_service=_FakeRoleMessagingService(),
+            state_service=state,
+            role_name="Channel-Role",
+            role=role,
+            sender_bridge_id="agc-sender",
+            sender_agent_id="claude_code",
+            sender_agent_instance_id="agi-sender",
+            sender_session_label="Sender",
+            sender_parent_pid=None,
+            content=[TextPart(type="text", text="IMPORTANT: role channel ping")],
+            message_id="arm-channel-role-test",
         )
+        _check(outcome.delivery == DELIVERY_QUEUED_WAKE, "(d) the role send reports queued_wake")
         _check(
-            len(driver.channel.sent) == 1,
-            "a MANAGED steward's driver channel also receives a drive-on-delivery notice",
+            outcome.to_payload().get("drive_on_delivery") == "driver_not_needed",
+            "(d) a channel-carried role message reports driver_not_needed",
+        )
+        _await_drive(outcome)
+        _check(driver.channel.sent == [], "(d) no pane notice reaches the role holder's pane")
+        _check(
+            CodexPickupStore(state).read("arm-channel-role-test") is None,
+            "(d) no pickup row is written for a role message the channel carries",
+        )
+    finally:
+        _remove_fake_host()
+
+
+def test_channel_carries_message_truth_table() -> None:
+    """(e) The one definition of 'the live channel carries the message'."""
+    base = _binding()
+    watcher = replace(base, agent_instance_id="agi-watch-0123456789ab")
+    _check(channel_carries_message(base, native_wake_adapter=True), "(e) wake_capable, adapter, not a watcher: the channel carries it")
+    _check(not channel_carries_message(base, native_wake_adapter=False), "(e) no native wake adapter: the message went to the notification path, not carried")
+    _check(not channel_carries_message(replace(base, wake_capable=False), native_wake_adapter=True), "(e) wake_capable false: the channel never surfaces it")
+    _check(not channel_carries_message(watcher, native_wake_adapter=True), "(e) a watcher is a pull consumer: no channel surfaces it")
+
+
+# ---------------------------------------------------------------------------
+# prb_57c118ad (r74 K3-D1): the callers that remain after the clock sweeps
+# were removed. The dependency-wake sweep appends a bridge event and then
+# drives its waiter; the session_terminal fire drives its waiter and appends
+# nothing. The pane notice follows the sweep's event only when that event did
+# not reach a live channel (same rule as the send seam), and always follows
+# the terminal fire, which has no event to rely on.
+# ---------------------------------------------------------------------------
+
+_WAKE_WAITER = "agi-dep-wake-waiter"
+
+
+class _RaisingBridgeManager(_FakeBridgeManager):
+    """A bridge whose append_event fails: the event reached no channel."""
+
+    def append_event(self, bridge_id: str, event: str, prose: str, meta: dict[str, object]) -> None:
+        del bridge_id, event, prose, meta
+        raise RuntimeError("bridge append refused")
+
+
+def _arm_live_waiter(
+    state: StateManagementInterface,
+    *,
+    condition_kind: str,
+    condition_ref: str,
+) -> None:
+    """A live managed waiter (registered the way a spawned session registers)
+    with one armed dependency edge, written through the real arm verb."""
+    _insert(state, agent_instance_id=_WAKE_WAITER)
+    backfill_registration(
+        state,
+        agent_instance_id=_WAKE_WAITER,
+        agent_id="claude_code",
+        agent_session_id="ases-dep-wake-waiter",
+    )
+    armed = verb_arm_session_dependency(
+        state,
+        ArmSessionDependencyRequest(
+            waiter_instance_id=_WAKE_WAITER,
+            condition_kind=condition_kind,
+            condition_ref=condition_ref,
+        ),
+    )
+    _check(armed.get("armed") is True, f"{condition_kind} edge armed cleanly via the real verb")
+
+
+def _sweep_wake(registry: _FakeMultiPeerRegistry, manager: _FakeBridgeManager) -> tuple[int, list[str]]:
+    """Fire one past-deadline edge through the real sweep; return how many fired
+    and the pane notices the waiter's driver channel received."""
+    driver = _install_fake_host()
+    try:
+        state = _state()
+        _arm_live_waiter(state, condition_kind=CONDITION_DEADLINE, condition_ref="2020-01-01T00:00:00+00:00")
+        fired = sweep_deadline_dependencies(state, peer_registry=registry, bridge_manager=manager)  # type: ignore[arg-type]
+        return fired, list(driver.channel.sent)
+    finally:
+        _remove_fake_host()
+
+
+def test_dependency_wake_to_channel_carried_waiter_gets_no_pane_notice() -> None:
+    """(f) The wake event reached a live channel (adapter registered,
+    wake_capable, not a watcher): typing 'delivery waiting' would only repeat it."""
+    registry = _FakeMultiPeerRegistry(adapter=_FakeWakeAdapter())
+    registry.register(_WAKE_WAITER, bridge_id="agc-dep-wake")
+    manager = _FakeBridgeManager()
+    fired, notices = _sweep_wake(registry, manager)
+    _check(fired == 1, f"(f) the sweep fired exactly 1 edge (got {fired})")
+    _check(
+        len(manager.events) == 1 and manager.events[0][1] == EVENT_SESSION_DEPENDENCY_WAKE,
+        "(f) the wake event is still appended to the waiter's bridge",
+    )
+    _check(notices == [], f"(f) a channel-carried waiter gets no pane notice (got {notices})")
+
+
+def test_dependency_wake_without_a_surfacing_channel_still_gets_pane_notice() -> None:
+    """(g) wake_capable=False, a watcher, and no adapter: the event surfaces
+    nothing, so the notice is that waiter's only wake and is typed as before."""
+    cases = (
+        ("wake_capable=false", {"wake_capable": False}, True),
+        ("watcher", {"watcher_declared": True}, True),
+        ("no adapter registered", {}, False),
+    )
+    for label, flags, with_adapter in cases:
+        registry = _FakeMultiPeerRegistry(adapter=_FakeWakeAdapter() if with_adapter else None)
+        registry.register(_WAKE_WAITER, bridge_id="agc-dep-wake", **flags)  # type: ignore[arg-type]
+        manager = _FakeBridgeManager()
+        fired, notices = _sweep_wake(registry, manager)
+        _check(fired == 1 and len(manager.events) == 1, f"(g) {label}: the edge fired and the event was appended")
+        _check(
+            len(notices) == 1 and "drain peer_inbox" in notices[0],
+            f"(g) {label}: exactly one pane notice reaches the waiter (got {notices})",
+        )
+
+
+def test_dependency_wake_whose_event_append_failed_still_gets_pane_notice() -> None:
+    """(h) A channel-carried waiter whose event append raised got nothing on
+    its channel, so the notice must still follow."""
+    registry = _FakeMultiPeerRegistry(adapter=_FakeWakeAdapter())
+    registry.register(_WAKE_WAITER, bridge_id="agc-dep-wake")
+    fired, notices = _sweep_wake(registry, _RaisingBridgeManager())
+    _check(fired == 1, "(h) the edge fired although the wake append failed")
+    _check(
+        len(notices) == 1 and "drain peer_inbox" in notices[0],
+        f"(h) a failed append leaves the pane notice as the only wake (got {notices})",
+    )
+
+
+def test_terminal_edge_waiter_always_gets_pane_notice() -> None:
+    """(i) The session_terminal fire appends no event, so nothing reached any
+    channel and the notice is the only wake, for every kind of waiter."""
+    driver = _install_fake_host()
+    try:
+        state = _state()
+        _arm_live_waiter(state, condition_kind=CONDITION_SESSION_TERMINAL, condition_ref="agi-awaited-session")
+        fired = _fire_session_terminal_dependencies(
+            state,
+            agent_instance_id="agi-awaited-session",
+            fired_at=datetime.now(UTC).isoformat(),
+        )
+        _check(fired == 1, f"(i) the session_terminal edge fired (got {fired})")
+        _check(
+            len(driver.channel.sent) == 1 and "drain peer_inbox" in driver.channel.sent[0],
+            f"(i) the waiter gets its pane notice, no event reached a channel (got {driver.channel.sent})",
         )
     finally:
         _remove_fake_host()
@@ -1327,11 +1598,18 @@ def main() -> int:
     test_state_service_none_never_raises()
     test_managed_recipient_without_driver_is_visible()
     test_sweep_deadline_edge_drives_a_live_managed_waiter()
-    test_sweep_overdue_steward_notice_unmanaged_steward_byte_unchanged()
-    test_sweep_overdue_steward_notice_drives_a_managed_steward()
     test_wake_capable_recipient_writes_no_spool()
     test_wake_incapable_dispatch_writes_no_spool()
     test_wake_incapable_role_send_writes_no_spool()
+    test_channel_carried_message_gets_no_pane_notice()
+    test_channel_without_surfacing_still_gets_pane_notice()
+    test_watcher_with_adapter_still_gets_pane_notice()
+    test_role_send_channel_carried_gets_no_pane_notice()
+    test_channel_carries_message_truth_table()
+    test_dependency_wake_to_channel_carried_waiter_gets_no_pane_notice()
+    test_dependency_wake_without_a_surfacing_channel_still_gets_pane_notice()
+    test_dependency_wake_whose_event_append_failed_still_gets_pane_notice()
+    test_terminal_edge_waiter_always_gets_pane_notice()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

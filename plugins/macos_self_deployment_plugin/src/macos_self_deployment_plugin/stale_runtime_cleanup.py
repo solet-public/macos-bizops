@@ -22,6 +22,8 @@ import socket
 from pathlib import Path
 from typing import Final
 
+from ananta.core.runtime.port_manager import write_private_port_file
+
 logger = logging.getLogger(__name__)
 
 # The router owns this one file: a blue-green swap candidate reaches the scrub
@@ -124,22 +126,20 @@ def restore_router_owned_bridge_port_file_if_router_live(solet_name: str) -> boo
     if router_mgmt_status(router_socket) is None:
         if router_socket.exists():
             logger.debug(
-                "Router mgmt socket present at %s but nothing answered; "
-                "treating the router as down (stale socket file).",
+                "Router mgmt socket present at %s but nothing answered; treating the router as down (stale socket file).",
                 router_socket,
             )
         else:
             logger.debug(
-                "No router mgmt socket at %s; treating the router as down. "
-                "NOTE: a live router holding an UNLINKED socket is "
-                "indistinguishable from this by any path-based check.",
+                "No router mgmt socket at %s; treating the router as down. NOTE: a live router holding an UNLINKED socket is indistinguishable from this by any path-based check.",
                 router_socket,
             )
         return False
-    bridge_port_file.write_text(str(router_port), encoding="utf-8")
-    bridge_port_file.chmod(0o600)
+    write_private_port_file(bridge_port_file, router_port)
     logger.info(
-        "Restored %s from live router (port %d)", bridge_port_file, router_port,
+        "Restored %s from live router (port %d)",
+        bridge_port_file,
+        router_port,
     )
     return True
 

@@ -198,6 +198,6 @@ class FrozenProofFixture:
             "delta_entries": delta,
             "delta_sha256": digest(delta),
             "named_smokes": [],
-            "attribution": {"unit_id": "fixture-unit"},
+            "attribution": {"annotation": "fixture-provenance"},
             "known_failures": {},
         }

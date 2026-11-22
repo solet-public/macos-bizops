@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import re
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -19,6 +21,7 @@ sys.path.insert(0, str(_SOLET_CLI_ROOT / "src"))
 
 from solet_manager import contract_reconciliation as reconciliation_module  # noqa: E402
 from solet_manager import contracts as contracts_module  # noqa: E402
+from solet_manager.contract_reconciliation_chain import resolve_reconciliation_chain  # noqa: E402
 from solet_manager.contracts import (  # noqa: E402
     ContractBundle,
     ContractReconciliation,
@@ -37,6 +40,8 @@ _LEGACY_FLOW = _SOLET_CLI_ROOT / "tests/fixtures/contracts/reconcile_contract_le
 _CONTRACTS = _ROOT / "plugins/github_midwife_plugin/knowledge_base"
 _DIGEST_TOOL = _SOLET_CLI_ROOT / "tools/compute_contract_digest.py"
 _MANIFEST = _SOLET_CLI_ROOT / "src/solet_manager/released_metadata/contract_reconciliation_manifest.json"
+_CONTROLLER_RETIREMENT_DIGEST = "sha256:81f8688f750de3aad153c98227ba7fd1cab6f66a28919667fd42bba797c7b1e4"
+_WORKER_WORDING_DIGEST = "sha256:c44e4837c96a059b1361914b94d1693faa5049a7e293e45596713c4437e7f9e0"
 
 
 def _check(condition: object, label: str) -> None:
@@ -242,19 +247,46 @@ def _check_manifest_destination_shape() -> None:
         },
         "sixth migration pins the four precondition-subset sibling repairs",
     )
+    historical = migrations[:86] if isinstance(migrations, list) else []
+    historical_bytes = json.dumps(historical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     _check(
-        isinstance(migrations, list) and len(migrations) == 39 + 47,
-        "thirty-nine preserved migrations plus forty-seven explicit controller-retirement forward bridges",
+        hashlib.sha256(historical_bytes).hexdigest() == "7779296035f5ca105d524bcfde1a345f1a8f72ec15a89c6270af2368c0aaa2a1",
+        "the 39 original migrations and 47 controller-retirement bridges retain their exact definitions",
     )
     _check(
         all(isinstance(item, dict) and isinstance(item.get("destination"), dict) and set(item["destination"]) == {"flow_id", "flow_contract_digest"} for item in migrations),
         "shipped destination identities are digest-only",
     )
-    _check(len(load_contract_reconciliations()) == 86, "digest-only manifest parses")
+    _check(len(load_contract_reconciliations()) == len(migrations), "digest-only manifest parses, including forward entries")
     _check(
-        all(row.get("retired_decision_ids") == ["git_mutation_control"] and row.get("retired_public_input_ids") == ["git_controller_name"] for row in migrations[39:]),
-        "all forty-five new bridges explicitly retire both public answer fields",
+        all(row.get("retired_decision_ids") == ["git_mutation_control"] and row.get("retired_public_input_ids") == ["git_controller_name"] for row in historical[39:]),
+        "all 47 controller-retirement bridges explicitly retire both public answer fields",
     )
+
+
+def _check_worker_wording_upgrade_routes() -> None:
+    declarations = load_contract_reconciliations()
+    previous = declarations[39:86]
+    journal = _transaction()
+    for entry in previous:
+        original = replace(journal, flow_id=entry.flow_id, flow_source_revision=entry.source_revision, flow_contract_digest=entry.source_digest)
+        forward = resolve_reconciliation_chain(original, _WORKER_WORDING_DIGEST, declarations)
+        expected = replace(entry, migration_id=forward.migration_id, destination_digest=_WORKER_WORDING_DIGEST)
+        _check(forward == expected, f"forward bridge preserves the migration payload of {entry.migration_id}")
+
+    # An already-reconciled journal carries the newer digest and its original revision.
+    for revision in {entry.source_revision for entry in previous}:
+        reconciled = replace(journal, flow_source_revision=revision, flow_contract_digest=_CONTROLLER_RETIREMENT_DIGEST)
+        forward = resolve_reconciliation_chain(reconciled, _WORKER_WORDING_DIGEST, declarations)
+        expected = ContractReconciliation(
+            migration_id=forward.migration_id,
+            flow_id=journal.flow_id,
+            source_revision=revision,
+            source_digest=_CONTROLLER_RETIREMENT_DIGEST,
+            destination_digest=_WORKER_WORDING_DIGEST,
+            stage_probe_mappings=(),
+        )
+        _check(forward == expected, f"wording-only bridge preserves the already-reconciled journal at {revision}")
 
 
 def _check_digest_tool() -> None:
@@ -304,6 +336,7 @@ def main() -> int:
     _check_flow_binding()
     _check_116_destination_selection()
     _check_manifest_destination_shape()
+    _check_worker_wording_upgrade_routes()
     _check_digest_tool()
     print(f"reconciliation_identity_i1_smoke: {_checks} checks passed")
     return 0

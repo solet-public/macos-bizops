@@ -16,7 +16,7 @@ L1 is deterministic. External tools and platform gates are wrapped into one stru
 
 ## One engine, many run-profiles
 
-There is a single engine parameterized by a run-profile — target, rulebook stack, stakes profile, substrate, and scope. Self-vet and foreign-vet are the same engine with a different target and rulebook tier, never a forked codebase. The scope (whole-tree, diff-scoped, subsystem) and the coverage measurement (opt-in, on-demand) are further run-profile axes. Vetting is advisory to the commit path and never a second gate — the platform's own Git-Controller gate run remains the sole commit authority.
+There is a single engine parameterized by a run-profile — target, rulebook stack, stakes profile, substrate, and scope. Self-vet and foreign-vet are the same engine with a different target and rulebook tier, never a forked codebase. The scope (whole-tree, diff-scoped, subsystem) and the coverage measurement (opt-in, on-demand) are further run-profile axes. Vetting is advisory to the commit path and never a second gate. In the platform's own development checkout the Git-Controller gate run remains the sole commit authority; any other repository's own landing rules apply there.
 
 ## Target-class derivation and the calibrate posture
 

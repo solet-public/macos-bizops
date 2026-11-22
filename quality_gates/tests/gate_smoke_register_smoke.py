@@ -70,7 +70,7 @@ from tempfile import TemporaryDirectory
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 # Bind every package this smoke measures to THIS tree. The repository venv is
 # shared with the main checkout, so an editable install resolves a plugin
-# package to the MAIN checkout's src/ -- in a lane worktree that would silently
+# package to the MAIN checkout's src/ -- in a linked worktree that would silently
 # measure code this candidate has not changed. Fronting sys.path with this
 # tree's own plugin sources makes the smoke measure the tree it lives in, which
 # is also what makes it meaningful on an assembled release tree.

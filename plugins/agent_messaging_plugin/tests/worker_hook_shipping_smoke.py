@@ -173,7 +173,6 @@ def test_live_session_context_wiring_for_both_adapters() -> None:
         _tmux_hook_settings_json(
             allowlist_hook_path=paths["headless_tool_allowlist_gate.py"],
             capture_hook_path=paths["capture_session_mapping.py"],
-            heartbeat_hook_path=paths["heartbeat_report_alive.py"],
             rotation_due_hook_path=paths["rotation_due_watch.py"],
             wake_hook_path=paths["wake_waiter.py"],
             session_start_hook_path=paths["session_start_context.py"],
@@ -183,11 +182,29 @@ def test_live_session_context_wiring_for_both_adapters() -> None:
     ]
     for index, raw in enumerate(settings):
         hooks = json.loads(raw)["hooks"]
+        _check("heartbeat_report_alive.py" not in raw, f"adapter {index} does not inject the retired heartbeat hook")
+        _check("rotation_due_watch.py" in raw, f"adapter {index} keeps the rotation-due context watch")
+        _check("wake_waiter.py" in raw, f"adapter {index} keeps the wake hook")
         matches = [(group.get("matcher"), hook) for group in hooks["SessionStart"] for hook in group["hooks"] if "session_start_context.py" in hook["command"]]
         _check(len(matches) == 1, f"adapter {index} wires one live-context hook")
-        _check(matches[0][0] == "startup|resume|clear", f"adapter {index} covers clear and startup")
-        _check(matches[0][1]["timeout"] == 8, f"adapter {index} bounds live-context hook")
+        _check(matches[0][0] == "startup|resume|clear|compact", f"adapter {index} covers startup, resume, clear and compact")
+        _check(matches[0][1]["timeout"] == 40, f"adapter {index} bounds live-context hook")
         _check("session_start_context.py" not in json.dumps(hooks["UserPromptSubmit"]), f"adapter {index} does not repeat live reads per prompt")
+        _check(json.loads(raw).get("autoCompactWindow") == 500000, f"adapter {index} carries the 500000-token compaction window")
+
+
+def test_checkout_settings_wire_the_live_context_hook_for_compaction() -> None:
+    """After a compaction the host runs SessionStart again with source compact;
+    only a registration whose matcher names it re-injects context. The
+    checkout's settings.json is a DEV-CHECKOUT-ONLY truth: a born clone ships
+    no ``.claude/`` at all, so that shape prints an explicit N/A instead."""
+    if not _rung1_present():
+        print("  N/A   checkout settings leg: no .claude/ in this tree (born-clone shape) -- dev-checkout-only truth, not applicable here")
+        return
+    settings = json.loads((_CHECKOUT_HOOKS_DIR.parent / "settings.json").read_text(encoding="utf-8"))
+    groups = [group for group in settings["hooks"]["SessionStart"] if any("session_start_context.py" in hook["command"] for hook in group["hooks"])]
+    _check(len(groups) == 1, "checkout settings wire one live-context hook")
+    _check(groups[0].get("matcher") == "startup|resume|clear|compact", "checkout settings cover startup, resume, clear and compact")
 
 
 def _adapter_settings(root: Path) -> list[str]:
@@ -197,7 +214,6 @@ def _adapter_settings(root: Path) -> list[str]:
         _tmux_hook_settings_json(
             allowlist_hook_path=paths["headless_tool_allowlist_gate.py"],
             capture_hook_path=paths["capture_session_mapping.py"],
-            heartbeat_hook_path=paths["heartbeat_report_alive.py"],
             rotation_due_hook_path=paths["rotation_due_watch.py"],
             wake_hook_path=paths["wake_waiter.py"],
             session_start_hook_path=paths["session_start_context.py"],
@@ -292,6 +308,7 @@ def main() -> int:
     test_every_declared_filename_exists_in_the_checkout_origin_rung()
     test_resolution_against_the_real_repo_root_matches_the_measured_shape()
     test_live_session_context_wiring_for_both_adapters()
+    test_checkout_settings_wire_the_live_context_hook_for_compaction()
     print("-" * 68)
     print(f"PASSED: {_passed}")
     print(f"FAILED: {len(_failed)}")

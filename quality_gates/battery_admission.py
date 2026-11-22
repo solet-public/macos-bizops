@@ -1,12 +1,10 @@
-"""Shared, capacity-based admission for smoke batteries.
+"""Ordered smoke-battery tickets backed by neutral numeric host leases.
 
 Tickets are operational snapshots, shared by every lane of the same user.
 A short flock protects queue updates; it is NEVER held while a battery runs.
-Priority orders waiting tickets; admitted batteries run concurrently. Active
-demand reserves capacity during the one-minute load average's startup lag.
-The head may start when no tracked battery runs, even on a busy host; all
-other waits end after twenty minutes with an advisory. Unknown measurements
-or unavailable ticket storage also advise and proceed (rul_becb4bed).
+Priority orders waiting tickets; admitted batteries run concurrently. The
+head checks running demand from both clients under the shared host lock.
+Unknown figures advise while known figures still decide.
 
 Lifecycle: create waiting, read/refresh reason, transition to running, then
 remove on exit/interruption; the next invocation sweeps dead PID owners.
@@ -31,7 +29,11 @@ from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+if TYPE_CHECKING:
+    from quality_gates import host_compute_budget
 
 PRIORITIES = {"normal": 0, "critical": 1}
 MAX_WAIT_SECONDS = 20 * 60
@@ -56,7 +58,7 @@ def priority_value(value: str | None = None) -> str:
 
 
 def ticket_directory() -> Path:
-    """Use one per-user directory across all lane worktrees."""
+    """Use one per-user directory across all linked checkouts."""
     return Path(os.environ.get(DIRECTORY_ENV, str(Path.home() / ".ananta" / "locks" / "run_smokes_admission")))
 
 
@@ -68,10 +70,6 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         pass
     return True
-
-
-def _capacity() -> tuple[int | None, float]:
-    return os.cpu_count(), os.getloadavg()[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,35 +132,50 @@ def _read_tickets(directory: Path, alive: Callable[[int], bool], report: Callabl
     return tickets
 
 
-def _decision(ticket: Ticket, tickets: list[Ticket], cpus: int | None, load: float, now: float) -> tuple[bool, str]:
-    """Return admission and its measured reason; caller holds the queue lock."""
-    age = max(0.0, now - ticket.requested_at)
-    if age >= MAX_WAIT_SECONDS:
-        return True, f"ADVISORY aging limit {MAX_WAIT_SECONDS}s reached (waited {age:.1f}s); proceeding"
-    if cpus is None or cpus < 1 or not math.isfinite(load) or load < 0:
-        return True, "ADVISORY capacity unknown; proceeding without a measured-capacity claim"
-    return _capacity_decision(ticket, tickets, cpus, load)
+def _host_load_advisory() -> str:
+    try:
+        cpu_count = os.cpu_count()
+        load = os.getloadavg()[0]
+        if cpu_count and load > cpu_count:
+            return f"; ADVISORY host load {load:.1f}>{cpu_count} without lease is not capacity demand"
+    except OSError as error:
+        return f"; ADVISORY host load unavailable: {error}"
+    return ""
 
 
-def _capacity_decision(ticket: Ticket, tickets: list[Ticket], cpus: int, load: float) -> tuple[bool, str]:
+def _admission_decision(
+    ticket: Ticket,
+    tickets: list[Ticket],
+    job_kind: str,
+    reference_workers: int | None,
+    lease_box: list[host_compute_budget.LeaseOutcome],
+) -> tuple[bool, str]:
+    import host_compute_budget  # noqa: PLC0415
+
     waiting = [row for row in tickets if row.state == "waiting"]
     head = min(waiting, key=lambda row: (-PRIORITIES[row.priority], row.requested_at, row.name))
-    running = [row for row in tickets if row.state == "running"]
-    reserved = sum(row.demand for row in running)
-    capacity = f"capacity: load {load:.1f} + demand {ticket.demand} {'<=' if load + ticket.demand <= cpus else '>'} {cpus} cpus; reserved {reserved}"
     if head.name != ticket.name:
-        return False, f"{capacity}; earlier/priority ticket {head.name} ({head.priority}) ahead"
-    if max(load, reserved) + ticket.demand <= cpus:
-        return True, capacity
-    if not running:
-        return True, f"ADVISORY {capacity}; highest-priority oldest ticket with no running battery; proceeding"
-    return False, capacity
+        return False, f"earlier/priority ticket {head.name} ({head.priority}) ahead"
+    lease = host_compute_budget.try_acquire(
+        job_kind,
+        None if reference_workers is not None else ticket.demand,
+        workers=ticket.demand if reference_workers is not None else None,
+        reference_workers=reference_workers,
+        token=ticket.name,
+    )
+    lease_box[:] = [lease]
+    reason = lease.reason or "numeric host capacity admitted"
+    if lease.advisories:
+        reason += "; ADVISORY " + ", ".join(lease.advisories)
+    return lease.admitted, reason + _host_load_advisory()
 
 
 def _wait(
     directory: Path,
     ticket: Ticket,
-    capacity: Callable[[], tuple[int | None, float]],
+    job_kind: str,
+    reference_workers: int | None,
+    lease_box: list[host_compute_budget.LeaseOutcome],
     clock: Callable[[], float],
     sleep: Callable[[float], None],
     alive: Callable[[int], bool],
@@ -172,9 +185,8 @@ def _wait(
     while True:
         with _locked(directory):
             tickets = [row for row in _read_tickets(directory, alive, report) if row.kind == "battery"]
-            cpus, load = capacity()
             now = clock()
-            admitted, reason = _decision(ticket, tickets, cpus, load, now)
+            admitted, reason = _admission_decision(ticket, tickets, job_kind, reference_workers, lease_box)
             reason = f"{reason}; priority {ticket.priority}; ticket {ticket.name}; waiting since {ticket.waiting_since}"
             ticket = replace(ticket, state="running" if admitted else "waiting", reason=reason)
             _publish(directory, ticket)
@@ -184,7 +196,7 @@ def _wait(
         if now - last_report >= REPORT_SECONDS:
             report(f"run_smokes admission: waiting {reason!r}")
             last_report = now
-        sleep(min(POLL_SECONDS, max(0.0, MAX_WAIT_SECONDS - (now - ticket.requested_at))))
+        sleep(POLL_SECONDS)
 
 
 def _inherited(directory: Path, tickets: list[Ticket]) -> Ticket | None:
@@ -288,8 +300,9 @@ def admit(
     demand: int,
     priority: str | None = None,
     *,
+    job_kind: str = "full_battery",
+    reference_workers: int | None = None,
     directory: Path | None = None,
-    capacity: Callable[[], tuple[int | None, float]] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     alive: Callable[[int], bool] = _pid_alive,
@@ -297,14 +310,14 @@ def admit(
 ) -> Generator[Ticket | None]:
     """Wait before starting a suite; release its ticket on every Python exit.
 
-    Capacity, monotonic time, sleep and PID observation are injectable seams
-    for fast tests; real runs always measure the host. Unknown data advises.
+    Monotonic time, sleep and PID observation are injectable seams for fast
+    tests; real runs use the host lease registry.
     """
     directory = ticket_directory() if directory is None else directory
-    capacity = _capacity if capacity is None else capacity
     name = f"{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex}"
     ticket: Ticket | None = None
     owned = False
+    lease_box: list[host_compute_budget.LeaseOutcome] = []
     previous = os.environ.get(INHERITED_ENV)
     reported: set[str] = set()
 
@@ -324,7 +337,7 @@ def admit(
                     owned = True
                     _publish(directory, ticket)
             if owned:
-                ticket = _wait(directory, ticket, capacity, clock, sleep, alive, report_once)
+                ticket = _wait(directory, ticket, job_kind, reference_workers, lease_box, clock, sleep, alive, report_once)
         except (OSError, ValueError, TypeError) as exc:
             report(f"ADVISORY run_smokes admission: capacity/ticket data unavailable: {exc}; proceeding")
             ticket = None
@@ -337,4 +350,8 @@ def admit(
         else:
             os.environ[INHERITED_ENV] = previous
         if owned:
+            if lease_box:
+                import host_compute_budget  # noqa: PLC0415
+
+                host_compute_budget.release(lease_box[0])
             _release(directory, name, report)

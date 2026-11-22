@@ -1096,20 +1096,23 @@ class MemoryServiceAPI(ABC):
     # `service_interface::session_ledger_service::ensure_periodic_poll_schedule`.
     @service_interface_process(
         name="ensure_schedules",
+        is_async=True,
         is_discoverable=False,  # boot-only; invoked by starting_actions, not the model
         provider="memory_service",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={},
-        return_value_schema=ReturnValueSchema(
-            description="Scheduled memory-maintenance install result",
-            type=ParameterType.OBJECT,
-            properties={
-                "message": ParameterMetadata(type=ParameterType.STRING, description="Install summary message"),
-                "schedules": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description="Names of the crons installed on this call",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Scheduled memory-maintenance install result",
+                type=ParameterType.OBJECT,
+                properties={
+                    "message": ParameterMetadata(type=ParameterType.STRING, description="Install summary message"),
+                    "schedules": ParameterMetadata(
+                        type=ParameterType.LIST,
+                        description="Names of the crons installed on this call",
+                    ),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
     )

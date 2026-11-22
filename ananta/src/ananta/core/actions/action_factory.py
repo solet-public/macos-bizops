@@ -21,6 +21,7 @@ from ananta.core.actions.inference_processor_templates import merge_processor_te
 from ananta.core.actions.instance_pin import CLAIM_PIN_KEY
 from ananta.core.contexts.normalization import normalize_flow_id, normalize_session_id
 from ananta.core.domain.error_codes import ErrorCode
+from ananta.core.domain.types import ActionResult
 from ananta.core.plugins.plugin_contracts import ActionStatus
 from ananta.error_handling import FrameworkError
 
@@ -30,14 +31,12 @@ logger = logging.getLogger(__name__)
 JsonDict = dict[str, Any]
 
 UNKNOWN_ARGUMENTS_ERROR_CODE = "action.unknown_arguments"
-_SESSION_START_PROCESSES = frozenset(
-    f"plugin::agent_messaging_plugin::{name}"
-    for name in ("spawn_session", "dispatch_managed_work", "provision_role_session")
-)
+_SESSION_START_PROCESSES = frozenset(f"plugin::agent_messaging_plugin::{name}" for name in ("spawn_session",))
 
 
 def reject_retired_session_arguments(
-    process_key: str, arguments: dict[str, object],
+    process_key: str,
+    arguments: dict[str, object],
 ) -> None:
     """Reject retired session lifetime inputs before generic schema validation."""
     if process_key not in _SESSION_START_PROCESSES:
@@ -72,11 +71,7 @@ def validate_process_arguments(
             },
         )
 
-    required = [
-        name
-        for name, meta in parameters.items()
-        if isinstance(meta, dict) and meta.get("required")
-    ]
+    required = [name for name, meta in parameters.items() if isinstance(meta, dict) and meta.get("required")]
     missing = [name for name in required if name not in arguments]
     if missing:
         raise FrameworkError(
@@ -94,9 +89,7 @@ def validate_process_arguments(
 class TemplateEngine(Protocol):
     """Protocol for template engine interface."""
 
-    def resolve_templates(
-        self, action_def: dict[str, object], context: dict[str, object]
-    ) -> dict[str, object]:
+    def resolve_templates(self, action_def: dict[str, object], context: dict[str, object]) -> dict[str, object]:
         """Resolve templates in action definition with context."""
         ...
 
@@ -104,7 +97,7 @@ class TemplateEngine(Protocol):
 class StateService(Protocol):
     """Protocol for state service interface."""
 
-    def generate_unique_string(self, length: int, encoding: str) -> dict[str, object]:
+    def generate_unique_string(self, length: int, encoding: str) -> ActionResult:
         """Generate a unique random string."""
         ...
 
@@ -209,11 +202,7 @@ class ActionFactory:
         if err_kind_value == "bridge_delivery":
             return
         raise FrameworkError(
-            message=(
-                "Deterministic-continuation action requires a process-level "
-                "error handler; no error_processor_customizations declared "
-                f"for {process_key!r}"
-            ),
+            message=(f"Deterministic-continuation action requires a process-level error handler; no error_processor_customizations declared for {process_key!r}"),
             error_code="action_factory.error_processor_required",
             details={
                 "process_key": process_key,
@@ -256,9 +245,14 @@ class ActionFactory:
     # (parent provenance for child actions submitted by dispatchers), and the
     # instance pin the recorder writes into ``excluded_versions``.
     _METADATA_KEYS = (
-        "session_id", "flow_id", "context_id",
-        "result_processor", "result_processor_target",
-        "error_processor", "processor_depth", "processor_origin",
+        "session_id",
+        "flow_id",
+        "context_id",
+        "result_processor",
+        "result_processor_target",
+        "error_processor",
+        "processor_depth",
+        "processor_origin",
         "result_processor_kind",
         "error_processor_kind",
         "job_result_ref",
@@ -276,9 +270,7 @@ class ActionFactory:
             if key in action_def:
                 action[key] = action_def[key]
 
-    def create_action(
-        self, action_def: dict[str, object], context: dict[str, object] | None = None
-    ) -> dict[str, object]:
+    def create_action(self, action_def: dict[str, object], context: dict[str, object] | None = None) -> dict[str, object]:
         context = context or {}
 
         # Validate against live process registry and default processor customizations.
@@ -524,7 +516,8 @@ class ActionFactory:
         return None
 
     def _get_error_processor_customizations(
-        self, process_key: str,
+        self,
+        process_key: str,
     ) -> JsonDict | None:
         """Get ``error_processor_customizations`` for a process from registry."""
         processes_obj = self.process_registry.get("processes", {})
@@ -560,11 +553,7 @@ class ActionFactory:
         result (or error) appears in the prompt (context_layer, reasoning_slot,
         etc.). Returns None if no message_rendering is defined.
         """
-        customization_key = (
-            "error_processor_customizations"
-            if error_path
-            else "result_processor_customizations"
-        )
+        customization_key = "error_processor_customizations" if error_path else "result_processor_customizations"
         processes_obj = self.process_registry.get("processes", {})
         if not isinstance(processes_obj, dict):
             return None
@@ -708,7 +697,8 @@ class ActionFactory:
         return merged
 
     def _get_error_processor_from_customizations(
-        self, process_key: str,
+        self,
+        process_key: str,
     ) -> JsonDict | None:
         """Build an error processor action from ``error_processor_customizations``.
 
@@ -750,7 +740,10 @@ class ActionFactory:
         prompt = params["prompt"]
         if isinstance(prompt, dict):
             self._enrich_result_processor_prompt(
-                prompt, user_content, customizations, process_key,
+                prompt,
+                user_content,
+                customizations,
+                process_key,
             )
 
         return merged
@@ -775,11 +768,7 @@ class ActionFactory:
             process_key: Process key to attach to the observation.
         """
         # Preserve base template's output_schema before replacing user content
-        base_output_schema = (
-            prompt.get("user", {}).get("output_schema")
-            if isinstance(prompt.get("user"), dict)
-            else None
-        )
+        base_output_schema = prompt.get("user", {}).get("output_schema") if isinstance(prompt.get("user"), dict) else None
         prompt["user"] = user_content
         if base_output_schema and "output_schema" not in user_content:
             user_content["output_schema"] = base_output_schema
@@ -799,17 +788,13 @@ class ActionFactory:
         if isinstance(message_rendering, dict) and message_rendering:
             prompt["message_rendering"] = dict(message_rendering)
 
-    def _substitute_templates(
-        self, action_def: dict[str, object], context: dict[str, object]
-    ) -> dict[str, object]:
+    def _substitute_templates(self, action_def: dict[str, object], context: dict[str, object]) -> dict[str, object]:
         # Preserve original name field to prevent corruption
         original_name = action_def.get("name")
 
         # OPTIMIZATION: Skip template resolution if no template patterns are detected
         action_def_str = str(action_def)
-        has_templates = any(
-            pattern in action_def_str for pattern in ["__", "<<", ">>", "{{", "}}", "@include"]
-        )
+        has_templates = any(pattern in action_def_str for pattern in ["__", "<<", ">>", "{{", "}}", "@include"])
 
         if not has_templates:
             return action_def
@@ -876,9 +861,7 @@ class ActionFactory:
             # Truncate instead of failing
             truncated_notes = normalized_notes[:NOTES_MAX_LENGTH]
             action_def["notes"] = truncated_notes
-            logger.error(
-                f"ACTION_FACTORY: Notes truncated from {len(normalized_notes)} to {NOTES_MAX_LENGTH} chars for action '{action_def.get('name')}'"
-            )
+            logger.error(f"ACTION_FACTORY: Notes truncated from {len(normalized_notes)} to {NOTES_MAX_LENGTH} chars for action '{action_def.get('name')}'")
             normalized_notes = truncated_notes
 
         # Persist normalized notes back onto the action definition for downstream persistence
@@ -907,11 +890,7 @@ class ActionFactory:
         parts = process_key.split("::")
         if len(parts) >= 3:
             return parts[2]  # function_name is the third part
-        raise ValueError(
-            f"Malformed process_key '{process_key}': expected "
-            f"'provider_type::provider::function_name' (3+ segments), "
-            f"got {len(parts)} segment(s)"
-        )
+        raise ValueError(f"Malformed process_key '{process_key}': expected 'provider_type::provider::function_name' (3+ segments), got {len(parts)} segment(s)")
 
     def _generate_unique_suffix(self) -> str:
         """Generate unique suffix using the service interface for DRY compliance.
@@ -957,9 +936,7 @@ class ActionFactory:
 
         return random_string_obj
 
-    def submit_action_definition(
-        self, action_definition: dict[str, object], context: dict[str, object] | None = None
-    ) -> str:
+    def submit_action_definition(self, action_definition: dict[str, object], context: dict[str, object] | None = None) -> str:
         """Submit action definition with fail-fast semantics.
 
         Args:
@@ -985,12 +962,7 @@ class ActionFactory:
 
     def _is_ready(self) -> bool:
         """Check if all required services are available for action submission."""
-        return (
-            self.action_event_recorder is not None
-            and bool(self.process_registry)
-            and self.template_engine is not None
-            and self.state_service is not None
-        )
+        return self.action_event_recorder is not None and bool(self.process_registry) and self.template_engine is not None and self.state_service is not None
 
     def _enforce_flow_id(self, action_definition: dict[str, object]) -> str:
         """Enforce that a valid flow_id is present in action_definition. Fail fast if missing.
@@ -1023,9 +995,7 @@ class ActionFactory:
             },
         )
 
-    def _submit_immediate(
-        self, action_definition: dict[str, object], context: dict[str, object] | None = None
-    ) -> str:
+    def _submit_immediate(self, action_definition: dict[str, object], context: dict[str, object] | None = None) -> str:
         """Submit action immediately when all services are available."""
         context = context or {}
 
@@ -1036,9 +1006,7 @@ class ActionFactory:
         context[CONTEXT_KEY_FLOW_ID] = flow_id
 
         # Normalize session_id (optional, unlike flow_id) and propagate to context
-        session_id_raw = action_definition.get(CONTEXT_KEY_SESSION_ID) or context.get(
-            CONTEXT_KEY_SESSION_ID
-        )
+        session_id_raw = action_definition.get(CONTEXT_KEY_SESSION_ID) or context.get(CONTEXT_KEY_SESSION_ID)
         normalized_session = normalize_session_id(session_id_raw)
         if normalized_session:
             action_definition[CONTEXT_KEY_SESSION_ID] = normalized_session
@@ -1135,9 +1103,7 @@ class ActionFactory:
         else:
             resolved_obj["name"] = f"result_processor_action_{unique_suffix}"
 
-    def _inject_session_context(
-        self, resolved_obj: dict[str, object], results: dict[str, object]
-    ) -> None:
+    def _inject_session_context(self, resolved_obj: dict[str, object], results: dict[str, object]) -> None:
         """Inject session_id, flow_id, and context_id from results into resolved action."""
         # Normalize IDs to prevent empty string propagation
         normalized_session = normalize_session_id(results.get(TEMPLATE_VAR_SESSION_ID))
@@ -1153,9 +1119,7 @@ class ActionFactory:
         if context_id and isinstance(context_id, str):
             resolved_obj["context_id"] = context_id
 
-    def _resolve_notes_field(
-        self, resolved_obj: dict[str, object], results: dict[str, object]
-    ) -> None:
+    def _resolve_notes_field(self, resolved_obj: dict[str, object], results: dict[str, object]) -> None:
         """Resolve and validate the notes field."""
         notes_value = resolved_obj.get("notes")
         if isinstance(notes_value, str) and notes_value.strip():
@@ -1174,9 +1138,7 @@ class ActionFactory:
             details={"resolved_obj": resolved_obj},
         )
 
-    def submit_result_with_template(
-        self, results: dict[str, object], processor_template: dict[str, object]
-    ) -> str:
+    def submit_result_with_template(self, results: dict[str, object], processor_template: dict[str, object]) -> str:
         """Submit action with result processor template variable substitution."""
 
         if not self.action_event_recorder:
@@ -1207,13 +1169,9 @@ class ActionFactory:
             # This ensures flow_id propagates and function templates can access result data
             submission_context: dict[str, object] = {}
             if TEMPLATE_VAR_SESSION_ID in results_with_defaults:
-                submission_context[CONTEXT_KEY_SESSION_ID] = results_with_defaults[
-                    TEMPLATE_VAR_SESSION_ID
-                ]
+                submission_context[CONTEXT_KEY_SESSION_ID] = results_with_defaults[TEMPLATE_VAR_SESSION_ID]
             if TEMPLATE_VAR_FLOW_ID in results_with_defaults:
-                submission_context[CONTEXT_KEY_FLOW_ID] = results_with_defaults[
-                    TEMPLATE_VAR_FLOW_ID
-                ]
+                submission_context[CONTEXT_KEY_FLOW_ID] = results_with_defaults[TEMPLATE_VAR_FLOW_ID]
             # Pass result data as local_variables for function template resolution
             # This allows <<<:...>>> templates to access RESULT, ACTION_STATUS, etc.
             submission_context["local_variables"] = results_with_defaults
@@ -1256,12 +1214,7 @@ class ActionFactory:
         """Safe recursive substitution for <<VARIABLE>> patterns."""
         if isinstance(template, dict):
             # Don't substitute inside nested result_processor fields
-            return {
-                key: template[key]
-                if key == "result_processor"
-                else self._substitute_result_variables(value, results)
-                for key, value in template.items()
-            }
+            return {key: template[key] if key == "result_processor" else self._substitute_result_variables(value, results) for key, value in template.items()}
 
         if isinstance(template, list):
             return [self._substitute_result_variables(item, results) for item in template]

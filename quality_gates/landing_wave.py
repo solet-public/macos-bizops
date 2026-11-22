@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only composition and evidence helpers for one landing-wave.v1.
+"""Read-only composition and tree evidence helpers for a group of members.
 
-This module intentionally never stages, commits, merges, switches branches,
-or modifies a Git worktree.  The Git authority owns those operations; it uses
-the typed receipts below to prove the one composed subject and every member's
-separate staged identity.
+The caller owns Git mutations. These helpers measure the composed tree and
+each member's staged paths, identified by an opaque caller-supplied label.
 """
 
 from __future__ import annotations
@@ -15,10 +13,9 @@ import json
 import os
 import stat
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import cast
 
 from quality_gates.candidate_tree import (
     CandidateTree,
@@ -47,7 +44,7 @@ class WaveSource:
 class StagedMemberEvidence:
     """Exact staged paths for one member before its normal hook-enabled commit."""
 
-    unit_id: str
+    member_label: str
     paths: tuple[str, ...]
     staged_sha256: str
 
@@ -61,29 +58,12 @@ class WaveTreeEvidence:
     path_count: int
 
 
-_COMPLETION_FIELDS = frozenset({
-    "repository_id",
-    "wave_id",
-    "landing_id",
-    "final_master_commit_sha",
-    "final_master_tree_sha",
-    "wave_tip_commit_sha",
-    "manifest_sha256",
-    "accepted_wave_authorization_sha256",
-    "accepted_authorization_message_id",
-    "accepted_authorization_sender_instance_id",
-    "pre_merge_frontier_timestamp",
-    "pre_merge_newest_message_id",
-    "successful_gate_run_id",
-    "completed_at",
-    "recorded_by_actor_id",
-    "per_unit_landings",
-})
-
-
 def _git(root: Path, *arguments: str) -> bytes:
     completed = subprocess.run(
-        ("git", *arguments), cwd=root, capture_output=True, check=False,
+        ("git", *arguments),
+        cwd=root,
+        capture_output=True,
+        check=False,
     )
     if completed.returncode != 0:
         detail = completed.stderr.decode(errors="replace").strip()
@@ -108,8 +88,6 @@ def _validate_member_path(path: str) -> str:
 
 
 def _canonical_paths(paths: Sequence[str]) -> tuple[str, ...]:
-    if not paths:
-        raise LandingWaveError("a member must contain at least one exact path")
     normalized = [_validate_member_path(path) for path in paths]
     if len(set(normalized)) != len(normalized):
         raise LandingWaveError("member contains duplicate exact paths")
@@ -166,7 +144,10 @@ def compose_wave(
     """Create a candidate from pinned-base plus pre-frozen entries only."""
     try:
         return materialize_frozen_entries(
-            repository_root, destination, entries, base_ref=base_ref,
+            repository_root,
+            destination,
+            entries,
+            base_ref=base_ref,
         )
     except CandidateTreeError as exc:
         raise LandingWaveError(f"wave composition refused: {exc}") from exc
@@ -199,23 +180,22 @@ def verify_integration_tree(candidate: CandidateTree) -> WaveTreeEvidence:
 def verify_staged_member(
     integration_root: Path,
     *,
-    unit_id: str,
+    member_label: str,
     exact_paths: Sequence[str],
 ) -> StagedMemberEvidence:
-    """Require global staged-index equality; no pathspec can hide contamination."""
+    """Match the whole index to exact paths, including an empty member.
+
+    The label is opaque evidence for the caller; paths alone determine equality.
+    """
     expected = _canonical_paths(exact_paths)
     raw = _git(integration_root.resolve(), "diff", "--cached", "--name-only", "--no-renames", "-z")
-    actual = tuple(
-        item.decode("utf-8") for item in raw.split(b"\0") if item
-    )
+    actual = tuple(item.decode("utf-8") for item in raw.split(b"\0") if item)
     sorted_actual = tuple(sorted(actual, key=lambda item: item.encode("utf-8")))
     if actual != sorted_actual:
         raise LandingWaveError("staged index is not byte-sorted; refuse ambiguous equality")
     if actual != expected:
-        raise LandingWaveError(
-            f"staged index does not equal member {unit_id}: expected={expected!r} actual={actual!r}"
-        )
-    return StagedMemberEvidence(unit_id, actual, _sha256(raw))
+        raise LandingWaveError(f"staged index does not equal member {member_label}: expected={expected!r} actual={actual!r}")
+    return StagedMemberEvidence(member_label, actual, _sha256(raw))
 
 
 def verify_empty_index(integration_root: Path) -> None:
@@ -232,67 +212,8 @@ def verify_final_tree(
     """Refuse a post-gate tree whose complete content differs from the gate subject."""
     actual = _tree_evidence(candidate.root, candidate.manifest)
     if actual != expected:
-        raise LandingWaveError(
-            f"final composite tree differs from gated subject: expected={expected} actual={actual}"
-        )
+        raise LandingWaveError(f"final composite tree differs from gated subject: expected={expected} actual={actual}")
     return actual
-
-
-def _validate_completion_scalars(payload: Mapping[str, object]) -> None:
-    """Validate receipt keys and non-member scalar values."""
-    text_fields = _COMPLETION_FIELDS.difference({"pre_merge_newest_message_id", "per_unit_landings"})
-    for name in text_fields:
-        if not isinstance(payload[name], str) or not cast(str, payload[name]):
-            raise LandingWaveError(f"completion receipt field is not a non-empty string: {name}")
-    newest = payload["pre_merge_newest_message_id"]
-    if newest is not None and (not isinstance(newest, str) or not newest):
-        raise LandingWaveError("completion receipt newest message id is invalid")
-
-
-def _completion_mapping(
-    item: object,
-    *,
-    common_landing_id: str,
-    units: set[str],
-) -> dict[str, str]:
-    """Validate one unique per-unit mapping against the receipt landing."""
-    if not isinstance(item, dict) or set(item) != {"unit_id", "unit_commit_sha", "landing_id"}:
-        raise LandingWaveError("completion receipt mapping has invalid keys")
-    rendered = cast(dict[str, object], item)
-    if not all(isinstance(rendered[field], str) and rendered[field] for field in rendered):
-        raise LandingWaveError("completion receipt mapping has invalid values")
-    unit_id = cast(str, rendered["unit_id"])
-    landing_id = cast(str, rendered["landing_id"])
-    if unit_id in units or landing_id != common_landing_id:
-        raise LandingWaveError("completion receipt mappings are not unique/common-landing")
-    units.add(unit_id)
-    return cast(dict[str, str], rendered)
-
-
-def _completion_mappings(payload: Mapping[str, object]) -> list[dict[str, str]]:
-    """Validate all member mappings and preserve their manifest order."""
-    mappings = payload["per_unit_landings"]
-    if not isinstance(mappings, list) or not mappings:
-        raise LandingWaveError("completion receipt requires non-empty per_unit_landings")
-    units: set[str] = set()
-    rendered_mappings: list[dict[str, str]] = []
-    common_landing_id = cast(str, payload["landing_id"])
-    for item in mappings:
-        rendered_mappings.append(
-            _completion_mapping(item, common_landing_id=common_landing_id, units=units)
-        )
-    return rendered_mappings
-
-
-def build_observation_receipt(payload: Mapping[str, object]) -> dict[str, object]:
-    """Validate and render the exact ``landing_wave_completion.v1`` evidence shape."""
-    if set(payload) != set(_COMPLETION_FIELDS):
-        missing = sorted(_COMPLETION_FIELDS.difference(payload))
-        unexpected = sorted(set(payload).difference(_COMPLETION_FIELDS))
-        raise LandingWaveError(f"completion receipt keys mismatch: missing={missing} unexpected={unexpected}")
-    _validate_completion_scalars(payload)
-    rendered_mappings = _completion_mappings(payload)
-    return {"schema_version": "landing_wave_completion.v1", **dict(payload), "per_unit_landings": rendered_mappings}
 
 
 def _read_paths(path: Path) -> tuple[str, ...]:
@@ -308,25 +229,17 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     staged = subparsers.add_parser("verify-staged")
     staged.add_argument("--integration-root", type=Path, required=True)
-    staged.add_argument("--unit-id", required=True)
+    staged.add_argument("--member-label", required=True)
     staged.add_argument("--paths-file", type=Path, required=True)
-    receipt = subparsers.add_parser("receipt")
-    receipt.add_argument("--from-json", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
-        if arguments.command == "verify-staged":
-            evidence = verify_staged_member(
-                arguments.integration_root,
-                unit_id=arguments.unit_id,
-                exact_paths=_read_paths(arguments.paths_file),
-            )
-            print(json.dumps(asdict(evidence), sort_keys=True))
-        else:
-            raw = json.loads(arguments.from_json.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                raise LandingWaveError("receipt input is not a JSON object")
-            print(json.dumps(build_observation_receipt(raw), sort_keys=True))
-    except (LandingWaveError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+        evidence = verify_staged_member(
+            arguments.integration_root,
+            member_label=arguments.member_label,
+            exact_paths=_read_paths(arguments.paths_file),
+        )
+        print(json.dumps(asdict(evidence), sort_keys=True))
+    except (LandingWaveError, OSError, UnicodeError) as exc:
         print(f"landing_wave REFUSED: {exc}")
         return 2
     return 0

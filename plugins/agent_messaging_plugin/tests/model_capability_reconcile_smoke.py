@@ -21,7 +21,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from agent_messaging_plugin.model_capability_fetch import Reading  # noqa: E402
+from agent_messaging_plugin.model_capability_fetch import FAMILY_PAGE_NO_DETAIL, Reading  # noqa: E402
 from agent_messaging_plugin.model_capability_reconcile import (  # noqa: E402
     CAPABILITY_SCORE_TOLERANCE,
     COST_RELATIVE_TOLERANCE,
@@ -29,6 +29,7 @@ from agent_messaging_plugin.model_capability_reconcile import (  # noqa: E402
     PriorValue,
     ReconcileOutcome,
     disagreement,
+    manual_disagreement_note,
     reconcile_cell,
 )
 from agent_messaging_plugin.schema import (  # noqa: E402
@@ -54,8 +55,16 @@ def _check(condition: object, label: str) -> None:
 
 def _reading(source_id: str, metric: str, value: float | None, *, fetch_status: str = "ok", fetched_at: str = "2026-09-21T12:00:00+00:00", value_text: str | None = None) -> Reading:
     return Reading(
-        source_id=source_id, provider="anthropic", runtime=_CELL[0], model=_CELL[1], effort=_CELL[2],
-        metric=metric, value_number=value, value_text=value_text, raw_excerpt="fixture", fetch_status=fetch_status,
+        source_id=source_id,
+        provider="anthropic",
+        runtime=_CELL[0],
+        model=_CELL[1],
+        effort=_CELL[2],
+        metric=metric,
+        value_number=value,
+        value_text=value_text,
+        raw_excerpt="fixture",
+        fetch_status=fetch_status,
         fetched_at=fetched_at,
     )
 
@@ -142,6 +151,45 @@ def scenario_an_unparsed_or_unfetched_detail_page_is_the_same_single_source_case
     _check(again is not None and again.acceptance == CELL_ACCEPTANCE_ACCEPTED and "parse_error" in str(again.disagreement_note), "a detail page that no longer parses is the same single-source case")
     silent = reconcile_cell(_CELL, [_ref("obs1", _reading("artificial_analysis_leaderboard_html", "intelligence_index", 38.0))])
     _check(silent is not None and "was not fetched" in str(silent.disagreement_note), "with no detail reading at all the note says it was not fetched")
+
+
+def scenario_a_family_page_reading_is_the_single_source_case() -> None:
+    """The detail URL serves the family page, which the fetch returns as a `not_listed` reading with no value:
+    the leaderboard is accepted alone, and the note names the family page rather than an outage."""
+    obs = [
+        _ref("obs1", _reading("artificial_analysis_leaderboard_html", "intelligence_index", 42.0)),
+        _ref("obs2", _reading("artificial_analysis_leaderboard_html", "cost_per_task_usd", 1.64)),
+        _ref("obs3", _reading("artificial_analysis_model_detail_html", "intelligence_index", None, fetch_status="not_listed", value_text=FAMILY_PAGE_NO_DETAIL)),
+    ]
+    outcome = reconcile_cell(_CELL, obs)
+    _check(outcome is not None and outcome.acceptance == CELL_ACCEPTANCE_ACCEPTED and outcome.capability_score == 42.0 and outcome.cost_per_task_usd == 1.64, "a family page is no detail reading: the leaderboard's own score and cost are accepted")
+    if outcome is None:
+        return
+    _check(outcome.disagreement_note == "single source: detail page unavailable (not_listed: family page: no per-effort detail)", "the note says single source and names the family page")
+    _check(set(outcome.agreeing_observation_ids) == {"obs1", "obs2"} and not outcome.single_source_unconfirmed, "it cites only the leaderboard observations")
+    moved = reconcile_cell(_CELL, obs, prior=PriorValue(30.0, None))
+    _check(moved is not None and moved.single_source_unconfirmed and "family page" in str(moved.disagreement_note), "a leaderboard reading far from the prior accepted value is still held back, and names the family page")
+
+
+def scenario_a_manual_reading_has_a_note_for_a_conflict_outcome() -> None:
+    """A conflict outcome carries no score, so the note for a manual reading names the pages' own disagreement."""
+    conflict = _decide(
+        [
+            _ref("obs1", _reading("artificial_analysis_leaderboard_html", "intelligence_index", 38.0)),
+            _ref("obs2", _reading("artificial_analysis_model_detail_html", "intelligence_index", 38.0 + CAPABILITY_SCORE_TOLERANCE + 0.1)),
+        ]
+    )
+    note = manual_disagreement_note(PriorValue(42.0, None), conflict)
+    _check(note is not None and note.startswith("manual versus live disagreement:") and note.endswith("(manual value kept)"), "a conflict outcome gives a manual reading the manual-versus-live note, with the manual value kept")
+    _check(note is not None and "intelligence_index" in note and "live pages disagree with each other" in note, "which names the metric and that the live pages disagree with each other")
+    agreeing = _decide(
+        [
+            _ref("obs1", _reading("artificial_analysis_leaderboard_html", "intelligence_index", 42.0)),
+            _ref("obs2", _reading("artificial_analysis_model_detail_html", "intelligence_index", 42.0)),
+        ]
+    )
+    _check(manual_disagreement_note(PriorValue(42.0, None), agreeing) is None, "two agreeing pages that match the manual value are no disagreement")
+    _check(manual_disagreement_note(PriorValue(60.0, None), agreeing) is not None, "two agreeing pages past tolerance of the manual value still are")
 
 
 def scenario_single_source_within_tolerance_accepts_with_a_note() -> None:
@@ -238,6 +286,8 @@ def main() -> int:
     scenario_cost_beyond_tolerance_conflicts_even_with_score_agreement()
     scenario_a_missing_detail_page_accepts_the_single_source_with_a_note()
     scenario_an_unparsed_or_unfetched_detail_page_is_the_same_single_source_case()
+    scenario_a_family_page_reading_is_the_single_source_case()
+    scenario_a_manual_reading_has_a_note_for_a_conflict_outcome()
     scenario_single_source_within_tolerance_accepts_with_a_note()
     scenario_single_source_beyond_tolerance_keeps_the_prior()
     scenario_the_tolerance_comparison_is_shared()

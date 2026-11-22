@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import tempfile
 from dataclasses import replace
@@ -258,22 +259,20 @@ def check_unknown_mismatch_ignored(pricing: Any) -> None:
     )
 
 
-def check_receipt_estimate(pricing: Any) -> None:
-    receipt = {"selected": {"runtime": "codex", "model": "gpt-6-sol", "effort": "medium", "cost_per_task_usd": 0.23}}
-    result = pricing.estimate_for(receipt, (), ())
-    check(result.usd == 0.23 and result.basis == "receipt", "ESTIMATE_FROM_RECEIPT")
+def check_estimate_signature(pricing: Any) -> None:
+    parameters = list(inspect.signature(pricing.estimate_for).parameters)
+    check(parameters == ["observed_tuples", "cells"], "ESTIMATE_TAKES_ONLY_OBSERVED_TUPLES_AND_CELLS")
 
 
 def check_catalog_estimate(pricing: Any) -> None:
-    receipt = {"selected": {"runtime": "codex", "model": "gpt-6-sol", "effort": "medium", "cost_per_task_usd": 0.23}}
-    cell = {**receipt["selected"], "cost_per_task_usd": 0.41, "acceptance": "accepted"}
-    result = pricing.estimate_for(None, ({"runtime": "codex", "model": "gpt-6-sol", "effort": "medium"},), (cell,))
-    check(result.usd == 0.41 and result.basis == "catalog_lookup", "ESTIMATE_CATALOG_LOOKUP_WHEN_RECEIPT_NULL")
+    cell = {"runtime": "codex", "model": "gpt-6-sol", "effort": "medium", "cost_per_task_usd": 0.41, "acceptance": "accepted"}
+    result = pricing.estimate_for(({"runtime": "codex", "model": "gpt-6-sol", "effort": "medium"},), (cell,))
+    check(result.usd == 0.41 and result.basis == "catalog_lookup", "ESTIMATE_CATALOG_LOOKUP_FOR_OBSERVED_TUPLE")
 
 
 def check_no_estimate(pricing: Any) -> None:
-    result = pricing.estimate_for(None, (), ())
-    check(result.usd is None and result.basis == "none", "ESTIMATE_NONE_WHEN_NEITHER")
+    result = pricing.estimate_for((), ())
+    check(result.usd is None and result.basis == "none", "ESTIMATE_NONE_WHEN_NO_OBSERVED_TUPLE")
 
 
 def check_as_of_bounds(pricing: Any) -> None:
@@ -323,7 +322,7 @@ def run() -> None:
     check_unread_pools(pricing, catalog)
     check_mismatch_detected(pricing)
     check_unknown_mismatch_ignored(pricing)
-    check_receipt_estimate(pricing)
+    check_estimate_signature(pricing)
     check_catalog_estimate(pricing)
     check_no_estimate(pricing)
     check_as_of_bounds(pricing)

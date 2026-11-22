@@ -39,7 +39,7 @@ from g_suite_plugin.gmail_actions import GmailIO, OutgoingAttachment  # noqa: E4
 from g_suite_plugin.gmail_registry import GMAIL_OPERATIONS  # noqa: E402
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
 from googleapiclient.discovery import build  # noqa: E402
-from gsuite_fakes import connect_accounts  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import connect_accounts  # noqa: E402
 
 KB_DIR = REPO_ROOT / "plugins" / "g_suite_plugin" / "knowledge_base" / "processes"
 BASE = "/gmail/v1/users/me"

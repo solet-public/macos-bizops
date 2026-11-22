@@ -69,9 +69,7 @@ _PROFILE_PATH = _KB_ROOT / "profile_templates" / "macos-free-solet.yaml"
 _PROFILE_DIR = _PROFILE_PATH.parent
 _BASELINE_DIR = _KB_ROOT / "profile_baseline"
 _PROCESS_ROOT = _REPO_ROOT / "ananta" / "knowledge_base" / "processes"
-_SERVICE_BINDING_ALLOWLIST = (
-    Path(__file__).resolve().parent / "shipped_profile_service_binding_allowlist.json"
-)
+_SERVICE_BINDING_ALLOWLIST = Path(__file__).resolve().parent / "shipped_profile_service_binding_allowlist.json"
 _PROVENANCE_PATH = _REPO_ROOT / "PROVENANCE.json"
 # seed_factory_plugin is NO-FACTORY (capability_bundles.yaml §"SHIP INVARIANTS"
 # in that file) — never shipped in any sealed bundle, so this path, and the
@@ -79,11 +77,9 @@ _PROVENANCE_PATH = _REPO_ROOT / "PROVENANCE.json"
 # inside a sealed tree. _PROFILE_TEMPLATE_BUNDLE below is the sealed-safe copy
 # of that same mapping; _check_profile_template_bundle_mapping_is_current
 # guards it against drift whenever this file IS present (dev checkout).
-_CAPABILITY_BUNDLES_PATH = (
-    _REPO_ROOT / "plugins" / "seed_factory_plugin" / "knowledge_base" / "capability_bundles.yaml"
-)
-# Bundle name (capability_bundles.yaml key, e.g. via `psolet`... no — via that
-# file's own top-level `bundles:` mapping) -> profile_template stem, mirrored
+_CAPABILITY_BUNDLES_PATH = _REPO_ROOT / "plugins" / "seed_factory_plugin" / "knowledge_base" / "capability_bundles.yaml"
+# Bundle name (a key of capability_bundles.yaml's own top-level `bundles:`
+# mapping) -> profile_template stem, mirrored
 # statically because capability_bundles.yaml itself is not shipped:
 #   macos_free_minimal  -> macos-free-solet   (capability_bundles.yaml:31,39)
 #   macos-bizops        -> macos-bizops       (capability_bundles.yaml:73,91)
@@ -165,20 +161,11 @@ def _registered_service_by_interface() -> dict[str, str]:
 
 
 def _service_interface_node(node: ast.AST) -> ast.AST | None:
-    if (
-        isinstance(node, ast.AnnAssign)
-        and isinstance(node.target, ast.Name)
-        and node.target.id == "service_interfaces"
-    ):
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "service_interfaces":
         return node.value
-    if isinstance(node, ast.Assign) and any(
-        isinstance(target, ast.Name) and target.id == "service_interfaces"
-        for target in node.targets
-    ):
+    if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "service_interfaces" for target in node.targets):
         return node.value
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
-        node.name == "service_interfaces"
-    ):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (node.name == "service_interfaces"):
         return node
     return None
 
@@ -197,19 +184,12 @@ def _provided_registered_services(
             interface_node = _service_interface_node(node)
             if interface_node is None:
                 continue
-            services.update(
-                service_by_interface[item.id]
-                for item in ast.walk(interface_node)
-                if isinstance(item, ast.Name) and item.id in service_by_interface
-            )
+            services.update(service_by_interface[item.id] for item in ast.walk(interface_node) if isinstance(item, ast.Name) and item.id in service_by_interface)
     return services
 
 
 def _stranded_process_keys(service_name: str) -> tuple[str, ...]:
-    return tuple(
-        f"service_interface::{service_name}::{path.stem}"
-        for path in sorted((_PROCESS_ROOT / service_name).glob("*.json"))
-    )
+    return tuple(f"service_interface::{service_name}::{path.stem}" for path in sorted((_PROCESS_ROOT / service_name).glob("*.json")))
 
 
 def _profile_plugins_and_bindings(
@@ -218,14 +198,9 @@ def _profile_plugins_and_bindings(
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     plugins = profile.get("plugins") or []
     bindings = profile.get("service_bindings") or {}
-    if not isinstance(plugins, list) or not all(
-        isinstance(plugin, str) for plugin in plugins
-    ):
+    if not isinstance(plugins, list) or not all(isinstance(plugin, str) for plugin in plugins):
         raise SmokeFailureError(f"invalid plugins shape: {profile_path}")
-    if not isinstance(bindings, dict) or not all(
-        isinstance(service, str) and isinstance(provider, str)
-        for service, provider in bindings.items()
-    ):
+    if not isinstance(bindings, dict) or not all(isinstance(service, str) and isinstance(provider, str) for service, provider in bindings.items()):
         raise SmokeFailureError(f"invalid service_bindings shape: {profile_path}")
     return tuple(plugins), bindings
 
@@ -238,10 +213,7 @@ def _reject_disabled_bound_providers(
     enabled = set(plugins)
     for service_name, configured_plugin in sorted(bindings.items()):
         if configured_plugin not in enabled:
-            raise SmokeFailureError(
-                f"{profile_path.name}: service {service_name!r} is bound to configured "
-                f"provider {configured_plugin!r}, but that provider is not enabled"
-            )
+            raise SmokeFailureError(f"{profile_path.name}: service {service_name!r} is bound to configured provider {configured_plugin!r}, but that provider is not enabled")
 
 
 def _profile_binding_violations(
@@ -251,10 +223,7 @@ def _profile_binding_violations(
 ) -> set[BindingViolation]:
     plugins, bindings = _profile_plugins_and_bindings(profile_path, profile)
     _reject_disabled_bound_providers(profile_path, plugins, bindings)
-    provided_services = {
-        plugin_name: _provided_registered_services(plugin_name, service_by_interface)
-        for plugin_name in plugins
-    }
+    provided_services = {plugin_name: _provided_registered_services(plugin_name, service_by_interface) for plugin_name in plugins}
     _reject_nondeclaring_bound_providers(
         profile_path,
         bindings,
@@ -299,10 +268,7 @@ def _sealed_bundle_name() -> str | None:
 def _template_bundle_name(profile_path: Path) -> str:
     bundle_name = _PROFILE_TEMPLATE_BUNDLE.get(profile_path.name)
     if bundle_name is None:
-        raise SmokeFailureError(
-            f"{profile_path.name}: no entry in _PROFILE_TEMPLATE_BUNDLE — add one, "
-            "matching capability_bundles.yaml's profile_template field"
-        )
+        raise SmokeFailureError(f"{profile_path.name}: no entry in _PROFILE_TEMPLATE_BUNDLE — add one, matching capability_bundles.yaml's profile_template field")
     return bundle_name
 
 
@@ -346,24 +312,19 @@ def _check_profile_template_bundle_mapping_is_current() -> None:
     raw = _load_mapping(_CAPABILITY_BUNDLES_PATH)
     bundles = raw.get("bundles")
     if not isinstance(bundles, dict):
-        raise SmokeFailureError(
-            f"capability_bundles.yaml 'bundles' is not a mapping: {_CAPABILITY_BUNDLES_PATH}"
-        )
+        raise SmokeFailureError(f"capability_bundles.yaml 'bundles' is not a mapping: {_CAPABILITY_BUNDLES_PATH}")
     authoritative: dict[str, str] = {}
     for bundle_name, entry in bundles.items():
         if not isinstance(entry, dict):
             raise SmokeFailureError(f"capability_bundles.yaml bundle {bundle_name!r} is not a mapping")
         template = entry.get("profile_template")
         if not isinstance(template, str) or not template:
-            raise SmokeFailureError(
-                f"capability_bundles.yaml bundle {bundle_name!r} has no profile_template"
-            )
+            raise SmokeFailureError(f"capability_bundles.yaml bundle {bundle_name!r} has no profile_template")
         authoritative[f"{template}.yaml"] = bundle_name
     _check(
         "profile-template-bundle-mapping-matches-capability-bundles",
         _PROFILE_TEMPLATE_BUNDLE == authoritative,
-        "_PROFILE_TEMPLATE_BUNDLE is stale against capability_bundles.yaml: "
-        f"mirror={_PROFILE_TEMPLATE_BUNDLE!r} authoritative={authoritative!r}",
+        f"_PROFILE_TEMPLATE_BUNDLE is stale against capability_bundles.yaml: mirror={_PROFILE_TEMPLATE_BUNDLE!r} authoritative={authoritative!r}",
     )
 
 
@@ -382,13 +343,7 @@ def _binding_to_declaration_violations(
             continue
         if _template_is_foreign(profile_path):
             continue
-        enabled_declarers = tuple(
-            sorted(
-                plugin_name
-                for plugin_name, declared_services in provided_services.items()
-                if service_name in declared_services
-            )
-        )
+        enabled_declarers = tuple(sorted(plugin_name for plugin_name, declared_services in provided_services.items() if service_name in declared_services))
         violations.add(
             BoundProviderViolation(
                 profile=profile_path.name,
@@ -419,17 +374,10 @@ def _reject_nondeclaring_bound_providers(
     details: list[str] = []
     for violation in violations:
         if violation.enabled_declaring_plugins:
-            declaration_state = (
-                "enabled declaring providers "
-                f"{violation.enabled_declaring_plugins!r} do not include the configured provider"
-            )
+            declaration_state = f"enabled declaring providers {violation.enabled_declaring_plugins!r} do not include the configured provider"
         else:
             declaration_state = "no enabled plugin declares this registered service"
-        details.append(
-            f"service {violation.service!r} selects configured provider "
-            f"{violation.configured_plugin!r}, which does not declare it "
-            f"({declaration_state})"
-        )
+        details.append(f"service {violation.service!r} selects configured provider {violation.configured_plugin!r}, which does not declare it ({declaration_state})")
     raise SmokeFailureError(f"{profile_path.name}: " + "; ".join(details))
 
 
@@ -478,9 +426,7 @@ def _allowlist_identity(
     index: int,
 ) -> tuple[str, str, str, str | None]:
     profile_fragments = item["profile_fragments"]
-    if not isinstance(profile_fragments, list) or not all(
-        isinstance(value, str) and value for value in profile_fragments
-    ):
+    if not isinstance(profile_fragments, list) or not all(isinstance(value, str) and value for value in profile_fragments):
         raise SmokeFailureError(f"allowlist entry {index} has invalid profile fragments")
     profile = "".join(profile_fragments)
     scalar_values = (profile, item["service"], item["providing_plugin"])
@@ -496,22 +442,14 @@ def _allowlist_configured_plugin(
     index: int,
 ) -> str | None:
     configured_plugin = item["configured_plugin"]
-    if configured_plugin is not None and (
-        not isinstance(configured_plugin, str)
-        or not configured_plugin
-        or "*" in configured_plugin
-    ):
-        raise SmokeFailureError(
-            f"allowlist entry {index} has invalid configured provider identity"
-        )
+    if configured_plugin is not None and (not isinstance(configured_plugin, str) or not configured_plugin or "*" in configured_plugin):
+        raise SmokeFailureError(f"allowlist entry {index} has invalid configured provider identity")
     return configured_plugin
 
 
 def _allowlist_process_keys(item: dict[Any, Any], index: int) -> tuple[str, ...]:
     process_keys = item["stranded_process_keys"]
-    if not isinstance(process_keys, list) or not all(
-        isinstance(value, str) and value for value in process_keys
-    ):
+    if not isinstance(process_keys, list) or not all(isinstance(value, str) and value for value in process_keys):
         raise SmokeFailureError(f"allowlist entry {index} has invalid process keys")
     return tuple(process_keys)
 
@@ -591,8 +529,7 @@ def _check_wrong_enabled_provider_control(
     _check(
         "wrong-enabled-provider-is-actionable",
         all(part in diagnostic for part in expected_parts),
-        f"expected service/configured non-declarer/enabled declarer diagnostic; "
-        f"found {diagnostic!r}",
+        f"expected service/configured non-declarer/enabled declarer diagnostic; found {diagnostic!r}",
     )
 
 
@@ -658,8 +595,7 @@ def _check_bound_nondeclarer_without_real_declarer_control(
     _check(
         "bound-nondeclarer-with-real-declarer-absent-is-actionable",
         all(part in diagnostic for part in expected_parts),
-        "expected both services, configured non-declarer, and absent enabled "
-        f"declarer diagnostic; found {diagnostic!r}",
+        f"expected both services, configured non-declarer, and absent enabled declarer diagnostic; found {diagnostic!r}",
     )
 
 
@@ -780,8 +716,7 @@ def _check_binding_satisfaction(profile: dict[str, Any], plugins: set[str]) -> N
         _check(
             f"declared-absent[{absent_binding}]",
             absent_binding not in bindings,
-            f"{absent_binding} must be absent (declared-vacant / opt-in shape) "
-            f"but found bound to {bindings.get(absent_binding)!r}",
+            f"{absent_binding} must be absent (declared-vacant / opt-in shape) but found bound to {bindings.get(absent_binding)!r}",
         )
 
 
@@ -800,8 +735,7 @@ def _check_no_orphan_starting_actions(profile: dict[str, Any], plugins: set[str]
             _check(
                 f"no-orphan-starting-action[{name}]",
                 owner in plugins,
-                f"process_key {process_key!r} references plugin {owner!r} "
-                "not in the plugins allowlist",
+                f"process_key {process_key!r} references plugin {owner!r} not in the plugins allowlist",
             )
         elif process_key.startswith("service_interface::"):
             # A bound provider's plugin:: namespace is never registered, so a
@@ -813,15 +747,10 @@ def _check_no_orphan_starting_actions(profile: dict[str, Any], plugins: set[str]
             _check(
                 f"no-orphan-starting-action[{name}]",
                 bindings.get(service) in plugins,
-                f"process_key {process_key!r} references service {service!r} "
-                f"bound to {bindings.get(service)!r}, not a plugin in the allowlist",
+                f"process_key {process_key!r} references service {service!r} bound to {bindings.get(service)!r}, not a plugin in the allowlist",
             )
         else:
-            raise SmokeFailureError(
-                f"starting_action {name!r} has an unrecognized process_key shape "
-                f"{process_key!r} — this profile only expects plugin::<name>::... "
-                "or service_interface::<service>::... starting actions"
-            )
+            raise SmokeFailureError(f"starting_action {name!r} has an unrecognized process_key shape {process_key!r} — this profile only expects plugin::<name>::... or service_interface::<service>::... starting actions")
 
 
 def _check_public_safe(text: str, source: str) -> None:
@@ -868,9 +797,7 @@ def main() -> int:
         plugins_raw = profile.get("plugins") or []
         _check(
             "plugins is a non-empty list of strings",
-            isinstance(plugins_raw, list)
-            and len(plugins_raw) > 0
-            and all(isinstance(p, str) for p in plugins_raw),
+            isinstance(plugins_raw, list) and len(plugins_raw) > 0 and all(isinstance(p, str) for p in plugins_raw),
             f"got {plugins_raw!r}",
         )
         plugins = set(plugins_raw)
@@ -891,10 +818,7 @@ def main() -> int:
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)
         return 1
 
-    print(
-        f"macos_free_profile_smoke OK: {len(_CHECKS_RUN)} checks passed "
-        f"({len(plugins)} plugins, {len(baseline_files)} baseline files)"
-    )
+    print(f"macos_free_profile_smoke OK: {len(_CHECKS_RUN)} checks passed ({len(plugins)} plugins, {len(baseline_files)} baseline files)")
     return 0
 
 

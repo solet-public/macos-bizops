@@ -7,8 +7,7 @@ relisting, a reinstatement the next pass undoes, and a partial move reported exa
 
 * create, read, correct, retire and reopen in ONE scenario: a recorded cell is
   withdrawn, keeps its score, is still read by the selector and excluded there
-  as ``not_accepted``, fails a selection receipt issued before the withdrawal
-  with ``selection_receipt_mismatch``, and is served again once reinstated;
+  as ``not_accepted``, and is served again once reinstated;
 * a stale premise is refused for both verbs (the caller's ``expected_acceptance``
   no longer holds, and a writer that moves the row between the read and the
   write), and a refused request moves nothing;
@@ -71,7 +70,7 @@ _failed: list[str] = []
 _NOW = datetime(2026, 10, 3, 12, tzinfo=UTC)
 _STANDARDIZER = {"name", "id", "external_id", "namespace", "created_at", "updated_at", "created_by", "updated_by", "is_deleted"}
 _ACTOR = "Lifecycle-Smoke"
-_SELECT = {"required_score": 38, "billing_objective": "metered_usd", "dispatch_kind": "review"}
+_SELECT = {"required_score": 38}
 _SOL_MEDIUM = {"runtime": "codex", "model": "gpt-5.6-sol", "effort": "medium"}
 _GPT6_SOL_HIGH: dict[str, Any] = {
     "runtime": "codex",
@@ -153,22 +152,6 @@ def _changes(state: RealShapeState) -> list[dict[str, Any]]:
     return [row for row in _rows(state, TABLE_MODEL_CAPABILITY_OBSERVATION) if row["metric"] == "acceptance_change"]
 
 
-def _verify(state: RealShapeState, receipt: dict[str, Any]) -> str:
-    return _code(
-        lambda: verbs.verify_selection_receipt(
-            _typed(state),
-            difficulty_score=38,
-            selection_receipt=receipt,
-            dispatch_kind="review",
-            scope_tags=(),
-            agent_runtime="codex",
-            model="gpt-5.6-sol",
-            effort="medium",
-            now=_NOW,
-        )
-    )
-
-
 def _holds(*conditions: object) -> bool:
     """All conditions true; a conjunction written as arguments, so one check line stays a single branch."""
     return all(conditions)
@@ -207,7 +190,7 @@ def _check_reopened(state: RealShapeState, created: dict[str, Any]) -> None:
         "reopen: accepted again with the retained values, the withdrawal note cleared",
     )
     _check(_holds(back["last_refresh_run_id"] == reopened["run_id"], back["last_refresh_run_id"] != created["last_refresh_run_id"]), "reopen: the cell is stamped with the run row that reopened it")
-    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 40, "billing_objective": "metered_usd"}, now=datetime.now(UTC))
+    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 40}, now=datetime.now(UTC))
     _check(picked["selected"]["model"] == "gpt-6-sol", "reopen: the selector serves the cell again")
 
 
@@ -248,8 +231,7 @@ def test_run_rows_and_acceptance_change_evidence() -> None:
 def test_selector_treats_a_withdrawn_cell_as_not_accepted() -> None:
     state = _accepted_state()
     before = verbs.select_dispatch_tier(_typed(state), _SELECT, now=_NOW)
-    receipt = before["selection_receipt"]
-    _check(receipt["selected"] == _SOL_MEDIUM and _verify(state, receipt) == "", "setup: sol medium is the cheapest clearing cell and its receipt verifies")
+    _check({key: before["selected"][key] for key in _SOL_MEDIUM} == _SOL_MEDIUM, "setup: sol medium is the cheapest clearing cell")
     rows_before = len(read_cells(_typed(state)))
     verbs.withdraw_model_capability_cell(_typed(state), _params(model="gpt-5.6-sol", effort="medium"))
     after = verbs.select_dispatch_tier(_typed(state), _SELECT, now=_NOW)
@@ -259,9 +241,8 @@ def test_selector_treats_a_withdrawn_cell_as_not_accepted() -> None:
     catalog = selection_catalog(read_cells(_typed(state)))
     withdrawn = [c for c in catalog if c.model == "gpt-5.6-sol" and c.effort == "medium"]
     _check(len(read_cells(_typed(state))) == rows_before and len(withdrawn) == 1 and withdrawn[0].acceptance == "withdrawn", "the selector input still holds the withdrawn row, carrying acceptance withdrawn")
-    _check(_verify(state, receipt) == "selection_receipt_mismatch", "a receipt issued before the withdrawal fails with selection_receipt_mismatch")
     verbs.reinstate_model_capability_cell(_typed(state), _reinstate_params(model="gpt-5.6-sol", effort="medium"))
-    _check(_verify(state, receipt) == "" and verbs.select_dispatch_tier(_typed(state), _SELECT, now=_NOW)["selection_receipt"] == receipt, "reversal: after reinstating, the same receipt verifies again")
+    _check(verbs.select_dispatch_tier(_typed(state), _SELECT, now=_NOW)["selected"] == before["selected"], "reversal: after reinstating, the same cell is selected again")
 
 
 def test_withdraw_with_a_stale_premise_is_refused() -> None:

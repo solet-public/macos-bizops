@@ -1,7 +1,7 @@
 """State-interface persistence for the two fleet-steward check phases.
 
 These are append-only operational measurements, not a cache and not a
-project-solet work-register projection.  The records deliberately live in the
+projection of any other record.  The records deliberately live in the
 agent-messaging plugin's deployment namespace: they describe one deployment's
 liveness and its own stewardship decisions.
 """
@@ -151,9 +151,12 @@ def _read_page(
     }
     if after is not None:
         query["after"] = after
-    rows = [dict(row) for row in require_records(
-        state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, query),
-    )]
+    rows = [
+        dict(row)
+        for row in require_records(
+            state.query_ordered(AGENT_ROLE_BINDING_NAMESPACE, query),
+        )
+    ]
     return rows[:capped], len(rows) > capped
 
 

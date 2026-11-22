@@ -228,14 +228,14 @@ def test_child() -> None:
         manifest = Path(raw).resolve() / "manifest.json"
         observed = Path(raw) / "child.json"
         source = f"import json,os\nfrom pathlib import Path\nPath({str(observed)!r}).write_text(json.dumps(dict(os.environ)))\nraise SystemExit(23)"
-        with patch.dict(os.environ, {"PGHOST": "foreign.invalid", "PGPASSWORD": "sentinel", "PROJECT_SOLET_TEST_DSN": "unchanged"}):
+        with patch.dict(os.environ, {"PGHOST": "foreign.invalid", "PGPASSWORD": "sentinel", "SOLET_FIXTURE_CALLER_SENTINEL": "unchanged"}):
             before = dict(os.environ)
             status = provision.run_child([sys.executable, "-c", source], manifest, 10)
             assert dict(os.environ) == before, "CALLER_ENVIRONMENT_UNCHANGED"
         assert status == 23, "CHILD_STATUS_PROPAGATED"
         child_environment = json.loads(observed.read_text())
         assert child_environment[MANIFEST_ENV] == str(manifest), "RUNNER_PRIVATE_PG_FORWARDED"
-        assert child_environment["PROJECT_SOLET_TEST_DSN"] == "unchanged", "PROJECT_SOLET_VALUES_PRESERVED"
+        assert child_environment["SOLET_FIXTURE_CALLER_SENTINEL"] == "unchanged", "CALLER_VALUES_PRESERVED"
         assert "PGHOST" not in child_environment and "PGPASSWORD" not in child_environment, "LIBPQ_ENVIRONMENT_EXCLUDED"
         assert provision.run_child([sys.executable, "-c", "import time; time.sleep(10)"], manifest, 0.05) == 124, "CHILD_TIMEOUT_BOUNDED"
         assert provision.run_child([sys.executable, "-c", "import os,signal; os.kill(os.getpid(), signal.SIGTERM)"], manifest, 10) == 143, "CHILD_SIGNAL_PROPAGATED"

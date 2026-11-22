@@ -1769,10 +1769,12 @@ class SessionLedgerService(
     def reclaim_orphan_event_text_blobs(
         self,
         confirm: bool = False,
+        after: list[str] | None = None,
+        budget_seconds: float = 20.0,
         *,
         call_context: CallContext | None = None,
     ) -> dict[str, Any]:
-        """Preview or reclaim old unreferenced event text; operator-only."""
+        """Preview or reclaim one batch of old unreferenced event text; operator-only."""
         from ananta.services.session_ledger_service.blob_reclaim import EventTextBlobReclaimer
 
         assert_operator_principal(call_context, "reclaim_orphan_event_text_blobs")
@@ -1780,7 +1782,7 @@ class SessionLedgerService(
         root = blobs.get_blob_store_root()
         if root is None:
             raise ValueError("event-text reclaim requires a shared filesystem blob store")
-        return EventTextBlobReclaimer(state=self._state_service, blobs=blobs, blob_root=root).run(confirm=confirm)
+        return EventTextBlobReclaimer(state=self._state_service, blobs=blobs, blob_root=root).run(confirm=confirm, after=after, budget_seconds=budget_seconds)
 
     def backfill_export_blob_identity(
         self,

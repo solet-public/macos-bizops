@@ -125,11 +125,7 @@ def _ordered_page(
     REPLACED this call site's explicit ``{is_deleted: 0}`` filter, and the
     soft-delete override test depends on the fake distinguishing the two.
     """
-    matched = [
-        dict(r)
-        for r in rows
-        if (include_deleted or int(r.get("is_deleted", 0)) == 0) and _matches(r, filters)
-    ]
+    matched = [dict(r) for r in rows if (include_deleted or int(r.get("is_deleted", 0)) == 0) and _matches(r, filters)]
     matched.sort(key=lambda r: _key(r, columns))
     if after is None:
         return matched
@@ -155,10 +151,7 @@ class _FakeState:
         filters = cast("dict[str, Any]", query.get("filters") or {})
         rows = [dict(r) for r in self._rows if _matches(r, filters)]
         if not query.get("unbounded") and "limit" not in query and len(rows) > MAX_READ_ROWS:
-            raise _CapRefusedError(
-                f"query.unbounded_read_over_cap: {str(query['table'])!r} returned "
-                f"{len(rows)} rows against the {MAX_READ_ROWS}-row cap."
-            )
+            raise _CapRefusedError(f"query.unbounded_read_over_cap: {str(query['table'])!r} returned {len(rows)} rows against the {MAX_READ_ROWS}-row cap.")
         return self._env({"records": rows})
 
     def query_ordered(self, namespace: str, query: dict[str, Any]) -> dict[str, Any]:
@@ -177,12 +170,12 @@ class _FakeState:
         return self._env({"records": rows[:limit]})
 
 
-def _row(idx: int, *, is_deleted: int = 0, lane: str = "lane-a") -> dict[str, Any]:
+def _row(idx: int, *, is_deleted: int = 0, label: str = "alpha") -> dict[str, Any]:
     return {
         "id": f"ms-{idx:04d}",
         "agent_instance_id": f"agi-{idx:04d}",
         "agent_session_id": f"ases-agi-{idx:04d}",
-        "lane_id": lane,
+        "label": label,
         "lifecycle_state": "live" if idx % 3 else "retired",
         "host": "tmux",
         "is_deleted": is_deleted,
@@ -199,8 +192,7 @@ def _state() -> _FakeState:
 def test_fixture_crosses_the_page_boundary() -> None:
     _check(
         _LIVE_ROWS > 2 * MAX_READ_ROWS,
-        f"fixture has {_LIVE_ROWS} live rows vs page size {MAX_READ_ROWS} — the "
-        f"walk MUST page more than once (the live table was 106, a near-miss)",
+        f"fixture has {_LIVE_ROWS} live rows vs page size {MAX_READ_ROWS} — the walk MUST page more than once (the live table was 106, a near-miss)",
     )
 
 
@@ -215,8 +207,7 @@ def test_deliberate_unbounded_helper_returns_every_live_row() -> None:
     )
     _check(
         len(rows) == _LIVE_ROWS,
-        f"unfiltered fleet list returned all {_LIVE_ROWS} live rows (got "
-        f"{len(rows)}) — a page-1-only walk returns {MAX_READ_ROWS}",
+        f"unfiltered fleet list returned all {_LIVE_ROWS} live rows (got {len(rows)}) — a page-1-only walk returns {MAX_READ_ROWS}",
     )
     _check(
         len({str(r["id"]) for r in rows}) == len(rows),
@@ -224,8 +215,7 @@ def test_deliberate_unbounded_helper_returns_every_live_row() -> None:
     )
     _check(
         all(int(cast("int", r["is_deleted"])) == 0 for r in rows),
-        f"the {_DELETED_ROWS} soft-deleted rows are excluded by the "
-        f"include_deleted default, which replaced the explicit is_deleted filter",
+        f"the {_DELETED_ROWS} soft-deleted rows are excluded by the include_deleted default, which replaced the explicit is_deleted filter",
     )
     _check(state.query_state_calls == 0, "no unbounded query_state read remains")
 
@@ -250,12 +240,31 @@ def test_list_sessions_requires_a_filter() -> None:
             code = exc.code
             message = exc.message
         _check(
-            code == "filter_required"
-            and "live_only" in message
-            and "lane_id" in message
-            and "\n" not in message,
+            code == "filter_required" and "live_only" in message and "label" in message and "\n" not in message,
             f"list_sessions({filters!r}) -> one-line filter_required with accepted keys",
         )
+
+
+def test_list_sessions_filters_by_label_and_rejects_retired_filters() -> None:
+    """A label filter selects distinct sessions that share the requested label."""
+    state = _FakeState([_row(1, label="alpha"), _row(2, label="beta"), _row(3, label="beta")])
+    page = list_sessions(state, {"label": "beta"}, limit=50)  # type: ignore[arg-type]
+    _check(
+        [str(row["id"]) for row in page["sessions"]] == ["ms-0002", "ms-0003"],
+        "list_sessions(label='beta') returns both matching rows",
+    )
+    _check(
+        [(row["label"], row["agent_instance_id"]) for row in page["sessions"]] == [("beta", "agi-0002"), ("beta", "agi-0003")],
+        "equal labels keep distinct instance identities",
+    )
+    for parts in (("lane", "id"), ("work", "class")):
+        retired = "_".join(parts)
+        code = None
+        try:
+            list_sessions(state, {retired: "beta"}, limit=50)  # type: ignore[arg-type]
+        except VerbError as exc:
+            code = exc.code
+        _check(code == "filter_required", f"a {retired} filter is no longer a fleet filter (got {code!r})")
 
 
 def test_list_sessions_pages_past_former_hard_limit() -> None:
@@ -266,9 +275,9 @@ def test_list_sessions_pages_past_former_hard_limit() -> None:
     pages = 0
     while True:
         page = list_sessions(
-            state,
-            {"lane_id": "lane-a"},
-            limit=50,  # type: ignore[arg-type]
+            state,  # type: ignore[arg-type]
+            {"label": "alpha"},
+            limit=50,
             after_created_at=(cursor or {}).get("created_at"),
             after_id=(cursor or {}).get("id"),
         )
@@ -281,9 +290,7 @@ def test_list_sessions_pages_past_former_hard_limit() -> None:
             break
         next_cursor = page["next_cursor"]
         _check(
-            isinstance(next_cursor, dict)
-            and isinstance(next_cursor.get("created_at"), str)
-            and isinstance(next_cursor.get("id"), str),
+            isinstance(next_cursor, dict) and isinstance(next_cursor.get("created_at"), str) and isinstance(next_cursor.get("id"), str),
             "every non-final page supplies both immutable cursor components",
         )
         cursor = cast("dict[str, str]", next_cursor)
@@ -297,7 +304,9 @@ def test_list_sessions_returns_exact_under_limit_rows() -> None:
     state = _state()
     expected_ids = [f"ms-{idx:04d}" for idx in range(_LIVE_ROWS) if idx % 3 == 0]
     rows = list_sessions(
-        state, {"lifecycle_state": "retired"}, limit=150,  # type: ignore[arg-type]
+        state,  # type: ignore[arg-type]
+        {"lifecycle_state": "retired"},
+        limit=150,
     )["sessions"]
     _check(
         [row["id"] for row in rows] == expected_ids,
@@ -307,11 +316,12 @@ def test_list_sessions_returns_exact_under_limit_rows() -> None:
 
 def test_list_sessions_live_only_excludes_terminal_rows() -> None:
     rows = list_sessions(
-        _state(), live_only=True, limit=250,  # type: ignore[arg-type]
+        _state(),  # type: ignore[arg-type]
+        live_only=True,
+        limit=250,
     )["sessions"]
     _check(
-        len(rows) == sum(1 for idx in range(_LIVE_ROWS) if idx % 3 != 0)
-        and {str(row["lifecycle_state"]) for row in rows} == {"live"},
+        len(rows) == sum(1 for idx in range(_LIVE_ROWS) if idx % 3 != 0) and {str(row["lifecycle_state"]) for row in rows} == {"live"},
         "live_only uses one IN filter and returns non-terminal rows only",
     )
 
@@ -322,8 +332,7 @@ def test_caller_filters_are_pushed_down() -> None:
     expected = sum(1 for i in range(_LIVE_ROWS) if i % 3 == 0)
     _check(
         len(rows) == expected and all(r["lifecycle_state"] == "retired" for r in rows),
-        f"equality filter applied on EVERY page, not just the first "
-        f"(got {len(rows)}, expected {expected})",
+        f"equality filter applied on EVERY page, not just the first (got {len(rows)}, expected {expected})",
     )
 
 
@@ -340,8 +349,7 @@ def test_soft_delete_override_is_preserved() -> None:
     rows = list_managed_sessions(state, {"is_deleted": 1})  # type: ignore[arg-type]
     _check(
         len(rows) == _DELETED_ROWS,
-        f"is_deleted=1 returns the {_DELETED_ROWS} soft-deleted rows "
-        f"(got {len(rows)}) — the override survived the rewrite",
+        f"is_deleted=1 returns the {_DELETED_ROWS} soft-deleted rows (got {len(rows)}) — the override survived the rewrite",
     )
     _check(
         all(int(cast("int", r["is_deleted"])) == 1 for r in rows),
@@ -360,8 +368,7 @@ def test_explicit_is_deleted_zero_matches_the_default() -> None:
     )
     _check(
         {str(r["id"]) for r in explicit} == {str(r["id"]) for r in default},
-        "an explicit is_deleted=0 is identical to the default — the two "
-        "predicates agree, which is what makes dropping the explicit one safe",
+        "an explicit is_deleted=0 is identical to the default — the two predicates agree, which is what makes dropping the explicit one safe",
     )
 
 

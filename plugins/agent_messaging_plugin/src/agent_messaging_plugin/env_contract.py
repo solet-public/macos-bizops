@@ -3,9 +3,9 @@
 The five per-session identity variables a launcher exports for fleet
 coordination are unprefixed and runner-neutral: they are part of the seed
 contract and must read identically on the platform origin and on every
-seed-born homunculus (operator ruling 2026-07-28; fleet-transport-parity
+seed-born solet (operator ruling 2026-07-28; fleet-transport-parity
 design §7). This module is the single source of truth for the names; it is
-stdlib-only so the ``homunculus`` console script and the standalone MCP
+stdlib-only so the ``solet-bridge`` console script and the standalone MCP
 bridge subprocess can both import it bare (PEP 562 lazy package init).
 
 Migration tripwire (one release): the family moved through two prefixed

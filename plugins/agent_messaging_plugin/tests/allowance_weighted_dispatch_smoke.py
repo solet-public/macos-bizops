@@ -297,8 +297,6 @@ def _outside_the_plan(state: StateManagementInterface) -> dict[str, list[dict[st
     return {
         "free": [_select(state, score) for score in (14, 41, 44, 52, 56)],
         "codex": [_select(state, score, runtime="codex") for score in (21, 41, 44)],
-        "explicit_relative": [_select(state, score, runtime="claude_code", billing_objective="relative") for score in (41, 52)],
-        "explicit_metered": [_select(state, score, runtime="claude_code", billing_objective="metered_usd") for score in (41, 52)],
     }
 
 
@@ -318,22 +316,8 @@ def test_missing_table_warns_without_refusing() -> None:
     state = _state()
     with _ProfileFile(_drop_weights):
         defaulted = _select(state, 45, runtime="claude_code")
-        explicit = _select(state, 45, runtime="claude_code", billing_objective="relative")
         _check(defaulted["billing_objective"] == "relative" and _PROFILE in defaulted["warnings"][0], "a covering plan with no table keeps relative ranking and says so in warnings")
-        _check("warnings" not in explicit, "an explicitly requested objective is not warned about")
         _check("warnings" not in _select(state, 45, runtime="codex"), "a runtime no plan covers has nothing to warn about")
-
-
-def test_allowance_weighted_is_plan_scoped() -> None:
-    state = _state()
-    for params in ({}, {"runtime": "codex"}):
-        code, message = _refusal(lambda params=params: _select(state, 45, billing_objective="allowance_weighted", **params))
-        _check(code == "parameter_invalid" and "plan-scoped" in message, f"explicit allowance_weighted with {params or 'no runtime'} is refused")
-    with _ProfileFile(_drop_weights):
-        code, _ = _refusal(lambda: _select(state, 45, runtime="claude_code", billing_objective="allowance_weighted"))
-        _check(code == "parameter_invalid", "explicit allowance_weighted needs a table, not just a covered runtime")
-    code, _ = _refusal(lambda: _select(state, 45, runtime="claude_code", billing_objective="weighted"))
-    _check(code == "parameter_invalid", "an unknown objective is still refused")
 
 
 def test_profile_faults_refuse_with_their_documented_codes() -> None:
@@ -341,11 +325,6 @@ def test_profile_faults_refuse_with_their_documented_codes() -> None:
     with _ProfileFile(_drop_pools):
         code, message = _refusal(lambda: _select(state, 45, runtime="claude_code"))
         _check(code == "usage_economics_invalid", f"a runtime-constrained selection loads the profile first and refuses usage_economics_invalid ({message[:60]})")
-        unconstrained = _select(state, 45)
-        _check(
-            unconstrained["selected"] is not None and "quota_unknown_used" not in unconstrained["advisories"],
-            "unconstrained metered selection does not load quota profiles",
-        )
     with _ProfileFile(lambda row: row["dispatch_weights"].update({"default_weight": 0})):
         code, _ = _refusal(lambda: _select(state, 45, runtime="claude_code"))
         _check(code == "usage_economics_invalid", "a malformed dispatch_weights table refuses a constrained selection as usage_economics_invalid")
@@ -354,48 +333,16 @@ def test_profile_faults_refuse_with_their_documented_codes() -> None:
         _check(code == "usage_economics_invalid" and "ambiguous" in message, "two current plans covering the runtime refuse usage_economics_invalid as ambiguous")
 
 
-def _verify(state: StateManagementInterface, receipt: dict[str, Any], selected: dict[str, Any]) -> None:
-    verbs.verify_selection_receipt(
-        state,
-        difficulty_score=float(receipt["required_score"]),
-        selection_receipt=receipt,
-        dispatch_kind="implement",
-        scope_tags=(),
-        agent_runtime=selected["runtime"],
-        model=selected["model"],
-        effort=selected["effort"],
-        now=_NOW,
-    )
-
-
-def test_receipt_round_trips_and_pins_the_ranking() -> None:
+def test_weight_change_updates_the_selection() -> None:
     state = _state()
     selection = _select(state, 41, runtime="claude_code")
-    receipt = selection["selection_receipt"]
-    assert {"pin", "pin_basis", "effort_ceiling", "exclude_model_prefixes", "exclude_runtimes"} <= set(receipt), "final five receipt keys"
-    _check(
-        set(receipt) == {"required_score", "billing_objective", "score_margin", "cost_tolerance", "max_staleness_hours", "runtime_constraint", "selected", "effort_ceiling", "exclude_model_prefixes", "exclude_runtimes", "pin", "pin_basis"},
-        "the receipt includes the original seven, three constraint and two pin keys",
-    )
-    _check(receipt["billing_objective"] == "allowance_weighted" and receipt["selected"]["model"] == "claude-sonnet-5-5", "the receipt pins the weighted ranking")
-    _check(_refusal(lambda: _verify(state, receipt, receipt["selected"])) == ("", ""), "it verifies for its spawn tuple")
-    relative = {**receipt, "billing_objective": "relative"}
-    relative_selected = relative["selected"]
-    assert isinstance(relative_selected, dict)
-    _check(_refusal(lambda: _verify(state, relative, relative_selected))[0] == "selection_receipt_mismatch", "a receipt re-labelled relative no longer replays to the same answer")
-    stripped = {**receipt, "runtime_constraint": None}
-    stripped_selected = stripped["selected"]
-    assert isinstance(stripped_selected, dict)
-    code, message = _refusal(lambda: _verify(state, stripped, stripped_selected))
-    _check(code == "selection_receipt_mismatch" and "runtime_constraint" in message, "a weighted receipt without its runtime constraint is refused as a mismatch")
-    legacy = _select(state, 41, runtime="claude_code", billing_objective="relative")["selection_receipt"]
-    _check(_refusal(lambda: _verify(state, legacy, legacy["selected"])) == ("", ""), "a receipt issued under relative still verifies unchanged")
+    _check(selection["billing_objective"] == "allowance_weighted" and selection["selected"]["model"] == "claude-sonnet-5-5", "weighted ranking selects Sonnet")
 
     def heavier(row: dict[str, Any]) -> None:
         row["dispatch_weights"]["by_model_prefix"]["claude-sonnet"] = 1.0
 
     with _ProfileFile(heavier):
-        _check(_refusal(lambda: _verify(state, receipt, receipt["selected"]))[0] == "selection_receipt_mismatch", "editing the weight invalidates an in-flight receipt until the dispatcher re-selects")
+        _check(_select(state, 41, runtime="claude_code")["selected"] != selection["selected"], "editing the weight changes the next selection")
 
 
 def test_exhausted_pool_does_not_exclude_weighted_cells() -> None:
@@ -428,11 +375,6 @@ def test_haiku_is_not_declared_so_it_keeps_the_default_weight() -> None:
         _check(_pick(_select(state, 14, runtime="claude_code")) == ("claude-haiku-4.5", "non_reasoning"), "without the table Haiku wins as before")
 
 
-def test_constraint_receipt_defaults() -> None:
-    receipt = _select(_state(), 41, runtime="claude_code")["selection_receipt"]
-    _check(receipt["effort_ceiling"] is None and receipt["exclude_model_prefixes"] == [] and receipt["exclude_runtimes"] == [], "weighted receipt carries constraint defaults")
-
-
 if __name__ == "__main__":
     print(f"selector under test: {verbs.__file__}")
     test_shipped_profile_declares_the_decided_table()
@@ -442,10 +384,8 @@ if __name__ == "__main__":
     test_golden_table_on_the_shipped_profile()
     test_ranking_outside_the_plan_is_byte_identical()
     test_missing_table_warns_without_refusing()
-    test_allowance_weighted_is_plan_scoped()
     test_profile_faults_refuse_with_their_documented_codes()
-    test_constraint_receipt_defaults()
-    test_receipt_round_trips_and_pins_the_ranking()
+    test_weight_change_updates_the_selection()
     test_exhausted_pool_does_not_exclude_weighted_cells()
     test_haiku_is_not_declared_so_it_keeps_the_default_weight()
     print(f"\n{_passed} passed, {len(_failed)} failed")

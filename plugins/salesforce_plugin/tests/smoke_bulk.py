@@ -482,7 +482,7 @@ def test_edge_parity_bulk_verbs_present() -> None:
     names = {action.name for action in actions}
     expected_bulk = {"bulk_ingest_submit", "bulk_job_status", "bulk_job_results", "bulk_job_abort"}
     _assert("all four bulk verbs discovered", expected_bulk.issubset(names), str(sorted(names)))
-    _assert("twenty-five verbs total (including provisioning, authenticated request and the typed families)", len(actions) == 25, str(len(actions)))
+    _assert("thirty-two verbs total (provisioning, the generic request, the typed families and the build 6 org verbs)", len(actions) == 32, str(len(actions)))
 
 
 def main() -> int:

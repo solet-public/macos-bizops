@@ -1,6 +1,7 @@
 """Memory store operations for ACT-R memory plugin."""
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from ananta.core.domain.enums import ActionStatus
@@ -13,6 +14,7 @@ from .record_helpers import (
     parse_memory_json_fields,
     serialize_memory_for_storage,
 )
+from .vector_segments import segment_external_id
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +246,18 @@ def get_all_memorizations(
     return records
 
 
+def memory_vector_metadata(now_iso: str, tags: list[str] | None = None) -> dict[str, Any]:
+    """The metadata an episodic memory's vector carries (the recall filters read ``memory_type`` and ``status``)."""
+    metadata: dict[str, Any] = {
+        "memory_type": "episodic",
+        "status": "active",
+        "created_at": now_iso,
+    }
+    if tags:
+        metadata["tags"] = tags
+    return metadata
+
+
 def store_memory_vector(
     vector_service: Any,
     memory_id: str,
@@ -252,31 +266,43 @@ def store_memory_vector(
     tags: list[str] | None = None,
 ) -> None:
     """Store memory vector. Raises FrameworkError on failure."""
+    store_memory_vectors(vector_service, memory_id, [embedding], memory_vector_metadata(now_iso, tags))
+
+
+def store_memory_vectors(
+    vector_service: Any,
+    memory_id: str,
+    embeddings: Sequence[list[float]],
+    metadata: dict[str, Any],
+) -> None:
+    """Store one vector per segment of a memory, segment ``k`` under ``segment_external_id(memory_id, k)``.
+
+    The memory's own id (segment 0) goes last in the batch: it is what marks the memory complete, so a
+    write that stops part-way leaves the memory uncovered for the reconcile to redo. A memory that fits
+    has one embedding and so exactly one vector under its own id. Raises FrameworkError on failure.
+    """
     if vector_service is None:
         raise FrameworkError(
             message="Vector service not available",
             error_code="memory.vector_unavailable",
         )
+    if not embeddings:
+        raise FrameworkError(
+            message=f"No embeddings to store for memory {memory_id}",
+            error_code="memory.embedding_empty",
+        )
 
-    metadata: dict[str, Any] = {
-        "memory_type": "episodic",
-        "status": "active",
-        "created_at": now_iso,
-    }
-    if tags:
-        metadata["tags"] = tags
-
-    result = vector_service.store_vectors(
-        VECTOR_NAMESPACE,
-        [
-            {
-                "external_id": memory_id,
-                "vector": embedding,
-                "dimension": len(embedding),
-                "metadata": metadata,
-            }
-        ],
-    )
+    records = [
+        {
+            "external_id": segment_external_id(memory_id, index),
+            "vector": embedding,
+            "dimension": len(embedding),
+            "metadata": dict(metadata),
+        }
+        for index, embedding in enumerate(embeddings)
+    ]
+    records.append(records.pop(0))
+    result = vector_service.store_vectors(VECTOR_NAMESPACE, records)
     if isinstance(result, dict) and result.get("action_status") == ActionStatus.ERROR.value:
         error = result.get("error", {})
         error_msg = error.get("message", str(error)) if isinstance(error, dict) else str(error)

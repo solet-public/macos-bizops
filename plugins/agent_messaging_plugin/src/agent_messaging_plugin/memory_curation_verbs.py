@@ -1,5 +1,5 @@
 """Maintenance-verbs M2.2 — ambient-index curation & placement decay
-(the 2026-08-10 maintenance-verbs M2 memory-curation charter draft,
+(the 2026-08-10 maintenance-verbs M2 memory-curation design draft,
 accepted design ``workbench/2026-08-10_m2_memory_curation_design_questions_mverbs-impl.md``).
 
 Two pieces, both pure functions here — the I/O (fetching memory records via
@@ -59,7 +59,8 @@ def origin_tag(solet_name: str) -> str:
 
 
 def resolve_memory_id_by_slug(
-    matches: list[dict[str, Any]], slug: str,
+    matches: list[dict[str, Any]],
+    slug: str,
 ) -> str:
     """Extract the ``id`` from a ``get_memories_by_tag`` result already
     filtered to one slug's slot tag. Raises ``slug_not_found`` on zero
@@ -70,18 +71,13 @@ def resolve_memory_id_by_slug(
     if not matches:
         raise VerbError(
             "slug_not_found",
-            f"no memory record carries a slot tag for slug {slug!r} — check "
-            "the slug matches an actual local memory file's name (no "
-            "'.md', no path), and that it has been drained to canonical "
-            "at least once.",
+            f"no memory record carries a slot tag for slug {slug!r} — check the slug matches an actual local memory file's name (no '.md', no path), and that it has been drained to canonical at least once.",
         )
     if len(matches) > 1:
         ids = ", ".join(str(m.get("id")) for m in matches)
         raise VerbError(
             "slug_ambiguous",
-            f"slug {slug!r} matched {len(matches)} memory records ({ids}) — "
-            "the slot tag is expected to be unique per slug; this is a "
-            "data-integrity signal, not something to resolve by picking one.",
+            f"slug {slug!r} matched {len(matches)} memory records ({ids}) — the slot tag is expected to be unique per slug; this is a data-integrity signal, not something to resolve by picking one.",
         )
     memory_id = str(matches[0].get("id") or "")
     if not memory_id:
@@ -102,7 +98,8 @@ def _parse_head_line_slugs(line: str) -> list[str]:
 
 
 def build_fact_index(
-    memory_records: list[dict[str, Any]], solet_name: str,
+    memory_records: list[dict[str, Any]],
+    solet_name: str,
 ) -> dict[str, dict[str, Any]]:
     """One ``get_memories_by_tag(origin_tag(...))`` call's worth of records
     -> ``{slug: {"strength": float, "pinned": bool, "memory_id": str}}``.
@@ -117,7 +114,7 @@ def build_fact_index(
         if not isinstance(tags, list):
             continue
         slug = next(
-            (str(t)[len(prefix):] for t in tags if isinstance(t, str) and t.startswith(prefix)),
+            (str(t)[len(prefix) :] for t in tags if isinstance(t, str) and t.startswith(prefix)),
             None,
         )
         if slug is None:
@@ -131,7 +128,8 @@ def build_fact_index(
 
 
 def _score_head_line(
-    line: str, fact_index: Mapping[str, dict[str, Any]],
+    line: str,
+    fact_index: Mapping[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
     """One head line's candidacy verdict — split out of
     :func:`build_curation_report` to keep it a straight-line aggregator

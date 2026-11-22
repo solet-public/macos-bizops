@@ -33,7 +33,7 @@ from g_suite_plugin.gmail_actions import GmailIO, OutgoingAttachment  # noqa: E4
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
 from g_suite_plugin.workspace_actions import RAW_ALT_PRODUCTS, execute_method, raw_reply_mime  # noqa: E402
 from g_suite_plugin.workspace_registry import WORKSPACE_METHODS, WORKSPACE_PRODUCTS, discovery_document, parameter_schemas, process_parameters  # noqa: E402
-from gsuite_fakes import connect_accounts  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import connect_accounts  # noqa: E402
 
 STATE = {"session_id": "session-1", "flow_id": "flow-1"}
 EDIT_SCOPES = ["https://www.googleapis.com/auth/documents", "https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/presentations"]

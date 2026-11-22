@@ -2,7 +2,7 @@
 """Regression for the advisory focused smoke selector (wgr_3690c324).
 
 Routines 1-4 run the selector on the real checkout, which is the producer of
-the member-case shapes. They share ONE selection over all five changed paths,
+the member-case shapes. They share one selection over their changed paths,
 and each asserts a reason that names its own path. A seed clone carries
 PROVENANCE.json and prunes the origin-side smokes those cases name, so there
 they SKIP with a banner. Routines 5-9 use fixture trees from
@@ -29,13 +29,14 @@ from quality_gates.tests import _focused_smoke_selector_fixture as fixture  # no
 _SELECTOR_SCRIPT = focused_smoke_selector.__file__
 _CASE_1_PATH = "solet_cli/src/solet_manager/update_candidate.py"
 _CASE_2_PATH = "plugins/agent_messaging_plugin/tests/_register_unit_double.py"
+_CODEX_DRIVER_PATH = "plugins/agent_messaging_plugin/src/agent_messaging_plugin/codex_app_server.py"
+_CODEX_SMOKE = "plugins/agent_messaging_plugin/tests/codex_managed_session_smoke.py"
 _CASE_3_PATH = "plugins/default_thinking_plugin/src/default_thinking_plugin/plugin.py"
 _PROFILE_PATH = "initialization/profiles/local.yaml"
 _RELEASE_NOTES_PATH = "RELEASE_NOTES.md"
 _CASE_2_SMOKES = (
     "plugins/agent_messaging_plugin/tests/fleet_identity_qualification_smoke.py",
-    "plugins/agent_messaging_plugin/tests/headless_adapter_init_event_capture_smoke.py",
-    "plugins/agent_messaging_plugin/tests/headless_adapter_stdout_drain_smoke.py",
+    "plugins/agent_messaging_plugin/tests/session_lifecycle_transport_smoke.py",
 )
 _RELEASE_NOTES_SMOKES = (
     "plugins/seed_factory_plugin/tests/release_run_smoke.py",
@@ -56,7 +57,7 @@ def _skipped_on_seed_clone(label: str) -> bool:
 
 @cache
 def _real_selection() -> focused_smoke_selector.Selection:
-    paths = (_CASE_1_PATH, _CASE_2_PATH, _CASE_3_PATH, _PROFILE_PATH, _RELEASE_NOTES_PATH)
+    paths = (_CASE_1_PATH, _CASE_2_PATH, _CODEX_DRIVER_PATH, _CASE_3_PATH, _PROFILE_PATH, _RELEASE_NOTES_PATH)
     return focused_smoke_selector.select_focused_smokes(ROOT, paths)
 
 
@@ -79,6 +80,8 @@ def _check_member_case_transitive_fixture() -> None:
         return
     selection = _real_selection()
     assert all(_has_reason(selection, smoke, "imports_changed_module", _CASE_2_PATH) for smoke in _CASE_2_SMOKES), label
+    assert _has_reason(selection, _CODEX_SMOKE, "imports_changed_module", _CODEX_DRIVER_PATH), label
+    assert not _has_reason(selection, _CODEX_SMOKE, "imports_changed_module", _CASE_2_PATH), label
     _passed(label)
 
 

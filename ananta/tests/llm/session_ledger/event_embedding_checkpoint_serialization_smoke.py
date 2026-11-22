@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Smoke: a JSON-backed event-embedding checkpoint resumes its generation."""
+"""Smoke: an event-embedding checkpoint written as an object resumes its generation through the store contract."""
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
@@ -26,22 +25,6 @@ _TARGET_POLICY = "tokens:2048+chars:8192"
 _LOGGER = logging.getLogger("ananta.llm.session_ledger.event_embedding_checkpoint")
 
 
-class _JsonState(StubStateService):
-    """Model the installed state-service KV JSON envelope."""
-
-    def set_key_value(
-        self,
-        namespace: str,
-        key: str,
-        value: object,
-        scope: str = "GLOBAL",
-        ttl: int | None = None,
-    ) -> dict[str, Any]:
-        if isinstance(value, dict | list):
-            value = json.dumps(value)
-        return super().set_key_value(namespace, key, value, scope, ttl)
-
-
 class _LogCapture(logging.Handler):
     def __init__(self) -> None:
         super().__init__(logging.INFO)
@@ -57,7 +40,7 @@ def _check(condition: bool, label: str) -> bool:
 
 
 def main() -> int:
-    state = _JsonState()
+    state = StubStateService()
     repository = SessionLedgerRepository(cast("Any", state))
     checkpoint = SweepCheckpoint("serialized-generation", _TARGET_POLICY, None)
     stored = state.set_key_value(
@@ -72,10 +55,9 @@ def main() -> int:
     try:
         checks = [
             _check(stored["action_status"] == "completed", "checkpoint write succeeds"),
-            _check(isinstance(state.key_values[_CHECKPOINT_KEY], str), "checkpoint is persisted as a JSON string"),
         ]
         resumed = repository.get_event_embed_checkpoint()
-        checks.append(_check(resumed == checkpoint, "serialized checkpoint decodes as the same generation"))
+        checks.append(_check(resumed == checkpoint, "a checkpoint written as an object reads back as the same generation"))
         active, pending = prepare_sweep(repository, _TARGET_POLICY, scheduled=False)
         checks.append(_check(active == checkpoint and pending == checkpoint, "checkpoint restart resumes instead of creating a new sweep"))
         checks.append(

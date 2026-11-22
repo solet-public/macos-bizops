@@ -12,6 +12,8 @@ from typing import Any
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
+from quality_gates.private_test_pg import MANIFEST_ENV  # noqa: E402
+
 
 def _service(state: object) -> Any:
     """Build the real read facade around a narrow state fake."""
@@ -25,7 +27,7 @@ def _service(state: object) -> Any:
 class CountState:
     """State fake that rejects every row read and records scalar calls."""
 
-    def __init__(self, result: object, rows: list[dict[str, object]] | None = None) -> None:
+    def __init__(self, result: object, rows: list[dict[str, Any]] | None = None) -> None:
         self.result = result
         self.rows = rows
         self.calls: list[tuple[str, dict[str, object]]] = []
@@ -135,7 +137,7 @@ def discovery_json() -> None:
     """Decorator discovery and the shipped process definition agree."""
     from ananta.services.session_ledger_service.interfaces.public import SessionLedgerReadAPI
 
-    metadata = SessionLedgerReadAPI.corpus_counts._service_interface_metadata
+    metadata = SessionLedgerReadAPI.corpus_counts._service_interface_metadata  # pyright: ignore[reportFunctionMemberAccess]
     process = metadata.to_process_dict()
     path = _ROOT / "ananta/knowledge_base/processes/session_ledger_service/corpus_counts.json"
     document = json.loads(path.read_text(encoding="utf-8"))
@@ -149,8 +151,8 @@ def discovery_json() -> None:
 
 def private_pg() -> None:
     """Real private PostgreSQL COUNT exceeds the 100-row materialization cap."""
-    if "PROJECT_SOLET_DESK_TEST_DSN" not in os.environ:
-        print("SKIP private PostgreSQL corpus-count case: provision_test_pg fixture absent")
+    if MANIFEST_ENV not in os.environ:
+        print(f"SKIP private PostgreSQL corpus-count case: {MANIFEST_ENV} absent; run quality_gates/provision_test_pg.py --exec")
         return
     fixture_root = _ROOT / "ananta/tests/llm/session_ledger"
     sys.path.insert(0, str(fixture_root))
@@ -167,7 +169,7 @@ def private_pg() -> None:
         from ananta.services.session_ledger_service.service import SessionLedgerService
 
         service = SessionLedgerService(
-            state_service=fixture.state,
+            state_service=cast(Any, fixture.state),
             blob_storage_service=cast(Any, SimpleNamespace()),
             plugin_manager=cast(Any, SimpleNamespace(plugins={})),
         )

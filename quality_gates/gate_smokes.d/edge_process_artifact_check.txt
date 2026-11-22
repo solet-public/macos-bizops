@@ -1,0 +1,2 @@
+# prb_a565496b (chg_1386ac5b): the author-side EDGE artifact check names a missing decorator, declaration or knowledge-base JSON; the smoke builds its own fixture plugin in a temporary directory, offline.
+quality_gates/tests/edge_process_artifact_check_smoke.py

@@ -5,7 +5,7 @@ The scheduling service provides two types of scheduled execution:
 - **Recurring** schedules via cron expressions
 - **One-time** delayed execution after a specified number of seconds
 
-All scheduled wake-ups execute independently of the current inference chain. They fire asynchronously through the action queue.
+All scheduled actions execute independently of the current inference chain. They fire asynchronously through the action queue.
 
 ---
 
@@ -18,7 +18,7 @@ Both scheduling operations require exactly one execution mode:
    the scheduled-action result-processor policy; it does not promise that a
    named process exists. Execution resolves each `process_key` against processes
    registered at fire time. Use this mode for work that must happen, including
-   scheduled peer notifications.
+   mechanizable Joseki runs and monitoring reads.
 2. `memory_tag`: a terminal
    `service_interface::memory_service::get_memories_by_tag` read. The fetched
    content is written to the scheduled action's result row; no model turn or
@@ -65,32 +65,6 @@ day of week (0-6, 0=Sunday)
 | `0 9 * * 1-5` | Weekdays at 9:00 AM UTC |
 | `0 0 * * 0` | Weekly on Sunday at midnight |
 | `0 */6 * * *` | Every 6 hours |
-
-### Example: Scheduled Peer Notification Every 15 Minutes
-
-```json
-{
-  "process_key": "service_interface::scheduling_service::create_cron_schedule",
-  "arguments": {
-    "cron_expression": "*/15 * * * *",
-    "label": "Coordinator status reminder",
-    "tags": ["coordination:status-reminder"],
-    "action_definitions": [
-      {
-        "process_key": "plugin::agent_messaging_plugin::peer_send_by_name",
-        "arguments": {
-          "name": "Coordinator",
-          "content": "Scheduled reminder: review active scheduler work."
-        }
-      }
-    ]
-  }
-}
-```
-
-The scheduler invokes `peer_send_by_name` directly. No Claude or Codex
-inference is required when the schedule fires. The peer message is the action
-itself, not a prompt asking a seat to perform some other scheduled action.
 
 ### Example: Scheduled Mechanizable Joseki
 
@@ -218,27 +192,6 @@ Note: the one-step stash uses only `tags=[memory_tag]`. If you need richer tags 
 | `message` | string | Confirmation message |
 | `run_at` | string | ISO 8601 timestamp when the wake-up will run |
 
-### Example: One-Time Scheduled Peer Notification
-
-```json
-{
-  "process_key": "service_interface::scheduling_service::execute_in_seconds",
-  "arguments": {
-    "seconds": 60,
-    "label": "One-minute coordinator reminder",
-    "action_definitions": [
-      {
-        "process_key": "plugin::agent_messaging_plugin::peer_send_by_name",
-        "arguments": {
-          "name": "Coordinator",
-          "content": "Scheduled reminder: inspect the pending job."
-        }
-      }
-    ]
-  }
-}
-```
-
 ### Example: Terminal Memory Read
 
 ```json
@@ -306,10 +259,11 @@ Cancel all scheduled jobs matching a tag. This is the preferred way to clean up 
 
 ### Pattern: Deterministic Progress Check
 
-Schedule the check verb itself in `action_definitions`. If the verb must notify
-a peer, either make that notification part of the deterministic verb or schedule
-`peer_send_by_name` directly. Do not use `memory_tag` as instructions for a
-model; no model receives that result at fire time.
+Schedule the check verb itself in `action_definitions`. A check that has
+something to report records it where a session reads it on demand (a state key
+or a log line), because a schedule does not message a session. Do not use
+`memory_tag` as instructions for a model; no model receives that result at fire
+time.
 
 ### Pattern: Timeout with Fallback
 
@@ -341,7 +295,7 @@ Step 3: clear_scheduled_actions_by_tag(tag="followup:timeout:<id>")  // Cancel i
 
 - All cron expressions use **UTC** timezone
 - The `state` parameter is **auto-injected** -- do not set it manually. It carries `session_id` and `flow_id` for proper context routing
-- Scheduled wake-ups execute **asynchronously** and independently of the current inference chain
+- Scheduled actions execute **asynchronously** and independently of the current inference chain
 - Provide exactly one of `action_definitions` or `memory_tag`
 - `action_definitions` execute directly; `memory_tag` is a terminal read and starts no model turn
 - One-time schedules (`execute_in_seconds`) auto-complete after execution
@@ -370,7 +324,7 @@ not foreign table reads. A registered delivery route does not prove eventual
 delivery. Context session/flow IDs are separate from action destinations.
 Unsupported or ambiguous action destinations remain visible.
 
-For `send_peer_message`, `peer_agent_session_id` is a fallback hint, not an
+For `peer_send`, `peer_agent_session_id` is a fallback hint, not an
 independent destination. Transport resolves `peer_id` and its optional instance
 first; a sole registered peer can win over a different session hint. With only
 the hint, the target is `kind=unknown`, `supported=false`, with advisory
@@ -428,87 +382,3 @@ A no-op dispatch lock does not consume semantic revision, history or epoch.
 Queue submission is not exactly-once external delivery, and queue persistence
 and scheduling history are not one atomic transaction. Partial submission is
 disclosed with the observed revision.
-
-
-## Seat heartbeat code schedule
-
-The platform-health `ensure_main_seat_heartbeat_schedule` installer keeps
-tag `heartbeat:main-seat` and cron `7,27,47 * * * *` (UTC), but binds one
-terminal `plugin::platform_health_plugin::check_main_seat_heartbeat_cron`
-action with its runtime `role` argument. Its code-only worker reads register state and
-fleet liveness; complete unchanged ticks send no role mail. First baseline
-sends only for a pending delivery, an explicitly labelled STOP event, or an
-overdue/stalled lane. Model wake telemetry is measured separately by the seat.
-Partial/failed reads are stored as unmeasured with advisories; they never prove
-quiet. The full unit/candidate/verdict/event/landing reads cover incomplete
-resume sections. Heartbeat timestamps and observation times are excluded from
-the semantic digest. Generic event changes are reported by exact event id;
-explicit stop labels are `STOP:`, `STOP ` and `BLOCKED:` at the start of the
-effective, nonwithdrawn event detail. Correction/withdrawal is a reversal.
-
-Supply the seat role as installer `role` and the prior deployment tag as
-`prior_tag`; neither origin value is embedded in shipped code. New installs
-without a role return an advisory and retain existing schedules. The current
-SOLET_NAME supplies the register/repository scope.
-
-The code reader uses these documented environment settings, read at plugin
-import: `MAIN_SEAT_HEARTBEAT_PAGE_SIZE` (default 100, maximum 100, matching
-the state-service page contract), `MAIN_SEAT_HEARTBEAT_MAX_PAGES` (default
-100 per domain), `MAIN_SEAT_HEARTBEAT_MAX_TOKENS` (default 10000 semantic
-entries), and `MAIN_SEAT_HEARTBEAT_READ_TIMEOUT_SECONDS` (default 60 for one
-register CLI read). Values must be positive integers. Invalid values emit a
-warning and use the documented default. Exceeding a read/state bound is
-unmeasured with an advisory, never evidence of quiet. `PROJECT_SOLET_CLI`
-selects the installed read-only CLI; its default is the existing local
-Project Solet virtual-environment entry point under the runtime user's home.
-
-The installer reads current definitions/history, creates and confirms the
-successor, then clears predecessors. It reuses a matching installed successor.
-The scheduler only revises messaging destinations, so expected revision on
-replacement is advisory; it cannot provide a stale-write refusal for an action
-process-key replacement. Create-confirm-clear changes the schedule id. An
-uncertain create is reconciled through the tag before retrying; the previous
-schedule is retained unless successor confirmation succeeds. The boot action
-is submitted after startup service binding. Live replacement belongs to the
-seat after landing.
-
-Marker lifecycle uses StateManagementInterface KV in platform_health_plugin:
-current key `main_seat_heartbeat:current`, immutable history keys
-`main_seat_heartbeat:history:<record_id>`. The registered check accepts
-`operation=read` (optional historical `record_id`), `correct` (tokens), or
-`clear`; correction and clear require `expected_record_id` and `reason` and
-serialize with ordinary ticks. Clear is a tombstone and the next tick establishes
-a baseline. Intent custody survives correction/clear. Readback includes
-previous_record_id, complete/advisories, last_tick/last_successful_tick, observed
-and notified digests, and send_intent. An intent is persisted before role send.
-Recovery searches exact intent tokens in role envelopes; unresolved outcomes
-are retained and never replayed. A persisted envelope proves durable custody,
-not actual model wake or consumption. No raw SQL, markdown cursor or new schema.
-
-Reversal is a seat-authorized recreation of this exact predecessor definition.
-Confirm its creation before clearing the checker schedule; this deliberately
-restores unconditional role wakes. Historical bindings are never edited.
-
-```json
-{
-  "cron_expression": "7,27,47 * * * *",
-  "label": "<role> seat heartbeat",
-  "tags": [
-    "<prior-tag>"
-  ],
-  "actions": [
-    {
-      "process_key": "plugin::agent_messaging_plugin::peer_send_by_name",
-      "arguments": {
-        "name": "<role>",
-        "content": "<role> seat heartbeat (platform scheduler, schedule tag <prior-tag>; safety net for iss_ebc1ce9c / iss_6524070b). First run `date -u` and use that time, never an estimate. Then: drain peer_inbox; read the register for work in flight (psolet resume --solet <solet>; psolet db unit who-has-work) and the units named in your last GOAL line; act on a stop, a delivery, or a lane idle for more than 15 minutes; run delivered-to-review (dry-run first) when a delivery arrived. End with a GOAL: line."
-      }
-    }
-  ]
-}
-```
-
-After landing and seat-native replacement, observe three scheduled ticks across
-an idle hour. Retain schedule/tag/history reads and actual seat inbox/ledger
-wake telemetry. Zero checker sends alone does not prove zero model wakes;
-disclose unavailable telemetry.

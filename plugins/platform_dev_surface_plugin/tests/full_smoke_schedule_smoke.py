@@ -1,228 +1,142 @@
 #!/usr/bin/env python3
-"""Tier U: actual late boot hook, durable worker, busy and filing response loss."""
+"""Tier U: actual late boot hook, durable worker, exclusion and campaign history."""
 
 # ruff: noqa: E402
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
+from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[3]
 for source in (ROOT, ROOT / "ananta/src", ROOT / "plugins/platform_dev_surface_plugin/src", ROOT / "plugins/default_scheduling_plugin/src"):
     sys.path.insert(0, str(source))
-from default_scheduling_plugin.plugin import SchedulingPlugin
-from full_smoke_schedule_doubles import CapturingScheduler, MemoryScheduler, NativeRegisterFixture, RegisterDouble
+from ananta.interfaces.quality_service_interface import QualityServiceInterface
+from ananta.services.quality_service.interfaces.public import QualityServicePublicAPI
+from full_smoke_schedule_doubles import CapturingScheduler, MemoryScheduler
 from platform_dev_surface_plugin.plugin import PlatformDevSurfacePlugin
 from platform_dev_surface_plugin.quality import full_battery
-from platform_dev_surface_plugin.quality.full_battery import SYSTEM_STATE, TARGET, FullBatteryProducer, ensure_full_smoke_schedule
+from platform_dev_surface_plugin.quality.full_battery import SYSTEM_STATE, FullBatteryProducer
 
 from quality_gates.full_smoke_campaign import CampaignStore
 from quality_gates.smoke_identity import FrozenTree
 
 
-class ScheduleReadbackTests(unittest.TestCase):
-    def test_real_scheduler_canonical_readback_and_idempotency(self) -> None:
-        self.assertEqual(Path(sys.modules[SchedulingPlugin.__module__].__file__).resolve(), ROOT / "plugins/default_scheduling_plugin/src/default_scheduling_plugin/plugin.py")
-        scheduler = MemoryScheduler()
-        first = ensure_full_smoke_schedule(scheduler)
-        self.assertTrue(first["installed"], first)
-        again = ensure_full_smoke_schedule(scheduler)
-        self.assertTrue(again["installed"], again)
-        self.assertEqual([row["schedule_id"] for row in first["schedules"]], [row["schedule_id"] for row in again["schedules"]])
-        for tag, _cron, _trigger in full_battery._SCHEDULES:
-            rows = scheduler.get_schedules_by_tag(tag)["data"]["schedules"]
-            self.assertEqual(len(rows), 1)
-            self.assertIsNone(rows[0]["action_definitions"][0]["result_processor"])
-            self.assertIsNone(rows[0]["action_definitions"][0]["result_processor_kind"])
+def _present[T](value: T | None) -> T:
+    """Narrow an optional read to its value; absence fails the test at the read."""
+    assert value is not None
+    return value
 
-    def test_helper_origin_and_exact_created_readback(self) -> None:
-        self.assertEqual(Path(full_battery.__file__).resolve(), ROOT / "plugins/platform_dev_surface_plugin/src/platform_dev_surface_plugin/quality/full_battery.py")
-        scheduler = CapturingScheduler()
-        installed = ensure_full_smoke_schedule(scheduler)
-        self.assertTrue(installed["installed"])
-        self.assertFalse(installed["commissioned"])
-        self.assertEqual([row["status"] for row in installed["schedules"]], ["created", "created"])
-        self.assertEqual({row["action_definitions"][0]["arguments"]["trigger"] for row in scheduler.rows}, {"schedule", "due_retry"})
-        again = ensure_full_smoke_schedule(scheduler)
-        self.assertTrue(again["installed"])
-        self.assertEqual([row["status"] for row in again["schedules"]], ["already_present", "already_present"])
-        self.assertEqual(scheduler.creates, 2)
 
-    def test_created_identity_mismatch_never_installed_and_next_ensure_repairs(self) -> None:
-        corruptions = (
-            {"cron_expression": "* * * * *"},
-            {"action_definitions": [{"process_key": "wrong::target", "arguments": {"trigger": "schedule"}}]},
-            {"action_definitions": [{"process_key": TARGET, "arguments": {"trigger": "manual"}}]},
-            {"flow_id": "wrong-flow"},
-            {"session_id": "wrong-session"},
-            {"status": "paused"},
-            {"status": "cancelled"},
-            {"tags": ["unowned"]},
+TAGS = ("quality-full-smokes-six-hour", "quality-full-smokes-due-retry")
+
+
+def _legacy_schedules(scheduler: MemoryScheduler | CapturingScheduler) -> None:
+    for tag, cron, trigger in ((TAGS[0], "0 */6 * * *", "schedule"), (TAGS[1], "*/5 * * * *", "due_retry")):
+        scheduler.create_cron_schedule(
+            cron_expression=cron,
+            action_definitions=[{"process_key": "service_interface::quality_service::trigger_full_smoke_battery", "arguments": {"trigger": trigger}, "result_processor": None, "result_processor_kind": None}],
+            label=tag,
+            tags=[tag],
+            state=SYSTEM_STATE,
         )
-        for tag, _cron, _trigger in full_battery._SCHEDULES:
-            for corruption in corruptions:
-                with self.subTest(tag=tag, corruption=corruption):
-                    scheduler = CapturingScheduler()
-                    scheduler.corrupt_tag = tag
-                    scheduler.created_override = corruption
-                    result = ensure_full_smoke_schedule(scheduler)
-                    self.assertFalse(result["installed"], "returned id alone must not prove installation")
-                    self.assertIn("advisory", result)
-                    scheduler.created_override = {}
-                    self.assertTrue(ensure_full_smoke_schedule(scheduler)["installed"])
 
-    def test_created_duplicates_never_installed_and_repair_preserves_unowned(self) -> None:
-        for tag, _cron, _trigger in full_battery._SCHEDULES:
-            with self.subTest(tag=tag):
-                scheduler = CapturingScheduler()
-                scheduler.rows.append({"schedule_id": "unrelated", "tags": ["other"]})
-                scheduler.corrupt_tag = tag
-                scheduler.duplicate = True
-                self.assertFalse(ensure_full_smoke_schedule(scheduler)["installed"])
-                scheduler.duplicate = False
-                self.assertTrue(ensure_full_smoke_schedule(scheduler)["installed"])
-                self.assertEqual(len(scheduler.rows), 3)
-                self.assertNotIn("unrelated", scheduler.clears)
 
-    def test_incomplete_created_readback_recovers_without_recreation(self) -> None:
+class RetireTests(unittest.TestCase):
+    def test_a_real_scheduler_retires_owned_tags_only(self) -> None:
+        scheduler = MemoryScheduler()
+        _legacy_schedules(scheduler)
+        scheduler.create_cron_schedule(cron_expression="0 0 * * *", action_definitions=[{"process_key": "service_interface::quality_service::trigger_full_smoke_battery", "arguments": {"trigger": "manual"}, "result_processor": None, "result_processor_kind": None}], label="other", tags=["other"], state=SYSTEM_STATE)
+        self.assertEqual(full_battery.retire_full_smoke_schedules(scheduler), {"retired": 2, "uncertain": []})
+        self.assertEqual([len(scheduler.get_schedules_by_tag(tag)["data"]["schedules"]) for tag in TAGS], [0, 0])
+        self.assertEqual(len(scheduler.get_schedules_by_tag("other")["data"]["schedules"]), 1)
+
+    def test_b_late_hook_clears_without_creation_twice(self) -> None:
         scheduler = CapturingScheduler()
-        scheduler.incomplete_after_create = True
-        first = ensure_full_smoke_schedule(scheduler)
-        self.assertFalse(first["installed"])
-        self.assertIn("advisory", first)
-        self.assertEqual(scheduler.creates, 1)
-        self.assertEqual(scheduler.clears, [])
-        scheduler.incomplete_after_create = False
-        scheduler.complete = True
-        self.assertTrue(ensure_full_smoke_schedule(scheduler)["installed"])
-        self.assertEqual(scheduler.creates, 2)
-        self.assertEqual(scheduler.clears, [])
+        _legacy_schedules(scheduler)
+        scheduler.creates = 0
+        plugin = PlatformDevSurfacePlugin()
+        plugin._quality = SimpleNamespace(full_battery=SimpleNamespace(active=True))
+        plugin.orchestrator_ref = SimpleNamespace(get_service=lambda _name: scheduler)
+        plugin.set_action_factory(cast(Any, SimpleNamespace()))
+        self.assertEqual((scheduler.rows, scheduler.creates), ([], 0))
+        plugin.set_action_factory(cast(Any, SimpleNamespace()))
+        self.assertEqual((scheduler.rows, scheduler.creates), ([], 0))
 
-    def test_created_readback_must_match_returned_identity(self) -> None:
+    def test_c_incomplete_read_clears_visible_rows_and_names_uncertainty(self) -> None:
         scheduler = CapturingScheduler()
-        scheduler.report_wrong_id = True
-        self.assertFalse(ensure_full_smoke_schedule(scheduler)["installed"])
-        scheduler.report_wrong_id = False
-        self.assertTrue(ensure_full_smoke_schedule(scheduler)["installed"])
-        self.assertEqual(scheduler.creates, 2)
+        _legacy_schedules(scheduler)
+        scheduler.creates = 0
+        scheduler.complete = False
+        with self.assertLogs(full_battery.__name__, level="WARNING"):
+            result = full_battery.retire_full_smoke_schedules(scheduler)
+        self.assertEqual(result, {"retired": 2, "uncertain": list(TAGS)})
+        self.assertEqual((scheduler.rows, scheduler.creates), ([], 0))
 
-    def test_incomplete_readback_is_advisory_and_late_hook_recovers(self) -> None:
-        for complete in (False, None):
-            with self.subTest(complete=complete):
-                scheduler = CapturingScheduler()
-                scheduler.complete = complete
-                plugin = PlatformDevSurfacePlugin()
-                plugin._quality = SimpleNamespace(full_battery=SimpleNamespace(active=True))
-                plugin.orchestrator_ref = SimpleNamespace(get_service=lambda _name, current=scheduler: current)
-                with self.assertLogs(full_battery.__name__, level="WARNING") as logged:
-                    plugin.set_action_factory(SimpleNamespace())
-                self.assertIn("schedule installation unverified", logged.output[0])
-                result = plugin.ensure_full_smoke_schedule()
-                self.assertFalse(result["installed"])
-                self.assertIn("advisory", result)
-                self.assertEqual(scheduler.creates, 0, "unknown absence cannot justify duplicate creation")
-                scheduler.complete = True
-                plugin.set_action_factory(SimpleNamespace())
-                self.assertTrue(plugin.ensure_full_smoke_schedule()["installed"])
-                self.assertEqual(scheduler.creates, 2)
-                scheduler.complete = complete
-                self.assertFalse(plugin.ensure_full_smoke_schedule()["installed"])
-                self.assertEqual(scheduler.clears, [], "incomplete knowledge must not clear known or unknown rows")
-                scheduler.complete = True
-                self.assertTrue(plugin.ensure_full_smoke_schedule()["installed"])
-                self.assertEqual(scheduler.creates, 2)
+    def test_d_missing_scheduler_is_advisory(self) -> None:
+        self.assertEqual(full_battery.retire_full_smoke_schedules(None), {"retired": 0, "advisory": "scheduler unavailable before late action-factory injection"})
+
+    def test_e_ensure_surface_is_removed(self) -> None:
+        self.assertFalse(hasattr(full_battery, "ensure_full_smoke_schedule"))
+        self.assertFalse(hasattr(PlatformDevSurfacePlugin, "ensure_full_smoke_schedule"))
+
+    def test_f_trigger_defaults_are_manual(self) -> None:
+        for owner, method in ((FullBatteryProducer, "trigger"), (QualityServicePublicAPI, "trigger_full_smoke_battery"), (QualityServiceInterface, "trigger_full_smoke_battery"), (PlatformDevSurfacePlugin, "trigger_full_smoke_battery")):
+            with self.subTest(owner=owner):
+                self.assertEqual(signature(getattr(owner, method)).parameters["trigger"].default, "manual")
+
+    def test_g_interface_version_is_two(self) -> None:
+        self.assertEqual(QualityServiceInterface.INTERFACE_VERSION, "2.0.0")
+
+    def test_h_only_deploy_and_manual_triggers_remain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            producer = FullBatteryProducer(ROOT, "fixture-solet", store=CampaignStore(Path(directory)))
+            producer.active = False
+            for trigger in ("schedule", "due_retry", "hub"):
+                with self.subTest(trigger=trigger), self.assertRaises(ValueError):
+                    producer.trigger(trigger)
+            for trigger in ("deploy", "manual"):
+                self.assertEqual(producer.trigger(trigger)["status"], "inactive")
+        self.assertFalse(hasattr(FullBatteryProducer, "_clock_due"))
+        self.assertFalse(hasattr(FullBatteryProducer, "_last_sample"))
 
 
 class ScheduleTests(unittest.TestCase):
-    def test_actual_late_hook_and_repeated_injection(self) -> None:
-        scheduler = CapturingScheduler()
-        ready = {"late": False}
-        plugin = PlatformDevSurfacePlugin()
-        plugin._quality = SimpleNamespace(full_battery=SimpleNamespace(active=True))
-        plugin.orchestrator_ref = SimpleNamespace(get_service=lambda _name: scheduler if ready["late"] else None)
-        self.assertFalse(plugin.ensure_full_smoke_schedule()["installed"])
-        ready["late"] = True
-        plugin.set_action_factory(SimpleNamespace())
-        plugin.set_action_factory(SimpleNamespace())
-        self.assertEqual(scheduler.creates, 2)
-        self.assertEqual({row["cron_expression"] for row in scheduler.rows}, {"0 */6 * * *", "*/5 * * * *"})
-        for row in scheduler.rows:
-            self.assertEqual(row["action_definitions"][0]["process_key"], TARGET)
-            self.assertEqual({key: row[key] for key in SYSTEM_STATE}, SYSTEM_STATE)
-        scheduler.rows[0]["action_definitions"][0]["process_key"] = "wrong::target"
-        plugin.set_action_factory(SimpleNamespace())
-        self.assertEqual(scheduler.creates, 3)
-        self.assertEqual(len(scheduler.rows), 2)
+    def test_full_battery_producer_has_no_register_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            producer = FullBatteryProducer(ROOT, "fixture-solet", store=CampaignStore(Path(directory)))
+        self.assertNotIn("register", signature(FullBatteryProducer).parameters)
+        self.assertFalse(hasattr(producer, "register"))
 
     def test_launch_failure_releases_slot_and_next_trigger_runs_queued_work(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = CampaignStore(Path(directory))
             clean = {"result": "passed", "exit_code": 0, "summary": {"total": 1, "passed": 1, "retried_count": 0}}
-            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, register=RegisterDouble(), runner=lambda *_: clean)
+            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, runner=lambda *_: clean)
             request = {"commit": "fixture", "tree": "fixture", "trigger": "schedule", "window": 1}
             immediate = SimpleNamespace(start=producer._background)
             with (
                 patch.object(producer, "_request", return_value=request),
                 patch("platform_dev_surface_plugin.quality.full_battery.threading.Thread", side_effect=[RuntimeError("fixture launch unavailable"), immediate]),
                 patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("fixture", "fixture", {})),
-                patch("platform_dev_surface_plugin.quality.full_battery.battery_busy", return_value=False),
             ):
                 queued = producer.trigger()
                 self.assertEqual(queued["status"], "queued")
                 self.assertFalse(producer._slot.locked())
-                self.assertEqual(store.get(queued["campaign_id"])["state"], "queued")
+                self.assertEqual(_present(store.get(queued["campaign_id"]))["state"], "queued")
                 started = producer.trigger()
             self.assertEqual(started["campaign_id"], queued["campaign_id"])
             self.assertFalse(producer._slot.locked())
-            self.assertEqual(store.get(queued["campaign_id"])["state"], "closed")
-            self.assertEqual(len(store.get(queued["campaign_id"])["attempts"]), 1)
-
-    def test_due_retry_names_hub_and_elapsed_cadence(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            producer = FullBatteryProducer(ROOT, "fixture-solet", store=CampaignStore(Path(directory)), register=RegisterDouble())
-            previous = {"finished_at": datetime.now(UTC).isoformat(), "request": {"commit": "old"}}
-            with patch.object(producer, "_last_sample", return_value=previous), patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("new", "tree", {})), patch("platform_dev_surface_plugin.quality.full_battery.git", return_value=b"quality_gates/run_smokes.py\n") as changed:
-                self.assertEqual(producer._request("due_retry")["trigger"], "hub")
-                changed.return_value = b"docs/ordinary.md\n"
-                self.assertIsNone(producer._request("due_retry"))
-                previous["finished_at"] = (datetime.now(UTC) - timedelta(hours=7)).isoformat()
-                self.assertEqual(producer._request("due_retry")["trigger"], "schedule")
-
-    def test_nonclean_complete_sample_still_bounds_retry_cadence(self) -> None:
-        for outcome, passed, failed, skipped, retried in (("failed", 1, 1, 0, 0), ("passed", 1, 0, 1, 0), ("passed_with_retries", 2, 0, 0, 1)):
-            with self.subTest(outcome=outcome, skipped=skipped), tempfile.TemporaryDirectory() as directory:
-                store = CampaignStore(Path(directory))
-                producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, register=RegisterDouble())
-                sample = store.enqueue({"commit": "old", "tree": "old", "trigger": "schedule", "window": 1})
-                sample.update(state="closed", finished_at=datetime.now(UTC).isoformat(), result={"result": outcome, "exit_code": int(bool(failed)), "registered_count": 2, "summary": {"total": 2, "passed": passed, "failed": failed, "skipped": skipped, "missing": 0, "not_run": 0, "retried_count": retried}})
-                sample = store.write(sample["campaign_id"], sample, expected_version=sample["version"], reason="completed nonclean physical fixture")
-                self.assertIsNone(producer._last_success())
-                with patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("new", "tree", {})), patch("platform_dev_surface_plugin.quality.full_battery.git", return_value=b"docs/ordinary.md\n") as changed:
-                    self.assertIsNone(producer._request("due_retry"))
-                    changed.return_value = b"quality_gates/run_smokes.py\n"
-                    self.assertEqual(producer._request("due_retry")["trigger"], "hub")
-                    sample["finished_at"] = (datetime.now(UTC) - timedelta(hours=7)).isoformat()
-                    store.write(sample["campaign_id"], sample, expected_version=sample["version"], reason="older physical fixture")
-                    changed.return_value = b"docs/ordinary.md\n"
-                    self.assertEqual(producer._request("due_retry")["trigger"], "schedule")
-
-    def test_incomplete_sample_does_not_suppress_bootstrap(self) -> None:
-        for outcome, total, not_run, timed_out in (("interrupted", 2, 0, False), ("failed", 2, 1, False), ("failed", 2, 0, True), ("passed", 0, 0, False)):
-            with self.subTest(outcome=outcome, not_run=not_run, timed_out=timed_out), tempfile.TemporaryDirectory() as directory:
-                store = CampaignStore(Path(directory))
-                producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, register=RegisterDouble())
-                sample = store.enqueue({"commit": "old", "tree": "old", "trigger": "schedule", "window": 1})
-                sample.update(state="closed", finished_at=datetime.now(UTC).isoformat(), result={"result": outcome, "exit_code": 1, "registered_count": total, "timed_out": timed_out, "summary": {"total": total, "passed": 0, "failed": total - not_run, "skipped": 0, "missing": 0, "not_run": not_run}})
-                store.write(sample["campaign_id"], sample, expected_version=sample["version"], reason="incomplete physical fixture")
-                with patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("new", "tree", {})):
-                    self.assertEqual(producer._request("due_retry")["trigger"], "due_retry")
+            self.assertEqual(_present(store.get(queued["campaign_id"]))["state"], "closed")
+            self.assertEqual(len(_present(store.get(queued["campaign_id"]))["attempts"]), 1)
 
     def test_due_retry_restarts_closed_incomplete_hub_campaign(self) -> None:
         complete = {"result": "passed", "exit_code": 0, "registered_count": 1, "summary": {"total": 1, "passed": 1}}
@@ -249,65 +163,30 @@ class ScheduleTests(unittest.TestCase):
                         return first
                     return complete
 
-                register = RegisterDouble()
-                register.available = not isinstance(outcome, RuntimeError)
-                producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, register=register, runner=runner)
+                producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, runner=runner)
                 with (
-                    patch("platform_dev_surface_plugin.quality.full_battery.datetime", wraps=datetime) as clock,
                     patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("new", "new-tree", {})),
-                    patch("platform_dev_surface_plugin.quality.full_battery.git", return_value=b"quality_gates/run_smokes.py\n") as changed,
-                    patch("platform_dev_surface_plugin.quality.full_battery.battery_busy", return_value=False),
                     patch("platform_dev_surface_plugin.quality.full_battery.threading.Thread") as thread,
                 ):
-                    clock.now.return_value = now
                     thread.return_value = SimpleNamespace(start=producer._background)
-                    first = producer.trigger("hub")
-                    terminal = store.get(first["campaign_id"])
+                    first = producer.trigger("deploy")
+                    terminal = _present(store.get(first["campaign_id"]))
                     self.assertEqual(terminal["state"], "closed")
                     self.assertEqual(len(terminal["attempts"]), 1)
-                    restarted = FullBatteryProducer(ROOT, "fixture-solet", store=CampaignStore(Path(directory)), register=register, runner=runner)
+                    restarted = FullBatteryProducer(ROOT, "fixture-solet", store=CampaignStore(Path(directory)), runner=runner)
                     thread.return_value = SimpleNamespace(start=restarted._background)
-                    retried = restarted.trigger("due_retry")
+                    retried = restarted.trigger("manual")
                     self.assertEqual(retried["campaign_id"], first["campaign_id"])
                     self.assertEqual(runs, [1, 2])
-                    final = store.get(first["campaign_id"])
+                    final = _present(store.get(first["campaign_id"]))
                     self.assertEqual(final["attempts"][0], terminal["attempts"][0])
                     self.assertEqual(final["attempts"][1]["previous_attempt"], 1)
                     self.assertEqual(final["state"], "closed")
                     history = store.journal.history(first["campaign_id"])
                     self.assertEqual(history[terminal["version"] - 1]["payload"]["result"], terminal["result"])
-                    changed.return_value = b""
-                    restarted.trigger("due_retry")
-                    restarted.trigger("hub")
+                    restarted.trigger("manual")
+                    self.assertEqual(restarted.trigger("deploy")["status"], "have_result")
                     self.assertEqual(runs, [1, 2])
-
-    def test_native_shapes_paging_idempotence_and_guards(self) -> None:
-        register = NativeRegisterFixture()
-        self.assertTrue(register.controller_busy()["busy"])
-        problem = register.reconcile("campaign-marker")
-        self.assertEqual(problem, {"issue_id": "iss_fixture", "problem_id": "prb_fixture"})
-        register.attribute_problem(problem, "campaign-marker", "campaign-marker detail", ["chg_fixture"])
-        register.attribute_problem(problem, "campaign-marker", "campaign-marker detail", ["chg_fixture"])
-        events = [args for args in register.calls if args[:3] == ("db", "change", "event")]
-        links = [args for args in register.calls if args[:4] == ("db", "problem", "relation", "add")]
-        self.assertEqual(len(events), 1)
-        self.assertEqual(len(links), 1)
-        self.assertEqual(events[0][events[0].index("--expected-sequence") + 1], "2")
-        self.assertEqual(links[0][links[0].index("--expected-version") + 1], "3")
-        self.assertEqual(links[0][links[0].index("--kind") + 1], "investigated_by")
-        self.assertFalse(any(args[:2] == ("db", "group") for args in register.calls))
-
-    def test_typed_parent_filing_flags_and_reconciliation(self) -> None:
-        register = NativeRegisterFixture()
-        register.issue_exists = False
-        self.assertEqual(register.file_problem("campaign-marker", "campaign-marker detail"), {"issue_id": "iss_fixture", "problem_id": "prb_fixture"})
-        self.assertEqual(register.file_problem("campaign-marker", "campaign-marker detail"), {"issue_id": "iss_fixture", "problem_id": "prb_fixture"})
-        filings = [args for args in register.calls if args[:1] == ("filed",)]
-        self.assertEqual(len(filings), 1, "existing marker must not file a second issue")
-        for flag in ("--new-parent-kind", "--new-parent-title", "--new-parent-scope", "--new-parent-problem-statement", "--new-parent-cause-text"):
-            self.assertIn(flag, filings[0])
-        self.assertFalse(any(flag.startswith("--new-group-") for flag in filings[0]))
-        self.assertFalse(any(args[:2] == ("db", "group") for args in register.calls))
 
     def test_actual_full_worker_argv_is_complete_register_and_cache_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -315,7 +194,7 @@ class ScheduleTests(unittest.TestCase):
             (root / "quality_gates").mkdir()
             (root / "quality_gates/gate_smokes.txt").write_text("suite/one_smoke.py\nsuite/two_smoke.py\n")
             store = CampaignStore(root / "campaigns")
-            producer = FullBatteryProducer(root, "fixture-solet", store=store, register=RegisterDouble())
+            producer = FullBatteryProducer(root, "fixture-solet", store=store)
             campaign = {"campaign_id": "a" * 64, "request": {"commit": "b" * 40}, "attempts": [{"number": 1}], "attribution": {}}
             calls: list[list[str]] = []
 
@@ -327,6 +206,7 @@ class ScheduleTests(unittest.TestCase):
             with (
                 patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("b" * 40, "c" * 40, {})),
                 patch("platform_dev_surface_plugin.quality.full_battery.verify_worktree"),
+                patch("platform_dev_surface_plugin.quality.full_battery.frozen_export", return_value=unittest.mock.MagicMock(__enter__=lambda _self: root)),
                 patch("platform_dev_surface_plugin.quality.full_battery.prepare_full_proofs", return_value={"fixture": "prepared"}) as begin,
                 patch("platform_dev_surface_plugin.quality.full_battery.finish_full_proofs", return_value=[]) as finish,
                 patch("platform_dev_surface_plugin.quality.full_battery.run_bounded", side_effect=physical),
@@ -359,7 +239,7 @@ class ScheduleTests(unittest.TestCase):
             store = CampaignStore(root / "campaigns")
             # The worker's exclusion has already created the store root it writes into.
             store.root.mkdir(parents=True)
-            producer = FullBatteryProducer(root, "fixture-solet", store=store, register=RegisterDouble())
+            producer = FullBatteryProducer(root, "fixture-solet", store=store)
             campaign = {"campaign_id": "a" * 64, "request": {"commit": "b" * 40}, "attempts": [{"number": 1}], "attribution": {}}
 
             def physical(argv: list[str], **_kwargs: Any) -> Any:
@@ -372,6 +252,7 @@ class ScheduleTests(unittest.TestCase):
             with (
                 patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("b" * 40, "c" * 40, {})),
                 patch("platform_dev_surface_plugin.quality.full_battery.verify_worktree"),
+                patch("platform_dev_surface_plugin.quality.full_battery.frozen_export", return_value=unittest.mock.MagicMock(__enter__=lambda _self: root)),
                 patch("platform_dev_surface_plugin.quality.full_battery.prepare_full_proofs", return_value={"fixture": "prepared"}),
                 patch("platform_dev_surface_plugin.quality.full_battery.finish_full_proofs", return_value=[]) as finish,
                 patch("platform_dev_surface_plugin.quality.full_battery.run_bounded", side_effect=physical),
@@ -379,67 +260,175 @@ class ScheduleTests(unittest.TestCase):
                 result = json.loads(json.dumps(producer._run_battery(campaign, store.root)))
             self.assertEqual((result["result"], result["harness_defects"], finish.call_args.args[2]["harness_defects"]), ("passed", ["suite/one_smoke.py"], ["suite/one_smoke.py"]))
 
-    def test_busy_queue_then_real_worker_failure_outbox_reconcile(self) -> None:
+    def test_failed_battery_is_recorded_only_in_its_campaign(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = CampaignStore(Path(directory))
-            register = RegisterDouble()
-            register.busy = True
-            register.lose_response = True
-            runs: list[str] = []
-
-            def runner(campaign: dict[str, Any], _root: Path) -> dict[str, Any]:
-                runs.append(campaign["campaign_id"])
-                return {"result": "failed", "exit_code": 1, "original_red": "assertion failed"}
-
-            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, register=register, runner=runner)
+            failure = {"result": "failed", "exit_code": 1, "original_red": "assertion failed"}
+            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, runner=lambda *_: failure)
             campaign = store.enqueue({"commit": "fixture", "tree": "fixture", "trigger": "hub", "window": 1})
-            with patch("platform_dev_surface_plugin.quality.full_battery.battery_busy", return_value=False), patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("fixture", "fixture", {})):
-                self.assertEqual(producer.run_due()[0]["state"], "queued")
-                self.assertFalse(runs)
-                register.busy = False
-                failed = producer.run_due()[0]
-                self.assertEqual(failed["filing"]["status"], "uncertain")
-                self.assertEqual(register.filings, 1)
-                producer.run_due()
-            final = store.get(campaign["campaign_id"])
-            self.assertEqual(final["filing"]["status"], "confirmed")
-            self.assertEqual(register.filings, 1)
-            self.assertEqual(final["result"]["original_red"], "assertion failed")
-            self.assertTrue(final["filing"]["evidence"]["change_evidence"])
+            with patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("fixture", "fixture", {})):
+                closed = producer.run_due()[0]
+            self.assertEqual(closed["state"], "closed")
+            self.assertEqual(closed["result"]["original_red"], "assertion failed")
+            self.assertIn("list_full_smoke_campaigns", closed["result"]["advisory"])
+            self.assertNotIn("filing", closed)
+            self.assertNotIn("filing", _present(store.get(campaign["campaign_id"])))
+            self.assertFalse(hasattr(producer, "register"))
+
+    def test_failed_battery_completes_with_empty_home_and_no_project_environment(self) -> None:
+        prefix = "_".join(("PROJECT", "SOLET")) + "_"
+        environment = {key: value for key, value in os.environ.items() if not key.startswith(prefix)}
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as home:
+            store = CampaignStore(Path(directory))
+            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, runner=lambda *_: {"result": "failed", "exit_code": 1})
+            immediate = SimpleNamespace(start=producer._background)
+            with (
+                patch.dict(os.environ, {**environment, "HOME": home}, clear=True),
+                patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("fixture", "fixture", {})),
+                patch("platform_dev_surface_plugin.quality.full_battery.threading.Thread", return_value=immediate),
+            ):
+                started = producer.trigger("manual")
+            closed = _present(store.get(started["campaign_id"]))
+            self.assertEqual(started["status"], "started")
+            self.assertEqual(closed["state"], "closed")
+            self.assertEqual(closed["result"]["result"], "failed")
+            self.assertIn("list_full_smoke_campaigns", closed["result"]["advisory"])
+            self.assertNotIn("filing", closed)
 
     def test_queued_old_master_is_superseded_without_losing_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = CampaignStore(Path(directory))
-            register = RegisterDouble()
-            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, register=register, runner=lambda *_: {"result": "failed", "exit_code": 1})
-            original = store.enqueue({"commit": "old", "tree": "old", "trigger": "hub", "window": 1})
-            with patch("platform_dev_surface_plugin.quality.full_battery.battery_busy", return_value=False), patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("new", "new-tree", {})):
+            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, runner=lambda *_: {"result": "failed", "exit_code": 1})
+            original = store.enqueue({"commit": "old", "tree": "old", "manifest_sha256": "old"})
+            with patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("new", "new-tree", {})):
                 successor = producer.run_due()[0]
-            retained = store.get(original["campaign_id"])
+            retained = _present(store.get(original["campaign_id"]))
             self.assertEqual(retained["result"]["result"], "superseded")
             self.assertEqual(retained["request"]["commit"], "old")
             self.assertEqual(retained["result"]["successor_campaign"], successor["campaign_id"])
             self.assertEqual(successor["request"]["commit"], "new")
-            self.assertEqual(successor["request"]["supersedes_campaign"], original["campaign_id"])
-            self.assertEqual(successor["filing"]["status"], "confirmed")
+            self.assertNotIn("supersedes_campaign", successor["request"])
+            self.assertNotIn("filing", successor)
 
-    def test_interrupted_attempt_is_linked_and_pending_unavailable_register(self) -> None:
+    def test_interrupted_attempt_is_linked_before_rerun(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = CampaignStore(Path(directory))
-            register = RegisterDouble()
-            register.available = False
-            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, register=register, runner=lambda *_: {"result": "failed", "exit_code": 1})
+            producer = FullBatteryProducer(ROOT, "fixture-solet", store=store, runner=lambda *_: {"result": "failed", "exit_code": 1})
             row = store.enqueue({"commit": "fixture", "tree": "fixture", "trigger": "schedule"})
             row.update(state="running", attempts=[{"number": 1, "started_at": "prior"}])
             store.write(row["campaign_id"], row, expected_version=row["version"], reason="fixture prior interrupted worker")
-            with patch("platform_dev_surface_plugin.quality.full_battery.battery_busy", return_value=False), patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("fixture", "fixture", {})):
+            with patch("platform_dev_surface_plugin.quality.full_battery.read_tree", return_value=FrozenTree("fixture", "fixture", {})):
                 result = producer.run_due()[0]
                 self.assertEqual(result["attempts"][0]["result"]["result"], "interrupted")
                 self.assertEqual(result["attempts"][1]["previous_attempt"], 1)
-                self.assertEqual(result["filing"]["status"], "uncertain")
-                register.available = True
-                producer.run_due()
-            self.assertEqual(store.get(row["campaign_id"])["filing"]["status"], "confirmed")
+                self.assertNotIn("filing", result)
+
+
+T1, T2, T3 = "2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00", "2026-01-01T02:00:00+00:00"
+CLEAN_SUMMARY = {"total": 1, "passed": 1, "retried_count": 0}
+
+
+def _closed(store: CampaignStore, request: dict[str, Any], finished_at: str, result: dict[str, Any], *, filing: dict[str, Any] | None) -> dict[str, Any]:
+    """Close one campaign record; a filing mapping models a historical record."""
+    campaign = store.enqueue(request)
+    campaign.update(state="closed", finished_at=finished_at, result=result)
+    if filing is None:
+        campaign.pop("filing", None)
+    else:
+        campaign["filing"] = filing
+    return store.write(campaign["campaign_id"], campaign, expected_version=campaign["version"], reason="closed fixture campaign")
+
+
+class ListCampaignsTests(unittest.TestCase):
+    """The read-only list of closed full-battery campaign records."""
+
+    def fixture(self, directory: str) -> tuple[FullBatteryProducer, CampaignStore, list[dict[str, Any]]]:
+        store = CampaignStore(Path(directory))
+        producer = FullBatteryProducer(ROOT, "fixture-solet", store=store)
+        clean = _closed(store, {"commit": "c1", "tree": "t1", "trigger": "schedule", "window": 1}, T1, {"result": "passed", "exit_code": 0, "summary": CLEAN_SUMMARY, "results_sha256": "sha-one"}, filing={"status": "not_needed"})
+        failed = _closed(store, {"commit": "c2", "tree": "t2", "trigger": "hub", "window": 2}, T2, {"result": "failed", "exit_code": 1, "summary": {"total": 2, "passed": 1, "failed": 1}, "results_sha256": "sha-two"}, filing={"status": "confirmed", "marker": "recorded-by-the-outbox"})
+        superseded = _closed(store, {"commit": "c3", "tree": "t3", "trigger": "manual", "window": 3}, T3, {"result": "superseded", "successor_campaign": "next", "reason": "master advanced while work was queued"}, filing=None)
+        store.enqueue({"commit": "queued", "tree": "queued", "trigger": "schedule", "window": 4})
+        running = store.enqueue({"commit": "running", "tree": "running", "trigger": "schedule", "window": 5})
+        running.update(state="running", attempts=[{"number": 1, "started_at": T3}])
+        store.write(running["campaign_id"], running, expected_version=running["version"], reason="running fixture campaign")
+        requeued = _closed(store, {"commit": "requeued", "tree": "requeued", "trigger": "due_retry", "window": 6}, T3, {"result": "interrupted", "exit_code": None}, filing={"status": "pending"})
+        requeued.update(state="queued")  # a closed campaign put back to work keeps its old finished_at
+        store.write(requeued["campaign_id"], requeued, expected_version=requeued["version"], reason="requeued fixture campaign")
+        return producer, store, [clean, failed, superseded]
+
+    def test_only_closed_campaigns_come_back_oldest_first_with_every_contract_field(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            producer, _store, (clean, failed, superseded) = self.fixture(directory)
+            listed = producer.list_campaigns()
+            self.assertEqual(set(listed), {"campaigns", "truncated", "next_finished_after"})
+            self.assertFalse(listed["truncated"])
+            self.assertIsNone(listed["next_finished_after"])
+            rows = listed["campaigns"]
+            self.assertEqual([row["campaign_id"] for row in rows], [clean["campaign_id"], failed["campaign_id"], superseded["campaign_id"]])
+            self.assertEqual(
+                rows[0],
+                {
+                    "campaign_id": clean["campaign_id"],
+                    "marker": f"smoke-campaign-{clean['campaign_id']}",
+                    "request": {"commit": "c1", "tree": "t1"},
+                    "finished_at": T1,
+                    "outcome": "passed",
+                    "clean": True,
+                    "superseded": False,
+                    "summary": CLEAN_SUMMARY,
+                    "results_sha256": "sha-one",
+                    "previous_clean_finished_at": None,
+                    "filing_status": "not_needed",
+                },
+            )
+            self.assertEqual([row["clean"] for row in rows], [True, False, False])
+            self.assertEqual([row["superseded"] for row in rows], [False, False, True])
+            self.assertEqual([row["outcome"] for row in rows], ["passed", "failed", "superseded"])
+            self.assertEqual([row["previous_clean_finished_at"] for row in rows], [None, T1, T1])
+            self.assertEqual([row["filing_status"] for row in rows], ["not_needed", "confirmed", None])
+            self.assertIsNone(rows[2]["summary"])
+            self.assertIsNone(rows[2]["results_sha256"])
+            self.assertEqual(rows[1]["marker"], f"smoke-campaign-{failed['campaign_id']}")
+
+    def test_limit_truncates_with_a_cursor_that_is_exclusive(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            producer, _store, (clean, failed, superseded) = self.fixture(directory)
+            first = producer.list_campaigns(limit=2)
+            self.assertEqual([row["campaign_id"] for row in first["campaigns"]], [clean["campaign_id"], failed["campaign_id"]])
+            self.assertTrue(first["truncated"])
+            self.assertEqual(first["next_finished_after"], first["campaigns"][1]["finished_at"])
+            rest = producer.list_campaigns(finished_after=first["next_finished_after"], limit=2)
+            self.assertEqual([row["campaign_id"] for row in rest["campaigns"]], [superseded["campaign_id"]])
+            self.assertFalse(rest["truncated"])
+            self.assertIsNone(rest["next_finished_after"])
+            self.assertEqual(rest["campaigns"][0]["previous_clean_finished_at"], T1, "the previous clean one is read from the whole record set, not only this page")
+            self.assertEqual(producer.list_campaigns(finished_after=T3)["campaigns"], [])
+            exact = producer.list_campaigns(limit=3)
+            self.assertFalse(exact["truncated"], "a page that holds every closed campaign is not truncated")
+
+    def test_bad_limit_or_cursor_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            producer, _store, _rows = self.fixture(directory)
+            for limit in (0, 101, -1, True, "x", 2.5):
+                with self.subTest(limit=limit), self.assertRaises(ValueError):
+                    producer.list_campaigns(limit=limit)
+            for cursor in ("not-a-timestamp", "2026-01-01T00:00:00", "", 5):
+                with self.subTest(finished_after=cursor), self.assertRaises(ValueError):
+                    producer.list_campaigns(finished_after=cursor)
+            self.assertEqual(len(producer.list_campaigns(limit=100)["campaigns"]), 3)
+            self.assertEqual(len(producer.list_campaigns(limit=1)["campaigns"]), 1)
+
+    def test_the_read_writes_nothing_and_asks_no_register(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            producer, store, _rows = self.fixture(directory)
+            before = {path.name: path.read_bytes() for path in sorted(Path(directory).rglob("*")) if path.is_file()}
+            self.assertFalse(hasattr(producer, "register"))
+            producer.list_campaigns()
+            producer.list_campaigns(finished_after=T1, limit=1)
+            after = {path.name: path.read_bytes() for path in sorted(Path(directory).rglob("*")) if path.is_file()}
+            self.assertEqual(before, after)
+            self.assertEqual(len(store.all()), 6)
 
 
 if __name__ == "__main__":

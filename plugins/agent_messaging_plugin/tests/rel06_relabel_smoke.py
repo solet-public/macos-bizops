@@ -57,22 +57,14 @@ def _check(condition: object, label: str) -> None:
 
 
 def _durable_role_row_is_solet_scoped(page: str) -> bool:
-    return any(
-        row.startswith("| **Solet peer bridge — durable role")
-        and "solet-scoped" in row
-        and "role-binding table" in row
-        for row in page.splitlines()
-    )
+    return any(row.startswith("| **Solet peer bridge — durable role") and "solet-scoped" in row and "role-binding table" in row for row in page.splitlines())
 
 
 def test_cross_session_channel_choice_guide() -> None:
     page = _CHANNEL_GUIDE.read_text()
     _check(
-        "## Choose a cross-session channel" in page
-        and "Runner-native session message" in page
-        and "temporary coordination" in page,
-        "MSG-04 base-failing scenario: document both the durable bridge and "
-        "temporary runner-native route",
+        "## Choose a cross-session channel" in page and "Runner-native session message" in page and "temporary coordination" in page,
+        "MSG-04 base-failing scenario: document both the durable bridge and temporary runner-native route",
     )
     _check(
         _durable_role_row_is_solet_scoped(page),
@@ -80,31 +72,19 @@ def test_cross_session_channel_choice_guide() -> None:
     )
 
     role_row = next(
-        (
-            row
-            for row in page.splitlines()
-            if row.startswith("| **Solet peer bridge — durable role")
-        ),
+        (row for row in page.splitlines() if row.startswith("| **Solet peer bridge — durable role")),
         None,
     )
-    mutant = (
-        page
-        if role_row is None
-        else page.replace(role_row, role_row.replace("solet-scoped", "", 1), 1)
-    )
+    mutant = page if role_row is None else page.replace(role_row, role_row.replace("solet-scoped", "", 1), 1)
     _check(
         not _durable_role_row_is_solet_scoped(mutant),
-        "MUTANT KILLED: removing the solet-scoping qualifier fails the "
-        "durable-role row assertion",
+        "MUTANT KILLED: removing the solet-scoping qualifier fails the durable-role row assertion",
     )
 
 
 def _routing_row(page: str) -> str:
     return next(
-        (
-            row for row in page.splitlines()
-            if row.startswith("| **Solet peer bridge — one selected live instance")
-        ),
+        (row for row in page.splitlines() if row.startswith("| **Solet peer bridge — one selected live instance")),
         "",
     )
 
@@ -113,14 +93,13 @@ def test_reply_hint_source_and_routing_constraints() -> None:
     page = _CHANNEL_GUIDE.read_text()
     routing_row = _routing_row(page)
     _check(
-        "reply hint/message meta" in routing_row
-        and "peer_list" in routing_row
-        and "Only when it is `peer_unreachable`" in routing_row
-        and "agent_id` matches `peer_id" in routing_row,
+        "reply hint/message meta" in routing_row and "peer_list" in routing_row and "Only when it is `peer_unreachable`" in routing_row and "agent_id` matches `peer_id" in routing_row,
         "MSG-04: session fallback source, order, and same-kind constraint match the implementation",
     )
     wrong_source = routing_row.replace(
-        "reply hint/message meta", "peer_list", 1,
+        "reply hint/message meta",
+        "peer_list",
+        1,
     )
     _check(
         "reply hint/message meta" not in wrong_source,
@@ -169,8 +148,7 @@ def test_old_identifiers_gone() -> None:
     )
     _check(
         not hasattr(peer_dispatch, "DELIVERY_PERSISTED_SILENT"),
-        "A4: the retired DELIVERY_PERSISTED_SILENT identifier is gone — no "
-        "delivery outcome skips the queue anymore",
+        "A4: the retired DELIVERY_PERSISTED_SILENT identifier is gone — no delivery outcome skips the queue anymore",
     )
 
 
@@ -196,11 +174,7 @@ def test_grep_gate_zero_old_token_outside_workbench() -> None:
     )
     # This pin file references the token only via a split literal, so it is not a
     # match; filter defensively in case a scanner concatenates it.
-    hits = [
-        line
-        for line in result.stdout.splitlines()
-        if line.strip() and "rel06_relabel_smoke" not in line
-    ]
+    hits = [line for line in result.stdout.splitlines() if line.strip() and "rel06_relabel_smoke" not in line]
     _check(
         result.returncode in (0, 1) and not hits,
         f"S6 grep gate: ZERO '{_OLD_TOKEN}' outside workbench/ (hits: {hits[:3]})",
@@ -208,12 +182,10 @@ def test_grep_gate_zero_old_token_outside_workbench() -> None:
 
 
 def test_process_jsons_carry_new_vocabulary() -> None:
-    for name in ("send_peer_message.json", "peer_send_by_name.json"):
+    for name in ("peer_send.json", "peer_send_by_name.json"):
         content = (_KB / "processes" / name).read_text()
         _check(
-            "queued_wake" in content
-            and "queued_notification" in content
-            and _OLD_TOKEN not in content,
+            "queued_wake" in content and "queued_notification" in content and _OLD_TOKEN not in content,
             f"S6: {name} carries the new vocabulary (no old token)",
         )
 

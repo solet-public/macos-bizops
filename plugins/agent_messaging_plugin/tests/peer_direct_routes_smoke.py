@@ -48,7 +48,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -502,7 +502,7 @@ def _check_page_walk(r: _Results, w: _World) -> None:
     after: str | None = None
     role_after: str | None = None
     for page_no in (1, 2, 3):
-        args: dict[str, object] = {"agent_session_id": "ases-A", "observer": True, "limit": 2}
+        args: dict[str, Any] = {"agent_session_id": "ases-A", "observer": True, "limit": 2}
         if after:
             args["after"] = after
         if role_after:
@@ -528,7 +528,7 @@ def _check_page_walk(r: _Results, w: _World) -> None:
 
 
 def _check_non_observer_page(r: _Results, w: _World) -> None:
-    args: dict[str, object] = {"agent_session_id": "ases-A", "limit": 5}
+    args: dict[str, Any] = {"agent_session_id": "ases-A", "limit": 5}
     verb = _mask_receipt(_verb_outcome(w.inbox_verb(**args)))
     route = _mask_receipt(_route_outcome(w.inbox_route(**args)))
     r.check(verb == route and verb[0] == "ok", "non-observer page equals the verb page (receipt token masked)")
@@ -539,7 +539,7 @@ def _check_forged_role_cursor(r: _Results, w: _World) -> None:
     role section says ``error`` (the instance section still reads). Both doors must give the
     SAME page, and it must never look like a clean, empty role section.
     """
-    forged: dict[str, object] = {"agent_session_id": "ases-A", "role_after": "forged-token"}
+    forged: dict[str, Any] = {"agent_session_id": "ases-A", "role_after": "forged-token"}
     verb = _verb_outcome(w.inbox_verb(**forged))
     route = _route_outcome(w.inbox_route(**forged))
     page = route[1] if route[0] == "ok" else {}
@@ -551,7 +551,7 @@ def _check_forged_role_cursor(r: _Results, w: _World) -> None:
 
 
 def _check_refusals(r: _Results, w: _World) -> None:
-    refusals: dict[str, dict[str, object]] = {
+    refusals: dict[str, dict[str, Any]] = {
         "malformed after": {"agent_session_id": "ases-A", "after": "not-a-datetime"},
         "unknown session": {"agent_session_id": "ases-nobody"},
         "missing session": {"agent_session_id": ""},
@@ -619,8 +619,8 @@ def _covered_world() -> _World:
 
 
 def _check_include_covered_parity(r: _Results, w: _World) -> None:
-    covered: dict[str, object] = {"agent_session_id": "ases-A", "observer": True, "include_covered": True}
-    default: dict[str, object] = {"agent_session_id": "ases-A", "observer": True}
+    covered: dict[str, Any] = {"agent_session_id": "ases-A", "observer": True, "include_covered": True}
+    default: dict[str, Any] = {"agent_session_id": "ases-A", "observer": True}
     verb = _verb_outcome(w.inbox_verb(**covered))
     route = _route_outcome(w.inbox_route(**covered))
     floored = _route_outcome(w.inbox_route(**default))
@@ -631,7 +631,7 @@ def _check_include_covered_parity(r: _Results, w: _World) -> None:
         page.get("role_floor_applied") is False and plain.get("role_floor_applied") is True and len(page.get("role_entries", [])) > len(plain.get("role_entries", [])),
         f"include_covered reads past the covered mark through the route (the default read is floored: {len(plain.get('role_entries', []))} role rows vs {len(page.get('role_entries', []))})",
     )
-    bare: dict[str, object] = {"agent_session_id": "ases-A", "include_covered": True}
+    bare: dict[str, Any] = {"agent_session_id": "ases-A", "include_covered": True}
     verb = _verb_outcome(w.inbox_verb(**bare))
     route = _route_outcome(w.inbox_route(**bare))
     r.check(
@@ -928,7 +928,7 @@ def _client_swallows_refusal(original: Callable[..., dict[str, Any]]) -> Callabl
 
 def _mutants() -> list[tuple[str, contextlib.AbstractContextManager[Any], Callable[[_Results], None]]]:
     def omit_route_attached(self: reads_module.HoldsRoleRead) -> dict[str, object]:
-        data = {
+        data: dict[str, object] = {
             "holds": self.holds,
             "name": self.name,
             "agent_session_id": self.agent_session_id,
@@ -995,7 +995,7 @@ def _mutants() -> list[tuple[str, contextlib.AbstractContextManager[Any], Callab
 
 
 @contextlib.contextmanager
-def _patch_all(*patches: contextlib.AbstractContextManager[Any]) -> Iterator[None]:
+def _patch_all(*patches: contextlib.AbstractContextManager[Any]) -> Generator[None]:
     with contextlib.ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
@@ -1038,7 +1038,7 @@ def scenario_attributed_role_reports(r: _Results) -> None:
     """A one-shot caller resolves its own sender from the registry on every send."""
     for role, agent_id in (
         ("Git-Controller", "claude_code"),
-        ("Project-Solet-Git-Controller", "codex"),
+        ("Sibling-Git-Controller", "codex"),
     ):
         w = _World()
         receiving = w.manager.open(solet_name="", parent_pid=2).bridge_id

@@ -81,7 +81,7 @@ def _assert_partial_unmapped() -> None:
     _mapping(state, "agi-partial-mapped", "runtime-partial")
     answer = _unit(
         state,
-        {"unit_id": "unt-usage"},
+        {"label": "lbl-usage"},
         [_total("runtime-partial")],
     )
     _check(
@@ -125,7 +125,7 @@ def _assert_coverage_full_zero() -> None:
     zero_row["by_model"] = {}
     answer = _unit(
         state,
-        {"unit_id": "unt-usage"},
+        {"label": "lbl-usage"},
         [_total("runtime-full-usage"), zero_row],
     )
     _check(answer["coverage"] == "full", "COVERAGE_FULL_WHEN_EVERY_SESSION_COVERED_OR_MEASURED_ZERO")
@@ -221,7 +221,7 @@ def _assert_multi_lane() -> None:
         )
     answer = _unit(
         state,
-        {"unit_id": "unt-usage"},
+        {"label": "lbl-usage"},
         totals,
     )
     sessions = {row["agent_instance_id"]: row for row in answer["sessions"]}
@@ -322,7 +322,7 @@ def _assert_totals_chunked() -> None:
         chunks.append(runtime_session_ids)
         return {"status": "complete", "sessions": [], "not_found": runtime_session_ids, "advisories": []}
 
-    answer = _module().read_unit_usage(state, {"unit_id": "unt-usage"}, totals_reader=reader, now=NOW)
+    answer = _module().read_label_usage(state, {"label": "lbl-usage"}, totals_reader=reader, now=NOW)
     _check(
         answer["notes"]["runtime_session_id_count"] == 201 and [len(chunk) for chunk in chunks] == [200, 1] and max(map(len, chunks)) <= 200,
         "TOTALS_CHUNKED_AT_200_IDS",

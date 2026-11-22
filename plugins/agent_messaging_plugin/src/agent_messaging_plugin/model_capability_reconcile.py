@@ -20,8 +20,9 @@ access.
   leaderboard listings), so it neither creates nor renews a cell, and no
   `pending_crosscheck` cell is ever written for it (design part 4.3).
 * Both pages report: the two-source agreement below decides.
-* Only the leaderboard reports (the detail page 404s, errors, has no link or no
-  longer parses): the reading is accepted ALONE with a note naming why
+* Only the leaderboard reports (the detail page 404s, errors, has no link, no
+  longer parses, or is the model family's page rather than this cell's own): the
+  reading is accepted ALONE with a note naming why
   (`single source: detail page <reason>`), provided it is in range (checked when
   the reading is made) and does not differ from the cell's prior accepted value
   by more than the tolerances below. A reading that does differ keeps the prior
@@ -75,7 +76,15 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final
 
-from .model_capability_fetch import SOURCE_LEADERBOARD_HTML, SOURCE_MODEL_DETAIL_HTML, DiscoveredCell, DiscoveryRun, Reading
+from .model_capability_fetch import (
+    SOURCE_API,
+    SOURCE_EMBEDDED,
+    SOURCE_LEADERBOARD_HTML,
+    SOURCE_MODEL_DETAIL_HTML,
+    DiscoveredCell,
+    DiscoveryRun,
+    Reading,
+)
 from .schema import (
     CELL_ACCEPTANCE_ACCEPTED,
     CELL_ACCEPTANCE_CROSSCHECK_CONFLICT,
@@ -150,11 +159,20 @@ def _freshest_ok_by_source(refs: list[ObservationRef], *, metric: str) -> dict[s
     return by_source
 
 
-def _conflict_outcome(cell_key: tuple[str, str, str], *, metric: str, spread_text: str, values: dict[str, float | None]) -> ReconcileOutcome:
+def _conflict_outcome(
+    cell_key: tuple[str, str, str],
+    *,
+    metric: str,
+    spread_text: str,
+    values: dict[str, float | None],
+) -> ReconcileOutcome:
     detail = ", ".join(f"{sid}={v}" for sid, v in sorted(values.items()))
     return ReconcileOutcome(
-        cell_key=cell_key, acceptance=CELL_ACCEPTANCE_CROSSCHECK_CONFLICT,
-        capability_score=None, cost_per_task_usd=None, measured_at=None,
+        cell_key=cell_key,
+        acceptance=CELL_ACCEPTANCE_CROSSCHECK_CONFLICT,
+        capability_score=None,
+        cost_per_task_usd=None,
+        measured_at=None,
         agreeing_observation_ids=[],
         disagreement_note=f"{metric} disagreement exceeds tolerance ({spread_text}): {detail}.",
     )
@@ -173,9 +191,15 @@ def _reconcile_score(cell_key: tuple[str, str, str], score_by_source: dict[str, 
     assert all(v is not None for v in values.values())  # noqa: S101 -- _freshest_ok_by_source already filtered None
     spread = max(values.values()) - min(values.values())  # type: ignore[operator]
     if spread > CAPABILITY_SCORE_TOLERANCE:
-        return _conflict_outcome(cell_key, metric=_REQUIRED_METRIC, spread_text=f"{spread:.1f} > {CAPABILITY_SCORE_TOLERANCE}", values=values)
+        return _conflict_outcome(
+            cell_key,
+            metric=_REQUIRED_METRIC,
+            spread_text=f"{spread:.1f} > {CAPABILITY_SCORE_TOLERANCE}",
+            values=values,
+        )
+    primary = next((values[source] for source in (SOURCE_API, SOURCE_EMBEDDED) if source in values), None)
     return _ScoreAgreement(
-        value=sum(values.values()) / len(values),  # type: ignore[misc]
+        value=primary if primary is not None else sum(values.values()) / len(values),  # type: ignore[misc]
         agreeing_ids=[ref.observation_id for ref in score_by_source.values()],
         measured_at=max(ref.reading.fetched_at for ref in score_by_source.values()),
     )
@@ -188,20 +212,31 @@ class _CostAgreement:
     note: str | None
 
 
+def _cost_spread(values: Mapping[str, float | None]) -> float:
+    numbers = [value for value in values.values() if value is not None]
+    larger = max((abs(value) for value in numbers), default=0.0) or 1.0
+    return (max(numbers) - min(numbers)) / larger
+
+
 def _reconcile_cost(cell_key: tuple[str, str, str], cost_by_source: dict[str, ObservationRef]) -> ReconcileOutcome | _CostAgreement:
     if not cost_by_source:
         return _CostAgreement(value=None, agreeing_ids=[], note=None)
     if len(cost_by_source) == 1:
-        (only_source, only_ref), = cost_by_source.items()
+        ((only_source, only_ref),) = cost_by_source.items()
         note = f"{_OPTIONAL_METRIC} corroborated by only 1 source ({only_source}); accepted on {_REQUIRED_METRIC}'s 2-source agreement alone."
         return _CostAgreement(value=only_ref.reading.value_number, agreeing_ids=[], note=note)
     values = {sid: ref.reading.value_number for sid, ref in cost_by_source.items()}
-    larger = max(abs(v) for v in values.values() if v is not None) or 1.0  # type: ignore[arg-type]
-    spread = (max(values.values()) - min(values.values())) / larger  # type: ignore[operator]
+    spread = _cost_spread(values)
     if spread > COST_RELATIVE_TOLERANCE:
-        return _conflict_outcome(cell_key, metric=_OPTIONAL_METRIC, spread_text=f"{spread:.1%} > {COST_RELATIVE_TOLERANCE:.0%}", values=values)
+        return _conflict_outcome(
+            cell_key,
+            metric=_OPTIONAL_METRIC,
+            spread_text=f"{spread:.1%} > {COST_RELATIVE_TOLERANCE:.0%}",
+            values=values,
+        )
+    primary = next((values[source] for source in (SOURCE_API, SOURCE_EMBEDDED) if source in values), None)
     return _CostAgreement(
-        value=sum(values.values()) / len(values),  # type: ignore[misc]
+        value=primary if primary is not None else sum(values.values()) / len(values),  # type: ignore[misc]
         agreeing_ids=[ref.observation_id for ref in cost_by_source.values()],
         note=None,
     )
@@ -218,29 +253,58 @@ def _detail_gap(observations: list[ObservationRef]) -> str:
 
 
 def _single_source_outcome(
-    cell_key: tuple[str, str, str], leaderboard: dict[str, ObservationRef], cost_ref: ObservationRef | None, prior: PriorValue | None, gap: str,
+    cell_key: tuple[str, str, str],
+    leaderboard: dict[str, ObservationRef],
+    cost_ref: ObservationRef | None,
+    prior: PriorValue | None,
+    gap: str,
 ) -> ReconcileOutcome:
     """The leaderboard reported and the detail page did not: accept it alone, with the reason, if it stays near the prior value."""
     (only_ref,) = leaderboard.values()
     score = only_ref.reading.value_number
     assert score is not None  # noqa: S101 -- _freshest_ok_by_source already filtered None
     cost = None if cost_ref is None else cost_ref.reading.value_number
-    note = f"single source: detail page {gap}"
+    source_name = only_ref.reading.source_id
+    note = f"single source: detail page {gap}" if source_name == SOURCE_LEADERBOARD_HTML else f"single source: {source_name}; other source {gap}"
     moved = None if prior is None else disagreement(prior.capability_score, prior.cost_per_task_usd, score, cost)
     if moved is not None:
         return ReconcileOutcome(
-            cell_key=cell_key, acceptance=CELL_ACCEPTANCE_PENDING_CROSSCHECK, capability_score=None, cost_per_task_usd=None,
-            measured_at=None, agreeing_observation_ids=[], single_source_unconfirmed=True,
-            disagreement_note=f"single source unconfirmed: the leaderboard reading moved {moved[0]:.1f} points and {moved[1]:.1%} on cost from the prior accepted value, past tolerance, and the detail page {gap}; the prior value is kept.",
+            cell_key=cell_key,
+            acceptance=CELL_ACCEPTANCE_PENDING_CROSSCHECK,
+            capability_score=None,
+            cost_per_task_usd=None,
+            measured_at=None,
+            agreeing_observation_ids=[],
+            single_source_unconfirmed=True,
+            disagreement_note=f"single source unconfirmed: {source_name} reading moved {moved[0]:.1f} points and {moved[1]:.1%} on cost from the prior accepted value, past tolerance, and the other source {gap}; the prior value is kept.",
         )
     ids = [only_ref.observation_id] + ([] if cost_ref is None else [cost_ref.observation_id])
     return ReconcileOutcome(
-        cell_key=cell_key, acceptance=CELL_ACCEPTANCE_ACCEPTED, capability_score=score, cost_per_task_usd=cost,
-        measured_at=only_ref.reading.fetched_at, agreeing_observation_ids=ids, disagreement_note=note,
+        cell_key=cell_key,
+        acceptance=CELL_ACCEPTANCE_ACCEPTED,
+        capability_score=score,
+        cost_per_task_usd=cost,
+        measured_at=only_ref.reading.fetched_at,
+        agreeing_observation_ids=ids,
+        disagreement_note=note,
     )
 
 
-def reconcile_cell(cell_key: tuple[str, str, str], observations: list[ObservationRef], *, prior: PriorValue | None = None) -> ReconcileOutcome | None:
+def _score_sources(observations: list[ObservationRef]) -> dict[str, ObservationRef]:
+    found = _freshest_ok_by_source(observations, metric=_REQUIRED_METRIC)
+    if SOURCE_API in found or SOURCE_EMBEDDED in found:
+        return {source: found[source] for source in (SOURCE_API, SOURCE_EMBEDDED) if source in found}
+    if SOURCE_LEADERBOARD_HTML not in found:
+        return {}
+    return {source: found[source] for source in (SOURCE_LEADERBOARD_HTML, SOURCE_MODEL_DETAIL_HTML) if source in found}
+
+
+def reconcile_cell(
+    cell_key: tuple[str, str, str],
+    observations: list[ObservationRef],
+    *,
+    prior: PriorValue | None = None,
+) -> ReconcileOutcome | None:
     """`observations` is every reading gathered for this (runtime, model,
     effort) cell across all sources in one refresh run. Never mutates state;
     the caller writes the returned outcome. `prior` is the cell's accepted
@@ -252,15 +316,17 @@ def reconcile_cell(cell_key: tuple[str, str, str], observations: list[Observatio
     absence named (see the module docstring); `cost_per_task_usd` is corroborated
     the same way when possible but never blocks acceptance on its own
     missing/single-source evidence -- see `_reconcile_cost`."""
-    score_by_source = _freshest_ok_by_source(observations, metric=_REQUIRED_METRIC)
-    if SOURCE_LEADERBOARD_HTML not in score_by_source:
+    score_by_source = _score_sources(observations)
+    if not score_by_source:
         return None
 
     if len(score_by_source) < 2:
-        leaderboard_cost = _freshest_ok_by_source(observations, metric=_OPTIONAL_METRIC).get(SOURCE_LEADERBOARD_HTML)
-        return _single_source_outcome(cell_key, score_by_source, leaderboard_cost, prior, _detail_gap(observations))
+        source = next(iter(score_by_source))
+        source_cost = _freshest_ok_by_source(observations, metric=_OPTIONAL_METRIC).get(source)
+        gap = _detail_gap(observations) if source == SOURCE_LEADERBOARD_HTML else "unavailable or has no exact matching effort"
+        return _single_source_outcome(cell_key, score_by_source, source_cost, prior, gap)
 
-    cost_by_source = _freshest_ok_by_source(observations, metric=_OPTIONAL_METRIC)
+    cost_by_source = {source: ref for source, ref in _freshest_ok_by_source(observations, metric=_OPTIONAL_METRIC).items() if source in score_by_source}
     score = _reconcile_score(cell_key, score_by_source)
     if isinstance(score, ReconcileOutcome):
         return score
@@ -270,9 +336,13 @@ def reconcile_cell(cell_key: tuple[str, str, str], observations: list[Observatio
         return cost
 
     return ReconcileOutcome(
-        cell_key=cell_key, acceptance=CELL_ACCEPTANCE_ACCEPTED,
-        capability_score=score.value, cost_per_task_usd=cost.value, measured_at=score.measured_at,
-        agreeing_observation_ids=score.agreeing_ids + cost.agreeing_ids, disagreement_note=cost.note,
+        cell_key=cell_key,
+        acceptance=CELL_ACCEPTANCE_ACCEPTED,
+        capability_score=score.value,
+        cost_per_task_usd=cost.value,
+        measured_at=score.measured_at,
+        agreeing_observation_ids=score.agreeing_ids + cost.agreeing_ids,
+        disagreement_note=cost.note,
     )
 
 
@@ -332,13 +402,20 @@ def prior_value(row: Mapping[str, Any] | None) -> PriorValue | None:
     A withdrawn cell keeps its score, so a lone reading is bounded by it exactly as it is by an
     accepted cell's value: leaving the bound off would let a single source rewrite a withdrawn
     cell by any amount (iss_71a21363)."""
-    if row is None or row.get("acceptance") not in (CELL_ACCEPTANCE_ACCEPTED, CELL_ACCEPTANCE_WITHDRAWN):
+    if row is None or row.get("acceptance") not in (
+        CELL_ACCEPTANCE_ACCEPTED,
+        CELL_ACCEPTANCE_WITHDRAWN,
+    ):
         return None
     score = _number(row.get("capability_score"))
     return None if score is None else PriorValue(score, _number(row.get("cost_per_task_usd")))
 
 
-def reconcile_cells(processed: Sequence[DiscoveredCell], written: Mapping[CellKey, list[ObservationRef]], rows: Mapping[CellKey, Mapping[str, Any]]) -> dict[CellKey, ReconcileOutcome]:
+def reconcile_cells(
+    processed: Sequence[DiscoveredCell],
+    written: Mapping[CellKey, list[ObservationRef]],
+    rows: Mapping[CellKey, Mapping[str, Any]],
+) -> dict[CellKey, ReconcileOutcome]:
     """The outcome of every processed cell that has a leaderboard reading; the rest have none (see `reconcile_cell`)."""
     outcomes: dict[CellKey, ReconcileOutcome] = {}
     for cell in processed:
@@ -353,12 +430,12 @@ def _has_score_from(readings: Sequence[Reading], source_id: str) -> bool:
 
 
 def has_leaderboard_score(readings: Sequence[Reading]) -> bool:
-    return _has_score_from(readings, SOURCE_LEADERBOARD_HTML)
+    return any(_has_score_from(readings, source) for source in (SOURCE_API, SOURCE_EMBEDDED, SOURCE_LEADERBOARD_HTML))
 
 
 def has_two_sources(readings: Sequence[Reading]) -> bool:
-    """Both the leaderboard and the detail page reported a usable score for the cell."""
-    return has_leaderboard_score(readings) and _has_score_from(readings, SOURCE_MODEL_DETAIL_HTML)
+    """Two distinct, exact-effort artifacts reported a usable score."""
+    return (_has_score_from(readings, SOURCE_API) and _has_score_from(readings, SOURCE_EMBEDDED)) or (_has_score_from(readings, SOURCE_LEADERBOARD_HTML) and _has_score_from(readings, SOURCE_MODEL_DETAIL_HTML))
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,7 +452,11 @@ class CreationPlan:
     awaiting_second_source: tuple[DiscoveredCell, ...] = ()
 
 
-def _new_cells(cells: Sequence[DiscoveredCell], existing: Collection[CellKey], readings_by_key: Mapping[CellKey, Sequence[Reading]]) -> tuple[list[DiscoveredCell], tuple[DiscoveredCell, ...]]:
+def _new_cells(
+    cells: Sequence[DiscoveredCell],
+    existing: Collection[CellKey],
+    readings_by_key: Mapping[CellKey, Sequence[Reading]],
+) -> tuple[list[DiscoveredCell], tuple[DiscoveredCell, ...]]:
     """(the new cells that may be created, the derived-id cells still waiting for a second source)."""
     scored = [cell for cell in cells if cell.key not in existing and has_leaderboard_score(readings_by_key.get(cell.key, ()))]
     waiting = tuple(cell for cell in scored if cell.derived_launch_id and not has_two_sources(readings_by_key.get(cell.key, ())))
@@ -383,7 +464,13 @@ def _new_cells(cells: Sequence[DiscoveredCell], existing: Collection[CellKey], r
     return [cell for cell in scored if cell.key not in waiting_keys], waiting
 
 
-def plan_creation(cells: Sequence[DiscoveredCell], existing: Collection[CellKey], *, live_rows: int, readings_by_key: Mapping[CellKey, Sequence[Reading]]) -> CreationPlan:
+def plan_creation(
+    cells: Sequence[DiscoveredCell],
+    existing: Collection[CellKey],
+    *,
+    live_rows: int,
+    readings_by_key: Mapping[CellKey, Sequence[Reading]],
+) -> CreationPlan:
     """Which new cells this run may create (design G3, G4, 1.7).
 
     A new cell is a discovered pair with no row yet and a usable leaderboard score. A cell whose
@@ -398,22 +485,36 @@ def plan_creation(cells: Sequence[DiscoveredCell], existing: Collection[CellKey]
     new, waiting = _new_cells(cells, existing, readings_by_key)
     deferred = new[slots:]
     return CreationPlan(
-        tuple(new[:slots]), tuple(deferred), capped=bool(deferred) and headroom >= CREATION_CAP_PER_RUN,
-        suspended=bool(deferred) and headroom < CREATION_CAP_PER_RUN, awaiting_second_source=waiting,
+        tuple(new[:slots]),
+        tuple(deferred),
+        capped=bool(deferred) and headroom >= CREATION_CAP_PER_RUN,
+        suspended=bool(deferred) and headroom < CREATION_CAP_PER_RUN,
+        awaiting_second_source=waiting,
     )
 
 
 def manual_disagreement_note(prior: PriorValue, outcome: ReconcileOutcome) -> str | None:
-    """Q8: the note for a manual reading that disagrees with two agreeing live pages, or None when they agree.
+    """Q8: the note for a manual reading the live pages disagree with, or None when they agree with it.
 
-    The cross-check's job, catching a transient fetch fault, is served by the note and the
-    run result's `manual_conflicts`; excluding a model an operator deliberately recorded
-    with a named source would be a gate nobody can pass (rul_becb4bed). Nothing is
-    excluded: the cell stays accepted with its manual values until an operator re-records
-    it or the live sources agree with it within tolerance."""
+    The live pages disagree with it in two ways: two agreeing pages whose value is past
+    tolerance of the manual one, and pages that disagree with each other (a
+    `crosscheck_conflict` outcome, which carries no value to compare, so its note names the
+    pages' own disagreement). The cross-check's job, catching a transient fetch fault, is
+    served by the note and the run result's `manual_conflicts`; excluding a model an operator
+    deliberately recorded with a named source would be a gate nobody can pass (rul_becb4bed).
+    Nothing is excluded: the cell stays accepted with its manual values until an operator
+    re-records it or the live sources agree with it within tolerance."""
+    if outcome.acceptance == CELL_ACCEPTANCE_CROSSCHECK_CONFLICT:
+        detail = (outcome.disagreement_note or "no detail recorded").rstrip(".")
+        return f"manual versus live disagreement: the live pages disagree with each other, {detail} (manual value kept)"
     if outcome.capability_score is None:
         return None
-    moved = disagreement(prior.capability_score, prior.cost_per_task_usd, outcome.capability_score, outcome.cost_per_task_usd)
+    moved = disagreement(
+        prior.capability_score,
+        prior.cost_per_task_usd,
+        outcome.capability_score,
+        outcome.cost_per_task_usd,
+    )
     if moved is None:
         return None
     return f"manual versus live disagreement: score delta {moved[0]:.3f}, cost delta {moved[1]:.1%} (manual value kept)"
@@ -429,14 +530,20 @@ def _stamp(raw: object) -> datetime | None:
     return value if value.tzinfo is not None else None
 
 
-def unrenewable_stale(run: DiscoveryRun, rows: Mapping[CellKey, Mapping[str, Any]], renewed: Collection[CellKey], *, now: datetime) -> list[dict[str, Any]]:
+def unrenewable_stale(
+    run: DiscoveryRun,
+    rows: Mapping[CellKey, Mapping[str, Any]],
+    renewed: Collection[CellKey],
+    *,
+    now: datetime,
+) -> list[dict[str, Any]]:
     """Accepted cells of harness-listed models that no leaderboard reading renewed this run.
 
     These stay accepted with their last score -- a model is never withdrawn because the
     leaderboard dropped it -- and are named so the staleness is a standing, loud fact. A
     failed or thin leaderboard page renews nothing, which says nothing about the models,
     so the list is empty then; a runtime whose harness list was unusable has no listed models."""
-    if not run.leaderboard_ok:
+    if not run.sources_ok:
         return []
     groups: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
     for key, row in rows.items():
@@ -450,8 +557,11 @@ def _stale_entry(runtime: str, model: str, rows: Sequence[Mapping[str, Any]], no
     stamps = [stamp for stamp in (_stamp(row.get("measured_at")) for row in rows) if stamp is not None]
     last = max(stamps) if stamps else None
     return {
-        "runtime": runtime, "model": model, "efforts": sorted(str(row["effort"]) for row in rows),
-        "last_measured_at": None if last is None else last.isoformat(), "age_hours": None if last is None else round((now - last).total_seconds() / 3600, 1),
+        "runtime": runtime,
+        "model": model,
+        "efforts": sorted(str(row["effort"]) for row in rows),
+        "last_measured_at": None if last is None else last.isoformat(),
+        "age_hours": None if last is None else round((now - last).total_seconds() / 3600, 1),
     }
 
 
@@ -472,7 +582,7 @@ def refresh_note(run: DiscoveryRun, plan: CreationPlan, created: int, unrenewabl
     parts = _creation_notes(plan, created)
     if unrenewable:
         names = ", ".join(f"{item['runtime']}/{item['model']}" for item in unrenewable[:_UNRENEWABLE_NAMES_IN_NOTE])
-        parts.append(f"{len(unrenewable)} harness-listed model(s) have no leaderboard row to renew them: {names}")
+        parts.append(f"{len(unrenewable)} harness-listed model(s) have unrenewable historical cells: {names}")
     parts.extend(f"{runtime} harness list {summary['status']}" for runtime, summary in run.harness.items() if summary["status"] != "ok")
     if run.failures:
         parts.append(f"{len(run.failures)} source fetch(es) failed")
@@ -480,12 +590,22 @@ def refresh_note(run: DiscoveryRun, plan: CreationPlan, created: int, unrenewabl
 
 
 def refresh_result_fields(
-    run: DiscoveryRun, plan: CreationPlan, *, created: Sequence[str], unconfirmed: Sequence[str], manual_conflicts: Sequence[str], withdrawn_left: Sequence[str], unrenewable: Sequence[Mapping[str, Any]], advisories: Sequence[str],
+    run: DiscoveryRun,
+    plan: CreationPlan,
+    *,
+    created: Sequence[str],
+    unconfirmed: Sequence[str],
+    manual_conflicts: Sequence[str],
+    withdrawn_left: Sequence[str],
+    unrenewable: Sequence[Mapping[str, Any]],
+    advisories: Sequence[str],
 ) -> dict[str, Any]:
     """The discovery fields the refresh verb returns beside the run row's counts."""
     return {
-        "cells_created": len(created), "created": list(created),
-        "creation_capped": plan.capped, "creation_suspended": plan.suspended,
+        "cells_created": len(created),
+        "created": list(created),
+        "creation_capped": plan.capped,
+        "creation_suspended": plan.suspended,
         "deferred": [key_text(cell.key) for cell in plan.deferred],
         "awaiting_second_source": [key_text(cell.key) for cell in plan.awaiting_second_source],
         "withdrawn_left": list(withdrawn_left),
@@ -496,23 +616,26 @@ def refresh_result_fields(
         "efforts_outside_vocabulary": {model: list(efforts) for model, efforts in run.efforts_outside_vocabulary.items()},
         "listed_not_launchable": list(run.listed_not_launchable),
         "creator_label_unmatched": list(run.creator_label_unmatched),
-        "single_source_unconfirmed": list(unconfirmed), "manual_conflicts": list(manual_conflicts),
+        "single_source_unconfirmed": list(unconfirmed),
+        "manual_conflicts": list(manual_conflicts),
         "advisories": list(advisories),
     }
 
 
 # --------------------------------------------------------------------------- the pass over one refresh (pure helpers the store calls)
 
+
 @dataclass(slots=True)
 class RunTally:
     """What one reconcile pass counted and named; the store fills it, `build_report` reads it."""
-
 
     counts: Counter[str] = field(default_factory=lambda: Counter[str]())
     created: list[str] = field(default_factory=lambda: list[str]())
     unconfirmed: list[str] = field(default_factory=lambda: list[str]())
     manual_conflicts: list[str] = field(default_factory=lambda: list[str]())
     withdrawn_left: list[str] = field(default_factory=lambda: list[str]())
+    held_conflicts: list[str] = field(default_factory=lambda: list[str]())
+    single_source_notes: list[str] = field(default_factory=lambda: list[str]())
 
 
 def cost_floor(outcomes: Mapping[CellKey, ReconcileOutcome]) -> float | None:
@@ -532,15 +655,38 @@ def processed_cells(run: DiscoveryRun, by_key: Mapping[CellKey, Mapping[str, Any
     return [cell for cell in run.cells if cell.key in by_key or cell.key in create_keys]
 
 
-def build_report(run: DiscoveryRun, plan: CreationPlan, tally: RunTally, *, unrenewable: Sequence[Mapping[str, Any]]) -> RefreshReport:
+def build_report(
+    run: DiscoveryRun,
+    plan: CreationPlan,
+    tally: RunTally,
+    *,
+    unrenewable: Sequence[Mapping[str, Any]],
+) -> RefreshReport:
     advisories = list(run.advisories)
+    advisories.extend(tally.held_conflicts)
+    advisories.extend(tally.single_source_notes)
+    advisories.extend(f"UNRENEWABLE historical cell(s): {item['runtime']}/{item['model']} efforts {item['efforts']} last measured {item['last_measured_at']}; prior values remain servable" for item in unrenewable)
     advisories.extend(f"{key} is withdrawn: this run recorded its readings and left it withdrawn" for key in tally.withdrawn_left)
     fields = refresh_result_fields(
-        run, plan, created=tally.created, unconfirmed=tally.unconfirmed, manual_conflicts=tally.manual_conflicts, withdrawn_left=tally.withdrawn_left,
-        unrenewable=unrenewable, advisories=advisories,
+        run,
+        plan,
+        created=tally.created,
+        unconfirmed=tally.unconfirmed,
+        manual_conflicts=tally.manual_conflicts,
+        withdrawn_left=tally.withdrawn_left,
+        unrenewable=unrenewable,
+        advisories=advisories,
     )
-    counts = {"cells_accepted": tally.counts["accepted"], "cells_conflicted": tally.counts["conflicted"], "cells_unchanged": tally.counts["unchanged"]}
-    return RefreshReport(counts=counts, result_fields=fields, note=refresh_note(run, plan, len(tally.created), unrenewable))
+    counts = {
+        "cells_accepted": tally.counts["accepted"],
+        "cells_conflicted": tally.counts["conflicted"],
+        "cells_unchanged": tally.counts["unchanged"],
+    }
+    return RefreshReport(
+        counts=counts,
+        result_fields=fields,
+        note=refresh_note(run, plan, len(tally.created), unrenewable),
+    )
 
 
 __all__ = [

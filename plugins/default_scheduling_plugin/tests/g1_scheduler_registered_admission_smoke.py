@@ -50,8 +50,8 @@ from ananta.core.state.job_completion_reach import COMPLETION_REACH_KEY, REACH_B
 from ananta.interfaces.state_management_interface import StateTransaction  # noqa: E402
 from ananta.services.discovery_service.service import DiscoveryService  # noqa: E402
 from ananta.services.scheduling_service import SchedulingService  # noqa: E402
-from async_job_atomic_completion_smoke import FixtureAction  # pyright: ignore[reportMissingImports]  # noqa: E402 - candidate-root core fixture path above
-from async_job_fixture_support import JobState  # pyright: ignore[reportMissingImports]  # noqa: E402 - candidate-root core fixture path above
+from async_job_atomic_completion_smoke import FixtureAction  # noqa: E402 - candidate-root core fixture path above
+from async_job_fixture_support import JobState  # noqa: E402 - candidate-root core fixture path above
 from default_scheduling_plugin.models import ScheduleData  # noqa: E402
 from default_scheduling_plugin.plugin import SchedulingPlugin  # noqa: E402
 from default_scheduling_plugin.scheduling.scheduler_manager import SchedulerManager  # noqa: E402

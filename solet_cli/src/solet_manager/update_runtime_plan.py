@@ -46,6 +46,7 @@ from .existing_install_bundle import CLONE_EXCLUDE_DESTINATION, STAGE_ORDER, Dep
 from .host_platform import HostPlatform, HostPlatformError, read_host_platform
 from .launch_topology import (
     LEGACY_DIRECT,
+    SUPERVISOR_LAUNCH_NEEDS_HAND_ROUTE,
     SUPPORTED_TOPOLOGIES,
     derive_launch_topology,
     launchagent_plist_path,
@@ -644,9 +645,7 @@ def _validate_destinations(context: PlanContext, blocked: list[tuple[str, str]])
     tree_paths: frozenset[str] | None = None
     resolved: list[tuple[ManagedArtifact, str]] = []
     for artifact in context.candidate.bundle.managed_artifacts:
-        destination = artifact.resolve_destination(
-            home=str(context.seams.home), target=str(target), name=record.name, profile_home=str(target / "profile")
-        )
+        destination = artifact.resolve_destination(home=str(context.seams.home), target=str(target), name=record.name, profile_home=str(target / "profile"))
         resolved.append((artifact, destination))
         relative = _relative_to_target(destination, target)
         if relative is None or artifact.logical_destination == CLONE_EXCLUDE_DESTINATION:
@@ -799,9 +798,7 @@ def _operation_from_probe(
     return row, states
 
 
-def artifact_states(
-    operation: RuntimeOperation, result: OperationResult, artifacts: tuple[tuple[ManagedArtifact, str], ...]
-) -> tuple[ManagedArtifactState, ...]:
+def artifact_states(operation: RuntimeOperation, result: OperationResult, artifacts: tuple[tuple[ManagedArtifact, str], ...]) -> tuple[ManagedArtifactState, ...]:
     """Decode the seed's per-artifact evidence into the closed three-way state rows."""
     by_id = {artifact.artifact_id: (artifact, destination) for artifact, destination in artifacts}
     diffs = adopt_diffs(result, tuple(by_id))
@@ -868,7 +865,9 @@ def _lifecycle(context: PlanContext, artifact_states: tuple[ManagedArtifactState
     router_declared = identity.router_label is not None and identity.router_socket is not None
     router_on_roster = ROUTER_PLUGIN in roster
     if context.candidate.bundle.lifecycle.strategy == "single_color_required" or (not router_declared and not router_on_roster):
-        return _single_color_observation(context, facts)
+        # A single-colour restart is chosen, and the topology here is the supervisor (legacy_direct returned above): launchd runs the
+        # supervisor, never a colour, so no restart the Manager can issue is single-colour. Refuse before any launchctl or ps call.
+        return facts.unproven(SUPERVISOR_LAUNCH_NEEDS_HAND_ROUTE), 0
     if router_declared != router_on_roster:
         return facts.unproven(), 0
     printed = context.seams.launchctl(context.registry, "print", (f"gui/{context.seams.uid}/{identity.router_label}",), 30)

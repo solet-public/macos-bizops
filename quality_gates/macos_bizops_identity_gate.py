@@ -205,7 +205,7 @@ f8721c9a94ab0e80a1e3eef2895eaf94225638b9ccbc1cabd798b56b957635ac
 #
 # WHY THEY WERE MISSED THE FIRST TIME, worth knowing: the census reads the
 # stage-zero Git INDEX, so it never saw those two files while they were still
-# untracked in a lane worktree. A green run over the tracked tree is NOT a green
+# untracked in a linked worktree. A green run over the tracked tree is NOT a green
 # run over the candidate. Verify with the candidate tree, which overlays the
 # working-tree scope onto the base and reproduces exactly what staging will
 # show:  quality_gates/candidate_tree.py --scope-file <paths> --rename-file
@@ -220,11 +220,18 @@ f8721c9a94ab0e80a1e3eef2895eaf94225638b9ccbc1cabd798b56b957635ac
 # a real seed. This comment is deliberately written WITHOUT the token, same
 # reason as the 2026-09-05 note above. Missed on the first gate run for the
 # same reason too: the census reads the stage-zero Git INDEX and these files
-# were still untracked in a lane worktree; verified with the candidate tree
+# were still untracked in a linked worktree; verified with the candidate tree
 # per that same note.
 # 2026-10-03: the runner's exact timeout-budget entry for the same excluded
 # smoke is another non-carrier path reference; pin it with the same negative
 # fixture classification as the register's path entry.
+# 2026-11-20: two anchors for the release-74 final proof smoke (chg_9a9da28b):
+# a docstring line citing this gate's path as the born-clone convention, and a
+# review-record row keyed by this gate's own path. Both are path references, not
+# identity carriers. The row cannot be reworded (its key must be the real path,
+# and a key built from literal pieces is folded and flagged), so the docstring
+# line is anchored with it, as in the 2026-09-05 second pass. This comment is
+# deliberately written WITHOUT the token, same reason as the notes above.
 _NEGATIVE_LINE_ANCHORS: frozenset[str] = frozenset(
     """\
 04d9c55118bf4d05f56fea80e342b4a38ec7577f04fbdb962d1e120c63206fbf 0970d75540f30fb0c3465e6e81a4b523ee7246c78e8e5d881b3ed245f923aea4 0d7ffbf20386408b821d12f3500a410f2b74e47d58f2ac2637edd68e663c0116 12c4cf0ee3a19e4e0f07adeb35718a853cca46d18f0cf9d59dcf6ad1d9f9b353 1643a53c710f1d677beae38d81c6faec9353aaf46d53f03d7670de97608edcd3 4524e0d0669a672c1b06c45e1df4810599d7cfb212078741658ac33f53c9b58e 2a1ec7939dae525abcb41a3d0f742167dabbf3ae98f491f7b17e4a1bacbe0647 52a648d067f50c05fde91107280118bf24339e33c707a56c60a951cef37e4444 79dc587e25081639ab6545f53fa0e3d9e8c7d4555d610ecbf32eebefe440da8d 8269b5cc69592a373210d50aeb40e8225dd9450af36d84ee3ee90b1f232f41d0
@@ -235,7 +242,7 @@ cc20d5c4de436973665467c3b529443a46cb96a794c9961578f7788a5ca41a67 e8e9f62f9cf3767
 0d36d0a0038a227558630e25113288b034adbbc327f41a20c8581169e271165e efc64c2fe6621e54f7d47d744c58ef025ae3d1a86b6f3553a0c74151f61d4e71 d440090e167e6a4ddae7699d54097e4d530c61fd720113122992e312b2fa5358
 f82bf6a8d635f75b5991903365cca0f4a79de666d581ccacc44084558709a6b1 5df86ce9def78a7fe06563c59edd21e03f146376661c8598aee776e2d3d10bb4
 fa10851b4c9399c29a083bbe1bb77dfca5f3879bfaf08184a18190d1bc6eec17 0448986b0f75d672cd8f9fb6c5af85206afbdfc94f82fd7c3052916bcc811816
-4f4076ac69e90b11acc3e9aa419a3ddc94cc6f1cdea1b746ba37d3f29a683156
+4f4076ac69e90b11acc3e9aa419a3ddc94cc6f1cdea1b746ba37d3f29a683156 d4ab70a7d1f9252929304b8056772c4831e8781d67e54ebef61e39d6dfc1ae35 7cea84f30f769fbec5d4f575c552be01e6f208b82e10f34de2d5df331676536b
 """.split()
 ) - frozenset(
     {

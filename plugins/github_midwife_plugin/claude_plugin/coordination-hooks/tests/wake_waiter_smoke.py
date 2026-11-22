@@ -39,6 +39,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import json  # noqa: E402
+import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -68,11 +69,7 @@ except ModuleNotFoundError as exc:
     # including one github_midwife_plugin itself needs, is a real defect.
     if (exc.name or "").split(".")[0] != "github_midwife_plugin":
         raise
-    print(
-        "SKIP: github_midwife_plugin is not importable (this smoke builds a "
-        "coordination-hook receipt with it, and this tree ships the hooks "
-        "without that sibling plugin)."
-    )
+    print("SKIP: github_midwife_plugin is not importable (this smoke builds a coordination-hook receipt with it, and this tree ships the hooks without that sibling plugin).")
     raise SystemExit(_SKIP_EXIT_CODE) from exc
 
 # Strings the stub writes to stdout and stderr. If the hook relayed child output
@@ -81,7 +78,7 @@ SECRET_STDOUT = "SENSITIVE-STDOUT-b3d1f0-message-body-should-never-appear"
 SECRET_STDERR = "SENSITIVE-STDERR-9a72cc-message-body-should-never-appear"
 
 
-def run_hook(script: str, *, env: dict[str, str] | None = None, **kwargs: object) -> object:
+def run_hook(script: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     requested = dict(env or {})
     armed = bool(requested.get("AGENT_SESSION_ID"))
     if armed and not requested.pop(_PARTIAL_OWNER_FIXTURE_ENV, ""):
@@ -96,13 +93,15 @@ def run_hook(script: str, *, env: dict[str, str] | None = None, **kwargs: object
                 surfaces=(ReceiptSurface("plugin_cache", _HOOK_ROOT, Path(sys.executable), _HOOK_ROOT / "hooks.json"),),
                 installation_id="wake-fixture",
             )
-            requested.update({
-                "AGENT_INSTANCE_ID": "agi-wake-fixture",
-                "AGENT_COORDINATION_RECEIPT_PATH": str(publish_receipt(receipt)),
-                "SOLET_NAME": "fixture-solet",
-            })
-            return _run_hook(script, env=requested, **kwargs)
-    return _run_hook(script, env=requested, **kwargs)
+            requested.update(
+                {
+                    "AGENT_INSTANCE_ID": "agi-wake-fixture",
+                    "AGENT_COORDINATION_RECEIPT_PATH": str(publish_receipt(receipt)),
+                    "SOLET_NAME": "fixture-solet",
+                }
+            )
+            return _run_hook(script, env=requested)
+    return _run_hook(script, env=requested)
 
 
 def _stub(directory: Path, name: str, *, exit_code: int | None, chatty: bool = False) -> Path:
@@ -197,7 +196,7 @@ def check_arm_matrix(res: Results, work: Path) -> None:
         # this hook's own question (was a transport DECLARED at all) — the
         # two consumers apply their own independent defaults and may
         # legitimately differ in value even though, since the fleet-watch-
-        # transport-migration charter (2026-08-06), both currently resolve
+        # transport-migration decision (2026-08-06), both currently resolve
         # empty to "watch".
         ("transport empty string", ""),
     )

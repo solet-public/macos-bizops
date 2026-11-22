@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::session_ended",
+  "display_name": "Record that a session ended",
+  "description": "A session reports its own end by agent_instance_id, with an optional reason such as prompt_input_exit. A live managed-session record is terminated with the reason 'ended: the session reported its own end (<reason>)' and its armed session_terminal edges fire. No host check is made, because the session is the authority on its own end, and the report never acts on the host. An optional outcome, finished or failed, is the session's own typed result and becomes the record's end_reason; with none given the end_reason is unknown, and any other value is refused with parameter_invalid before anything is written. A record that is already ended is left as it is and reported as already ended. Any caller may send it.",
+  "embedding_description": "A session tells the solet that it has ended, for example when its own harness exits, so that session's managed-session record reads ended with the reason it gave; the report is the session's own word and no host is checked or acted on.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Session end recorded",
+    "result_type": "session_ended_result",
+    "result_description": "agent_instance_id echoes the session. ended is true when this call terminated the record. already_ended is true when the record was not live and was left as it is. lifecycle_state is the record's state after the call. end_reason is the typed reason the record shows (finished, failed, stopped_by_asker, stopped_by_solet, refused_by_provider or unknown, where unknown reads as 'ended, reason unknown'), and null while the record has not ended. ended false with already_ended false means the record changed between the read and the write and nothing was written.",
+    "presentation_guidance": "State whether this call ended the record, or whether it was already ended. Quote lifecycle_state. Do not describe a host as stopped: this report records the session's own statement and acts on no host.",
+    "output_action_guidance": "No follow-up is needed when ended or already_ended is true. If both are false, read the session again and report once more if it is still live."
+  },
+  "error_processor_customizations": {
+    "action_context": "One read of the session's record, then a predicated lifecycle write under the exact snapshot that was read, an audit row, and the firing of armed session_terminal edges.",
+    "error_interpretation": "parameter_invalid: agent_instance_id is missing or blank, or outcome is given and is not finished or failed. session_not_found: no managed-session record exists for that agent_instance_id. state_service_unavailable: the solet's state service is not bound.",
+    "recovery_guidance": "For parameter_invalid or session_not_found, send the agent_instance_id this session was registered with, and send outcome only as finished or failed. For state_service_unavailable, retry once the solet is fully started."
+  }
+}

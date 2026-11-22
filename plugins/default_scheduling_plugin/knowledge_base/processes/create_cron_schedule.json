@@ -1,7 +1,7 @@
 {
   "process_key": "plugin::default_scheduling_plugin::create_cron_schedule",
   "display_name": "Create Cron Schedule",
-  "description": "[NON-TERMINAL REGISTRATION] Create a recurring UTC cron schedule. Provide exactly one execution mode: a non-empty action_definitions list of syntactically valid {process_key, arguments} objects, or memory_tag for a terminal get_memories_by_tag read whose result is written only to the action row and does not start a model turn. Registration validates entry shape and scheduled-action policy; execution resolves process_key against processes registered at fire time. For scheduled peer notifications, use action_definitions with plugin::agent_messaging_plugin::peer_send_by_name.",
+  "description": "[NON-TERMINAL REGISTRATION] Create a recurring UTC cron schedule. Provide exactly one execution mode: a non-empty action_definitions list of syntactically valid {process_key, arguments} objects, or memory_tag for a terminal get_memories_by_tag read whose result is written only to the action row and does not start a model turn. Registration validates entry shape and scheduled-action policy; execution resolves process_key against processes registered at fire time.",
   "embedding_description": "Create recurring UTC work using exactly one mode: non-empty, syntactically valid action_definitions whose process keys resolve against registered processes at fire time, or memory_tag for a terminal get_memories_by_tag read that records its result and starts no model turn. Cancel with clear_scheduled_actions_by_tag.",
   "result_processor_customizations": {
     "action_label": "Cron schedule created",

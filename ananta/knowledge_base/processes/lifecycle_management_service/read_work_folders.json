@@ -1,0 +1,18 @@
+{
+  "process_key": "service_interface::lifecycle_management_service::read_work_folders",
+  "display_name": "Read Work Folders",
+  "description": "Read the solet's own work-folder records. Use it to see which scratch folders exist and where each is in its life, to re-read one folder before changing it, or to see what happened to a folder and who did it. Mode 'show' returns one folder by folder_id and needs it. Mode 'list' returns folders ordered by path, optionally narrowed by parent_dir (the exact canonical parent directory), bound ('kind:ref') and state_filter, as a page of 'limit' rows (default 50, maximum 100; a larger value is refused, not clamped) with a 'next' token to pass as 'after' for the following page. Mode 'history' returns the append-only events of one folder, oldest first (opened, closed, harvested, reopened, corrected, retired, restored, deleted, removal_failed), each with its ordinal, the version before it, the acting instance, session, model and effort, a JSON detail and the time, paged the same way. A deleted folder keeps its row, so state_filter 'deleted' can be listed. No side effects.",
+  "embedding_description": "List the solet's work folders by parent directory, work item or state, show one folder, or read a folder's event history: opened, closed, harvested, reopened, deleted. Read-only view of which scratch folders exist and where each is in its life.",
+  "result_processor_customizations": {
+    "action_label": "Work folders read",
+    "result_type": "work_folder_list",
+    "result_description": "Object with folders and next. For modes show and list, folders holds work-folder rows with keys folder_id, path, state, version, dev, ino, purpose, bound_kind, bound_ref, harvest_kind, owner, harvest_receipt and advisories (always empty on a read). For mode history, folders holds event rows, oldest first, with keys folder_id, ordinal, kind, prior_version, actor_instance, actor_session, actor_model, actor_effort, detail (JSON text) and recorded_at. next is the token for the next page, or null when there is no further page and always null for show.",
+    "presentation_guidance": "For list, one line per folder with path, state, purpose, bound and version; say plainly when nothing matches. For show, give the full record including harvest kind and receipt. For history, one line per event with ordinal, kind, actor and time. If next is not null, say more pages exist.",
+    "output_action_guidance": "Pass the row's version as expected_version to transition_work_folder when a change follows. Pass next as after, with the same mode, filters and limit, to read the following page. Do not re-read immediately to confirm a write; the write already returned the new row."
+  },
+  "error_processor_customizations": {
+    "action_context": "Reading work-folder records from the solet's own database through the state service",
+    "error_interpretation": "invalid_argument: mode is not show, list or history, mode show or history has no folder_id, bound is not 'kind:ref', or after is not a next token from a previous page of the same mode. invalid_field: limit is outside 1..100, or state_filter is not one of open, due, harvested, deleted, retired. unknown_folder: mode show or history found no record with that folder_id. state_service_unavailable: the state service is not bound. The code is in data.error_code and prefixes the error text.",
+    "recovery_guidance": "For invalid_argument or invalid_field, fix the named parameter; for after, restart from the first page. For unknown_folder, list with parent_dir or bound to find the right folder_id. For state_service_unavailable, wait for the solet to finish starting and retry once."
+  }
+}

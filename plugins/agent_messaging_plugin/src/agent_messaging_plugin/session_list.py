@@ -17,14 +17,14 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 # A fleet roster is an operator-facing context payload, not an export surface.
-# Fifty rows is enough for ordinary lane/host/state coordination while staying
+# Fifty rows is enough for ordinary label/host/state coordination while staying
 # well under the state provider's 100-row page cap. The 250 hard maximum permits
 # a deliberately broader filtered survey without allowing a caller to turn this
 # verb back into a whole append-mostly-ledger dump.
 LIST_SESSIONS_DEFAULT_LIMIT: Final = 50
 LIST_SESSIONS_MAX_LIMIT: Final = 250
 
-_FILTER_KEYS: Final = ("lane_id", "work_class", "host", "lifecycle_state")
+_FILTER_KEYS: Final = ("label", "host", "lifecycle_state")
 _LIVE_STATES: Final = (
     LIFECYCLE_SPAWNING,
     LIFECYCLE_LIVE,
@@ -44,24 +44,19 @@ class SessionListError(ValueError):
 
 
 def _selected_filters(
-    filters: dict[str, Any] | None, *, live_only: bool,
+    filters: dict[str, Any] | None,
+    *,
+    live_only: bool,
 ) -> dict[str, Any]:
-    selected = {
-        key: value
-        for key in _FILTER_KEYS
-        if filters is not None and (value := filters.get(key)) not in (None, "")
-    }
+    selected = {key: value for key in _FILTER_KEYS if filters is not None and (value := filters.get(key)) not in (None, "")}
     if not selected and not live_only:
         accepted = ", ".join((*_FILTER_KEYS, "live_only=true"))
         raise SessionListError(
             "filter_required",
-            f"list_sessions requires at least one fleet filter ({accepted}); "
-            "to list the live fleet pass {\"live_only\": true}.",
+            f'list_sessions requires at least one fleet filter ({accepted}); to list the live fleet pass {{"live_only": true}}.',
         )
     if live_only:
-        selected["lifecycle_state"] = _live_lifecycle_filter(
-            selected.get("lifecycle_state")
-        )
+        selected["lifecycle_state"] = _live_lifecycle_filter(selected.get("lifecycle_state"))
     return selected
 
 
@@ -75,11 +70,7 @@ def _live_lifecycle_filter(current_filter: object) -> object:
 
 
 def _validated_limit(limit: object) -> int:
-    if (
-        isinstance(limit, bool)
-        or not isinstance(limit, int)
-        or not 1 <= limit <= LIST_SESSIONS_MAX_LIMIT
-    ):
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= LIST_SESSIONS_MAX_LIMIT:
         raise SessionListError(
             "invalid_limit",
             f"list_sessions limit must be an integer from 1 through {LIST_SESSIONS_MAX_LIMIT}.",
@@ -93,12 +84,7 @@ def _validated_cursor(
 ) -> list[str] | None:
     if after_created_at is None and after_id is None:
         return None
-    if (
-        not isinstance(after_created_at, str)
-        or not after_created_at.strip()
-        or not isinstance(after_id, str)
-        or not after_id.strip()
-    ):
+    if not isinstance(after_created_at, str) or not after_created_at.strip() or not isinstance(after_id, str) or not after_id.strip():
         raise SessionListError(
             "invalid_cursor",
             "list_sessions cursor requires non-empty after_created_at and after_id.",
@@ -120,7 +106,10 @@ def list_session_rows(
     selected_limit = _validated_limit(limit)
     cursor = _validated_cursor(after_created_at, after_id)
     rows, truncated = read_managed_sessions_page(
-        state, selected_filters, limit=selected_limit, after=cursor,
+        state,
+        selected_filters,
+        limit=selected_limit,
+        after=cursor,
     )
     next_cursor = None
     if truncated:

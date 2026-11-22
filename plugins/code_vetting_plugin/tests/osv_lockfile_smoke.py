@@ -40,7 +40,7 @@ from code_vetting_plugin.scanners.deps import (  # noqa: PLC2701 — pin the int
     scan_osv,
 )
 from code_vetting_plugin.targets import TargetTree
-from code_vetting_plugin.toolrun import tool_available
+from code_vetting_plugin.toolrun import tool_available, tool_unavailable_reason
 
 _CHECKS_RUN: list[str] = []
 
@@ -66,10 +66,18 @@ def _tree(tracked: tuple[str, ...], *, foreign: bool = False) -> TargetTree:
 
 
 def _check_lockfile_enumeration() -> None:
-    mixed = _tree((
-        "package-lock.json", "web/yarn.lock", "poetry.lock", "requirements.txt",
-        "pyproject.toml", "setup.py", "src/a.py", "web/app.ts",
-    ))
+    mixed = _tree(
+        (
+            "package-lock.json",
+            "web/yarn.lock",
+            "poetry.lock",
+            "requirements.txt",
+            "pyproject.toml",
+            "setup.py",
+            "src/a.py",
+            "web/app.ts",
+        )
+    )
     got = set(_osv_lockfiles(mixed))
     _check(
         "osv lockfiles = npm + pinned-python lockfiles (NOT pyproject/setup)",
@@ -97,10 +105,7 @@ def _check_attribution() -> None:
         "results": [
             {
                 "source": {"path": "/t/package-lock.json", "type": "lockfile"},
-                "packages": [
-                    {"package": {"name": "lodash", "version": "4.17.0", "ecosystem": "npm"},
-                     "vulnerabilities": [{"id": "GHSA-p6mc-m468-83gw", "summary": "prototype pollution in lodash"}]}
-                ],
+                "packages": [{"package": {"name": "lodash", "version": "4.17.0", "ecosystem": "npm"}, "vulnerabilities": [{"id": "GHSA-p6mc-m468-83gw", "summary": "prototype pollution in lodash"}]}],
             }
         ]
     }
@@ -124,7 +129,7 @@ def _check_no_lockfile_gap() -> None:
             str(cov.gap_reason),
         )
     else:
-        print("  SKIP  osv-scanner no-lockfile gap-reason assertion: osv-scanner not on PATH")
+        print(f"  SKIP  osv-scanner no-lockfile gap-reason assertion: {tool_unavailable_reason(_OSV)}")
         _osv_check_skipped = True
 
 
@@ -140,11 +145,7 @@ def main() -> int:
         return 1
     print(f"osv_lockfile_smoke OK: {len(_CHECKS_RUN)} checks passed")
     if _osv_check_skipped:
-        print(
-            "SKIP: osv-scanner not on PATH -- the osv-specific gap-reason "
-            "assertion disclosed a gap rather than running; every other "
-            "check ran and passed."
-        )
+        print("SKIP: osv-scanner not usable (reason above) -- the osv-specific gap-reason assertion disclosed a gap rather than running; every other check ran and passed.")
         return _SKIP_EXIT_CODE
     return 0
 

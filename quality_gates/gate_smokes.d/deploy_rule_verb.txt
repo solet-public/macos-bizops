@@ -1,0 +1,2 @@
+# Deploy-by-rule started by the solet's own run_deploy_rule verb (prb_554891bc): real CLI, bridge and registered interface; offline.
+ananta/tests/lifecycle_management_service/deploy_rule_verb_smoke.py

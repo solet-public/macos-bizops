@@ -13,6 +13,13 @@ SYSTEM_AGENT_ID: Final[str] = "system"
 SYSTEM_ROLE_HANDOVER_ID: Final[str] = "system:role-handover"
 SYSTEM_ROLE_HANDOVER_LABEL: Final[str] = "System (role handover)"
 
+# The sender stamp of a send that carries no caller identity at all (scheduler /
+# heartbeat originated: the last rung of ``plugin._resolve_role_send_sender``).
+# It is a provenance label, NOT an address anyone holds, so ``peer_dispatch``
+# leaves the reply instruction off a message stamped with it. Lives here so
+# ``peer_dispatch`` can read it without importing ``plugin`` (an import cycle).
+SYSTEM_SCHEDULER_ID: Final[str] = "system:scheduler"
+
 # GAU-06 (G2), 2026-08-19. The sender identity for a rotation SELF-notice's
 # durable half. Its OWN sentinel rather than SYSTEM_SCHEDULER_ID, for the
 # reason ``SYSTEM_JOB_COMPLETION_ID`` already records in ``plugin``: peer

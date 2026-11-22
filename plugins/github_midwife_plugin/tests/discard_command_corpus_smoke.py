@@ -14,7 +14,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins/github_midwife_plugin/coordination_hooks_common"))
-from command_walk import Discard, classify  # noqa: E402  # pyright: ignore[reportMissingImports] - standalone sibling
+from command_walk import Discard, classify  # noqa: E402 - standalone sibling
 
 CORPUS: tuple[tuple[int, str, str, str, dict[str, str]], ...] = (
     (1, "git status", "none", "R", {}),

@@ -30,12 +30,10 @@ from ananta.llm.agent_messaging.role_binding import (
     COL_ORIGIN,
     COL_PROPERTIES,
     COL_ROLE,
-    COL_ROLE_CLASS,
     COL_SESSION_LABEL,
     HOLDER_KIND_SESSION,
     INDEX_AGENT_ROLE_BINDING_INSTANCE,
     INDEX_ROLE_BINDING_INSTANCE,
-    ROLE_CLASS_DEFAULT,
     ROLE_ORIGIN_USER,
     TABLE_AGENT_ROLE_BINDING,
     TABLE_ROLE,
@@ -71,14 +69,6 @@ SESSION_ROLE_CLAIM_ID_PREFIX = "src"
 
 TABLE_MANAGED_SESSION = "managed_session"
 MANAGED_SESSION_ID_PREFIX = "mgs"
-
-# Codex/Solet coordination-efficiency repair (2026-08-22): one durable work
-# contract may own sequential managed_session attempts.  The event table is
-# append-only; managed_dispatch is the current decision projection.
-TABLE_MANAGED_DISPATCH = "managed_dispatch"
-MANAGED_DISPATCH_ID_PREFIX = "mdp"
-TABLE_MANAGED_DISPATCH_EVENT = "managed_dispatch_event"
-MANAGED_DISPATCH_EVENT_ID_PREFIX = "mde"
 
 TABLE_SESSION_TRANSITION = "session_transition"
 SESSION_TRANSITION_ID_PREFIX = "sxn"
@@ -135,8 +125,8 @@ INBOX_CONSUMPTION_STATUS_ID_PREFIX = "ics"
 
 # Fleet stewardship records (2026-09-08). These are append-only deployment-native
 # operational telemetry: Phase A records a mechanical liveness pass, while
-# Phase B records one objective assessment per workstream. They are deliberately
-# not project-solet register entities and never replace work-unit state.
+# Phase B records one objective assessment per workstream. They describe this
+# deployment's own liveness and stewardship decisions and nothing outside it.
 TABLE_FLEET_LIVENESS_RUN = "fleet_liveness_run"
 FLEET_LIVENESS_RUN_ID_PREFIX = "flr"
 TABLE_FLEET_PROGRESS_RUN = "fleet_progress_run"
@@ -199,12 +189,6 @@ NOTICE_DELIVERY_OUTCOMES = (
     NOTICE_DELIVERY_APPEND_FAILED,
 )
 
-# fleet-watch-transport-migration phase 2 slice 6 (2026-08-06, design
-# check-in ruling item 3) — the operator's verbatim founding words for a
-# lane, driven byte-exact as a spawned worker's literal first turn.
-TABLE_LANE_CHARTER = "lane_charter"
-LANE_CHARTER_ID_PREFIX = "lch"
-
 # R1 held-authorization queue (2026-08-17, seat GO ruling). Git-Controller
 # writes a row at REFUSAL time (declining a peer's citation of an
 # authorization it cannot verify first-party in its own inbox) — never the
@@ -263,7 +247,7 @@ TABLE_ALLOWANCE_POOL_READING = "allowance_pool_reading"
 ALLOWANCE_POOL_READING_ID_PREFIX = "apr"
 # iss_d9c955a2 (ruling arm-2305256f, transport part (a)): the authoritative
 # retired-role registry. Append-only; a send or claim naming a row here is
-# refused, and project-solet's content guard reads the same rows by version.
+# refused, and list_retired_roles serves the same rows by version.
 TABLE_RETIRED_ROLE = "retired_role"
 RETIRED_ROLE_ID_PREFIX = "rtr"
 
@@ -298,11 +282,6 @@ SESSION_HOST_OPERATOR = "operator"
 SESSION_VISIBILITY_VISIBLE = "visible"
 SESSION_VISIBILITY_HEADLESS = "headless"
 
-# ``managed_session.work_class`` domain (§6 rule 1).
-WORK_CLASS_READ_ONLY = "read_only"
-WORK_CLASS_ANALYSIS_DELIVERABLE = "analysis_deliverable"
-WORK_CLASS_PRODUCTION_MUTATION = "production_mutation"
-
 # ``managed_session.lifecycle_state`` domain + the AMEND-2b legal-transition
 # matrix (design §3.2 table). Every write is a predicated ``update_state`` on
 # the expected prior state; ``rows_affected == 0`` -> ``stale_lifecycle_state``.
@@ -334,16 +313,8 @@ LIFECYCLE_TRANSITIONS: dict[str, frozenset[str]] = {
     LIFECYCLE_RETIRED: frozenset(),
 }
 
-# ``session_dependency.condition_kind`` domain (§3.4). ``lane_closed`` replaced
-# the original spec's ``lane_landed`` (Dawn ruling 2026-08-03, arm-124065ee):
-# no canonical "lane landed" observable exists platform-side (an ancestor
-# check would bind the platform to a dev git checkout — seed instances are
-# not checkouts, violating C1 universality), so v1 defines it as what the
-# registry can actually observe — every managed_session row carrying the
-# lane_id is terminal. Work-product landing proper needs a lane ENTITY with
-# an explicit audited declaration — deferred to Phase C (the lane-office
-# questions).
-CONDITION_LANE_CLOSED = "lane_closed"
+# ``session_dependency.condition_kind`` domain (§3.4): a session reaching a
+# terminal state, or a deadline passing.
 CONDITION_SESSION_TERMINAL = "session_terminal"
 CONDITION_DEADLINE = "deadline"
 
@@ -630,14 +601,6 @@ def get_role_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 description=("The memory_service row this entity is ingested as (§7); nullable — ingest is best-effort, never gates a claim."),
             ),
-            COL_ROLE_CLASS: ColumnDefinition(
-                type=ColumnType.TEXT,
-                not_null=True,
-                default=ROLE_CLASS_DEFAULT,
-                description=(
-                    "Fleet session-management Phase B (§2) taxonomy: primary | principal | project | ephemeral | chat. Existing rows backfill to 'project' (one-shot reconcile, role_class_backfill.py); validated against reserved names (<solet>-Main, sys:*) at claim time — class validation, not keyspace rejection."
-                ),
-            ),
         },
     )
 
@@ -768,7 +731,7 @@ def get_managed_session_schema() -> TableSchema:
     registration (so the fleet is ONE list, §4 ``list_sessions``)."""
     return TableSchema(
         table_name=TABLE_MANAGED_SESSION,
-        description=("Session lifecycle ledger — identity, lineage, dispatch config, host, independent report contract, and the current-state lifecycle_state projection (AMEND 2b; full history in session_transition)."),
+        description=("Session lifecycle ledger — identity, lineage, launch config, host, independent report contract, and the current-state lifecycle_state projection (AMEND 2b; full history in session_transition)."),
         id_prefix=MANAGED_SESSION_ID_PREFIX,
         columns={
             COL_AGENT_INSTANCE_ID: ColumnDefinition(
@@ -784,6 +747,12 @@ def get_managed_session_schema() -> TableSchema:
             COL_AGENT_ID: ColumnDefinition(
                 type=ColumnType.TEXT,
                 description="Agent kind (claude_code, codex, ...).",
+            ),
+            "session_origin": ColumnDefinition(
+                type=ColumnType.TEXT,
+                not_null=True,
+                default="unknown",
+                description="How the session entered the ledger: spawned, registered, historical_read_only, synthetic or unknown.",
             ),
             "spawned_by_instance_id": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -803,82 +772,37 @@ def get_managed_session_schema() -> TableSchema:
                     "which is what makes the W6 incumbent refusal legible."
                 ),
             ),
-            "lane_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="The lane this session was spawned for (provenance, anti-laundering).",
-            ),
             "local_name": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description=(
                     "W6 (#13 §44.3): the name the spawned worker answers to on its "
                     "OWN machine — the headless driver's --name, the tmux label the "
-                    "session name derives from. Defaulted by spawn_session to "
-                    "role_name for a project-class role and lane_id otherwise. "
+                    "session name derives from. Defaulted by spawn_session to the "
+                    "caller's label, then to the instance id. "
                     "Persisted because it is the COLLISION KEY: two non-terminal rows "
                     "sharing a local_name are two processes answering to the same "
                     "name. No uniquifying suffix is used, so the name stays exactly "
-                    "the role or lane the spawn was requested under."
+                    "the one the spawn was requested under."
                 ),
             ),
+            # Release 74 keeps three declarations in this table (the next two and one
+            # near its end) only as input to session_origin_backfill's classifier on a
+            # direct upgrade; release 75 removes the three with that classifier.
             "brief_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
                 description="Read-only historical file provenance; never a launch input.",
             ),
             "assignment": ColumnDefinition(
                 type=ColumnType.JSON,
-                description="Immutable registered Unit/revision/body. NULL identifies historical rows.",
-            ),
-            "assignment_sha256": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Digest of the immutable registered assignment.",
-            ),
-            "unit_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Registered Unit identity; absent on historical or operator-inventory rows.",
+                description="Release 74 upgrade input: the structured payload a predecessor release recorded with the session. Only session_origin_backfill's classifier reads it, on a direct upgrade. NULL means none was recorded.",
             ),
             "model": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="Dispatch model override.",
-            ),
-            "dispatch_kind": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Required nonblank unit-kind provenance text; register phase names include design, review, implement, test, and fix. The value does not choose a model pair.",
-            ),
-            "reviewed_report_vendor": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="For review only: vendor that authored the reviewed report (codex | claude_code).",
-            ),
-            "pair_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="For diagnose/design only: cross-vendor producer pair identity.",
-            ),
-            "scope_tags": ColumnDefinition(
-                type=ColumnType.JSON,
-                description=('Caller-declared work scope tags (e.g. ["state_schema"]) preserved as provenance; the state_schema model floor is retired (rul_0c6ec7c7).'),
-            ),
-            "capability_floors": ColumnDefinition(
-                type=ColumnType.JSON,
-                description=("Every capability floor spawn_session applied to this spawn's model: [{tag, source (declared | brief_marker), detail}]. The audit answer to 'which floor governed this model', as a ledger read (iss_63d91ca9)."),
-            ),
-            "difficulty_score": ColumnDefinition(
-                type=ColumnType.REAL,
-                description="Required numeric difficulty score replayed by the dispatch-tier selector.",
-            ),
-            "selection_receipt": ColumnDefinition(
-                type=ColumnType.JSON,
-                description="Exact selector receipt proving the stored spawn tuple was the cheapest clearing answer.",
+                description="Model override for the session's launch.",
             ),
             "effort": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="Dispatch effort override.",
-            ),
-            "work_class": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="read_only | analysis_deliverable | production_mutation (§6 rule 1).",
-            ),
-            "budget_line": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Foreign key the token-budget ledger (§3.5, deferred to L3) hangs from.",
+                description="Effort override for the session's launch.",
             ),
             "visibility": ColumnDefinition(
                 type=ColumnType.TEXT,
@@ -907,13 +831,9 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 description="tmux session name / driver pid / null (§5).",
             ),
-            "dispatch_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description=("The durable managed_dispatch work contract this host attempt belongs to. NULL/empty on historical and explicit host-only rows."),
-            ),
             "first_turn_source": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="charter | fallback submission source, persisted after spawn.",
+                description="Submission source of the session's first turn (first_message), persisted after spawn.",
             ),
             "first_turn_delivered": ColumnDefinition(
                 type=ColumnType.BOOLEAN,
@@ -998,20 +918,16 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.DATETIME,
                 description="Timestamp of the most recent lifecycle_state write.",
             ),
-            "worktree_disposition": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description=(
-                    "Retirement teardown outcome: removed | retained_not_disposable | retained_error | not_provisioned. Empty until retirement. Recorded with the terminal ledger transition so session_status/list_sessions expose a retained worktree or an absent provisioning target instead of implying cleanup succeeded."
-                ),
-            ),
             "registration_overdue_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
                 description=(
                     "W4A (#8 §43.1): when the registration watchdog observed this "
-                    "row STILL in 'spawning' past its registration bound. A FIELD, "
-                    "not a lifecycle state, deliberately (see "
-                    "session_sweep.sweep_unregistered_spawning_sessions): the row is "
-                    "still genuinely spawning AND now registration-overdue, which are "
+                    "row STILL in 'spawning' past its registration bound. That "
+                    "watchdog no longer runs and nothing writes the field now; the "
+                    "lifecycle store still reads it and clears it on registration, "
+                    "so a row that carries a value keeps reading correctly. A FIELD, "
+                    "not a lifecycle state, deliberately: the row was "
+                    "still genuinely spawning AND registration-overdue, which are "
                     "two facts a single state column would collapse. Null means never "
                     "observed overdue; a late registration clears it."
                 ),
@@ -1033,362 +949,33 @@ def get_managed_session_schema() -> TableSchema:
                 type=ColumnType.TEXT,
                 not_null=True,
                 default="worktree",
-                description=(
-                    "How this session's working environment is provisioned: "
-                    "'worktree' (default) or 'synthetic_no_worktree' (the "
-                    "qualification-only lifecycle — no lane worktree exists, so "
-                    "teardown must skip worktree removal). Written at spawn by "
-                    "session_lifecycle_store.insert_managed_session; read by the "
-                    "teardown fork in session_lifecycle_verbs."
-                ),
+                description=("Release 74 upgrade input: how a predecessor release provisioned this session's working environment. Only session_origin_backfill's classifier reads it, on a direct upgrade; new sessions record session_origin instead."),
             ),
-            "lane_repo_root": ColumnDefinition(
+            "label": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description=("Resolved Git checkout root used for this lane's worktree at spawn. Retirement reads this durable value so it never re-derives a foreign lane from the serving Solet's APP_HOME. Empty rows predate this field and retain the APP_HOME fallback."),
+                default="",
+                description=("Opaque caller text stored at spawn and reported by list_sessions and session_status; never parsed. A spawn stores its label argument."),
+            ),
+            "workspace": ColumnDefinition(
+                type=ColumnType.TEXT,
+                default="",
+                description=("Absolute path of the existing directory a generic spawn runs in, used verbatim as the host's working directory; nothing is created or removed in it. Empty for every other row."),
+            ),
+            "end_reason": ColumnDefinition(
+                type=ColumnType.TEXT,
+                default="",
+                description=(
+                    "Why the session ended: one of END_REASONS (session_end_reason.py). Written only with the transition to terminated, by transition_lifecycle_state, in that one update. Blank on a row that has not ended and on a row that ended before this column existed; end_reason_of reads a blank on an ended row as unknown."
+                ),
             ),
         },
         indexes=[
-            IndexDefinition(name="idx_managed_session_lane", columns=["lane_id"]),
             IndexDefinition(name="idx_managed_session_state", columns=["lifecycle_state"]),
             # W6: the incumbent lookup behind the second-spawn refusal is
             # "non-terminal row with this local_name", run on the spawn path
             # before dispatch — indexed so the guard costs one index probe
             # rather than a fleet scan on every spawn.
             IndexDefinition(name="idx_managed_session_local_name", columns=["local_name"]),
-            IndexDefinition(name="idx_managed_session_unit", columns=["unit_id"]),
-        ],
-    )
-
-
-def get_managed_dispatch_schema() -> TableSchema:
-    """One durable work contract spanning sequential host attempts."""
-    text_columns = {
-        "dispatch_id": "Stable server-issued work-contract identity.",
-        "lane_id": "Human-facing lane identity.",
-        "role_name": "Durable worker role required by the dispatch.",
-        "role_class": "Role class required by the dispatch.",
-        "work_class": "Work authority classification.",
-        "budget_line": "Budget attribution key.",
-        "brief_ref": "Read-only historical file path; never a launch input.",
-        "unit_id": "Register unit identity ensured before spawn.",
-        "repository_root": ("Optional absolute Git checkout selected for the lane; retained in the immutable dispatch contract for retries."),
-        # Retained only for historical readback. No writer or launch consumes them.
-        "unit_mint_state": "Read-only historical mint classification; no active mint path.",
-        "unit_mint_key": "Read-only historical mint key; no active mint path.",
-        "unit_repository_id": "Register repository resolved from the lane root, never cwd.",
-        "brief_sha256": "Read-only historical file digest; never assignment identity.",
-        "assignment_sha256": "Digest of the immutable registered Unit/revision/body assignment.",
-        "request_sha256": "Digest of the original request for duplicate/conflict detection.",
-        "expected_revision_id": "Original optimistic revision premise; never follows plan edits.",
-        "repository_id": "Original caller repository expectation, checked before assignment.",
-        "expected_path": "Exact expected completion artifact.",
-        "completion_contract_sha256": "Digest of the structured completion contract.",
-        "model": "Explicit worker model.",
-        "dispatch_kind": "Required model-dispatch policy kind.",
-        "reviewed_report_vendor": "For review: vendor that authored the reviewed report.",
-        "pair_id": "For diagnose/design: cross-vendor producer pair identity.",
-        "effort": "Explicit worker effort tier.",
-        "agent_runtime": "Worker runtime, independent of host topology.",
-        "host": "Exact spawn host selected by the immutable contract.",
-        "visibility": "Exact worker visibility policy.",
-        "local_name": "Exact local worker name and registration label.",
-        "permission_mode": "Exact host permission policy.",
-        "transport": "Exact managed worker transport policy.",
-        "spawned_by_instance_id": "Coordinator instance lineage.",
-        "spawned_by_role": "Coordinator role lineage.",
-        "directed_by": "Server-built authorization principal.",
-        "state": "Current managed-dispatch state-machine projection.",
-        "current_agent_instance_id": "Current attempt identity; at most one.",
-        "blocker_class": "internal | operator when blocked.",
-        "blocker_owner": "Role responsible for the blocker decision.",
-        "blocker_question": "Exact outstanding ruling question.",
-        "next_required_action": "Decision-oriented next action.",
-        "responsible_role": "Role responsible for the next action.",
-        "terminal_reason": "Explicit terminal classification.",
-        "cancelled_by_instance_id": "Caller instance that explicitly cancelled an assignment-less historical dispatch.",
-        "first_turn_source": "charter | fallback transport source.",
-        "first_turn_error": "Exact first-turn submission error.",
-        "current_host": "Current attempt host topology.",
-        "current_host_ref": "Current attempt native host reference.",
-        "current_agent_runtime": "Current attempt runtime.",
-        "host_liveness": "alive | dead | unknown.",
-        "host_liveness_detail": "Exact native liveness probe detail.",
-        "reported_artifact_sha256": "Worker-reported artifact digest.",
-        "reported_completion_verdict": "Worker completion verdict under the contract.",
-    }
-    columns = {
-        name: ColumnDefinition(
-            type=ColumnType.TEXT,
-            not_null=name
-            in {
-                "dispatch_id",
-                "lane_id",
-                "role_name",
-                "role_class",
-                "work_class",
-                "budget_line",
-                "expected_path",
-                "completion_contract_sha256",
-                "model",
-                "effort",
-                "agent_runtime",
-                "host",
-                "visibility",
-                "local_name",
-                "permission_mode",
-                "transport",
-                "spawned_by_instance_id",
-                "spawned_by_role",
-                "directed_by",
-                "state",
-                "next_required_action",
-                "responsible_role",
-            },
-            unique=name == "dispatch_id",
-            description=description,
-        )
-        for name, description in text_columns.items()
-    }
-    columns.update(
-        {
-            "completion_contract": ColumnDefinition(
-                type=ColumnType.JSON,
-                not_null=True,
-                description="Structured gate/evidence contract; path existence is insufficient.",
-            ),
-            "allowed_hosts": ColumnDefinition(
-                type=ColumnType.JSON,
-                not_null=True,
-                description="Explicit allowed host policy.",
-            ),
-            "allowed_tools": ColumnDefinition(
-                type=ColumnType.JSON,
-                not_null=True,
-                description="Exact host tool allowlist bound before spawn.",
-            ),
-            "scope_tags": ColumnDefinition(
-                type=ColumnType.JSON,
-                description=("Declared work scope tags carried in the immutable contract so a retry cannot drop provenance, including state_schema (rul_0c6ec7c7)."),
-            ),
-            # Defaults on the three receipt columns exist for rows that predate
-            # the receipt-enforcement mechanism (iss_1505248c): the deploy
-            # schema preflight refuses a new NOT NULL column with no default as
-            # rollback-unsafe. A legacy row reads exactly like a dispatch that
-            # entered through a non-enforcing path — enforced=False is what
-            # makes lifecycle selection skip replay and the
-            # retry mismatch check, and 0.0 / {} are the same unset values
-            # that path already persists. {} also fails
-            # ``verify_selection_receipt`` closed (missing required keys), so
-            # a legacy receipt can never be misread as a validated one.
-            "difficulty_score": ColumnDefinition(
-                type=ColumnType.REAL,
-                not_null=True,
-                default=0.0,
-                description=("Immutable difficulty score that the spawn receipt must prove. 0.0 is the unset value for a non-enforced or pre-enforcement row; the score is only meaningful when selection_receipt_enforced is true."),
-            ),
-            "assignment": ColumnDefinition(
-                type=ColumnType.JSON,
-                description="Immutable registered Unit/revision/body. NULL rows are read-only history.",
-            ),
-            "attempt_failure": ColumnDefinition(
-                type=ColumnType.JSON,
-                description="Exact current failed-attempt refusal replayed for duplicate requests.",
-            ),
-            "attempt_receipt": ColumnDefinition(
-                type=ColumnType.JSON,
-                description="Exact current attempt receipt returned by duplicate launch requests.",
-            ),
-            "unit_mint_receipt": ColumnDefinition(
-                type=ColumnType.JSON,
-                description="Read-only historical mint/adoption receipt.",
-            ),
-            "unit_mint_request": ColumnDefinition(
-                type=ColumnType.JSON,
-                description=("Read-only historical mint inputs; cannot launch or retry."),
-            ),
-            "selection_receipt": ColumnDefinition(
-                type=ColumnType.JSON,
-                not_null=True,
-                default="{}",
-                description=("Immutable selector receipt replayed before every dispatch attempt. {} for a non-enforced or pre-enforcement row; an empty receipt never passes verify_selection_receipt."),
-            ),
-            "selection_receipt_enforced": ColumnDefinition(
-                type=ColumnType.BOOLEAN,
-                not_null=True,
-                default=False,
-                description=("Whether this dispatch entered through a public receipt-enforcing path. False for rows that predate enforcement: the receipt is not applicable, not refused."),
-            ),
-            "allow_askuserquestion": ColumnDefinition(
-                type=ColumnType.BOOLEAN,
-                not_null=True,
-                description="Exact unattended AskUserQuestion policy.",
-            ),
-            "degraded_hooks_acknowledged": ColumnDefinition(
-                type=ColumnType.BOOLEAN,
-                not_null=True,
-                description="Exact degraded-hook acknowledgement policy.",
-            ),
-            "report_by_seconds": ColumnDefinition(
-                type=ColumnType.INTEGER,
-                not_null=True,
-                description="Attempt-level report window passed to the host lifecycle.",
-            ),
-            "ttl_seconds": ColumnDefinition(
-                type=ColumnType.INTEGER,
-                description=("Retired attempt lifetime storage; retained nullable for legacy reconciliation. Current writers omit this value."),
-            ),
-            "attempt_number": ColumnDefinition(
-                type=ColumnType.INTEGER,
-                not_null=True,
-                description="Monotonic sequential-attempt number.",
-            ),
-            "version": ColumnDefinition(
-                type=ColumnType.INTEGER,
-                not_null=True,
-                description="Monotonic causal version for all authoritative transitions.",
-            ),
-            "liveness_unknown_count": ColumnDefinition(
-                type=ColumnType.INTEGER,
-                default=0,
-                description="Consecutive unknown native-host probes for the current attempt.",
-            ),
-            "first_turn_delivered": ColumnDefinition(
-                type=ColumnType.BOOLEAN,
-                description="Submission receipt only; never ACK or uptake.",
-            ),
-            "blocker_evidence": ColumnDefinition(
-                type=ColumnType.JSON,
-                description="Structured blocker evidence and safe options.",
-            ),
-            "reported_completion_evidence": ColumnDefinition(
-                type=ColumnType.JSON,
-                description="Worker completion evidence awaiting independent acceptance.",
-            ),
-            "acceptance_evidence": ColumnDefinition(
-                type=ColumnType.JSON,
-                description="Coordinator independent acceptance evidence.",
-            ),
-        },
-    )
-    for name in (
-        "uptake_due_at",
-        "report_by",
-        "watchdog_due_at",
-        "expires_at",
-        "last_ack_at",
-        "last_milestone_at",
-        "blocked_at",
-        "decision_due_at",
-        "completion_reported_at",
-        "completion_accepted_at",
-        "first_turn_at",
-        "host_liveness_observed_at",
-        "last_reconciled_at",
-        "watchdog_fired_at",
-        "next_liveness_probe_at",
-        "liveness_escalation_due_at",
-    ):
-        columns[name] = ColumnDefinition(
-            type=ColumnType.DATETIME,
-            not_null=name in {"uptake_due_at", "report_by", "watchdog_due_at"},
-            description=("Retired lifetime timestamp; legacy reconciliation only." if name == "expires_at" else f"Managed-dispatch timestamp: {name}."),
-        )
-    for name in (
-        "uptake_due_at_window_seconds",
-        "report_by_window_seconds",
-        "watchdog_due_at_window_seconds",
-        "expires_at_window_seconds",
-    ):
-        columns[name] = ColumnDefinition(
-            type=ColumnType.INTEGER,
-            not_null=name != "expires_at_window_seconds",
-            description=("Retired lifetime window; legacy reconciliation only." if name == "expires_at_window_seconds" else f"Immutable retry window derived at prepare: {name}."),
-        )
-    return TableSchema(
-        table_name=TABLE_MANAGED_DISPATCH,
-        description=("Durable managed work contract with explicit uptake, blocker, liveness, completion, and coordinator-acceptance truth."),
-        id_prefix=MANAGED_DISPATCH_ID_PREFIX,
-        columns=columns,
-        indexes=[
-            IndexDefinition(name="idx_managed_dispatch_state", columns=["state"]),
-            IndexDefinition(name="idx_managed_dispatch_lane", columns=["lane_id"]),
-            IndexDefinition(
-                name="idx_managed_dispatch_current",
-                columns=["current_agent_instance_id"],
-            ),
-            # "Which dispatches ever carried this Unit" is a lookup (s4.8).
-            IndexDefinition(name="idx_managed_dispatch_unit", columns=["unit_id"]),
-        ],
-    )
-
-
-def get_managed_dispatch_event_schema() -> TableSchema:
-    """Append-only accepted and rejected dispatch-event audit trail."""
-    return TableSchema(
-        table_name=TABLE_MANAGED_DISPATCH_EVENT,
-        description=("Append-only causal event trail for worker reports, coordinator decisions, transport evidence, and deduplicated supervision notices."),
-        id_prefix=MANAGED_DISPATCH_EVENT_ID_PREFIX,
-        columns={
-            "event_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                not_null=True,
-                description="Caller idempotency key scoped to dispatch_id.",
-            ),
-            "dispatch_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                not_null=True,
-                description="Owning work contract.",
-            ),
-            "attempt_agent_instance_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Attempt associated with this event, if any.",
-            ),
-            "event_kind": ColumnDefinition(
-                type=ColumnType.TEXT,
-                not_null=True,
-                description="ACK, milestone, blocker, completion, decision, or supervision kind.",
-            ),
-            "actor_role": ColumnDefinition(type=ColumnType.TEXT, description="Actor role."),
-            "actor_instance_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Actor instance identity.",
-            ),
-            "event_at": ColumnDefinition(
-                type=ColumnType.DATETIME,
-                not_null=True,
-                description="Event observation time.",
-            ),
-            "prior_version": ColumnDefinition(
-                type=ColumnType.INTEGER,
-                not_null=True,
-                description="Causal dispatch version supplied by the actor.",
-            ),
-            "payload": ColumnDefinition(
-                type=ColumnType.JSON,
-                not_null=True,
-                description="Structured event evidence.",
-            ),
-            "payload_sha256": ColumnDefinition(
-                type=ColumnType.TEXT,
-                not_null=True,
-                description="Canonical payload digest.",
-            ),
-            "accepted": ColumnDefinition(
-                type=ColumnType.BOOLEAN,
-                not_null=True,
-                description="Whether this event won validation and causal ordering.",
-            ),
-            "rejection_code": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Stable rejection token for an audit-preserved loser.",
-            ),
-        },
-        indexes=[
-            IndexDefinition(name="idx_managed_dispatch_event_dispatch", columns=["dispatch_id"]),
-            IndexDefinition(
-                name="idx_managed_dispatch_event_attempt",
-                columns=["attempt_agent_instance_id"],
-            ),
         ],
     )
 
@@ -1439,21 +1026,17 @@ def get_session_dependency_schema() -> TableSchema:
         columns={
             "waiter_instance_id": ColumnDefinition(
                 type=ColumnType.TEXT,
-                description="The waiting session's agent_instance_id, if session-scoped.",
-            ),
-            "waiter_lane_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="The waiting lane id, if lane-scoped rather than session-scoped.",
+                description="The waiting session's agent_instance_id.",
             ),
             "condition_kind": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description="lane_closed | session_terminal | deadline.",
+                description="session_terminal | deadline.",
             ),
             "condition_ref": ColumnDefinition(
                 type=ColumnType.TEXT,
                 not_null=True,
-                description="The lane id / agent_instance_id / timestamp the condition watches.",
+                description="The agent_instance_id / timestamp the condition watches.",
             ),
             "fired_at": ColumnDefinition(
                 type=ColumnType.DATETIME,
@@ -2361,59 +1944,6 @@ def get_gauge_canary_tamper_schema() -> TableSchema:
     )
 
 
-def get_lane_charter_schema() -> TableSchema:
-    """Append-only lane-charter capture (fleet-watch-transport-migration
-    phase 2 slice 6, design check-in ruling item 3). Insert-only via
-    ``write_state`` — the SAME shape ``session_transition`` uses for its own
-    audit trail: capture always writes a NEW row; a later charter for the
-    same ``lane_id`` SUPERSEDES by recency (``resolve_lane_charter`` reads
-    the latest row by ``captured_at`` desc), never edits a prior row in
-    place. Authenticity of the operator's stored words depends on
-    ``charter_text`` staying write-once — there is deliberately no update
-    path for it anywhere in this codebase."""
-    return TableSchema(
-        table_name=TABLE_LANE_CHARTER,
-        description=("Append-only operator-charter capture per lane_id. The latest row's charter_text is driven byte-exact as a spawned worker's literal first turn (spawn_session); a lane with no captured charter resolves to a deterministic fallback turn instead."),
-        id_prefix=LANE_CHARTER_ID_PREFIX,
-        columns={
-            "lane_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                not_null=True,
-                description="The lane this charter founds; spawn_session resolves the LATEST row for its lane_id.",
-            ),
-            "charter_text": ColumnDefinition(
-                type=ColumnType.TEXT,
-                not_null=True,
-                description="The operator's verbatim words, captured byte-exact — driven unmodified as a spawned worker's first turn.",
-            ),
-            "brief_ref": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Read-only historical file provenance; never a launch input.",
-            ),
-            "unit_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Registered Unit this charter accompanies; NULL means history.",
-            ),
-            "revision_id": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Registered revision this immutable charter accompanies.",
-            ),
-            "captured_at": ColumnDefinition(
-                type=ColumnType.DATETIME,
-                not_null=True,
-                description="When the operator spoke these words in the seat conversation — NOT the row-write time.",
-            ),
-            "directed_by": ColumnDefinition(
-                type=ColumnType.TEXT,
-                description="Server-built principal (CallContext) that captured this charter.",
-            ),
-        },
-        indexes=[
-            IndexDefinition(name="idx_lane_charter_lane", columns=["lane_id"]),
-        ],
-    )
-
-
 def get_held_authorization_schema() -> TableSchema:
     """R1 held-authorization queue (2026-08-17). Mechanically enumerable
     answer to "what is blocked on <role>?" for a freshly-booted session with
@@ -2493,7 +2023,7 @@ def _cell_identity_columns() -> dict[str, ColumnDefinition]:
     return {
         "provider": _text_column("Vendor: anthropic | openai."),
         "runtime": _text_column("Agent runtime as model_profiles/ names it: claude_code | codex."),
-        "model": _text_column("Canonical model id as model_dispatch_policy.v1.json names it."),
+        "model": _text_column("Canonical model id as model_profiles/ names it."),
         "effort": _text_column("Effort tier: non_reasoning | none | low | medium | high | xhigh | max. non_reasoning where the model has no dial."),
     }
 
@@ -2802,7 +2332,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
     D1 is land-able alone)."""
     return SchemaDefinition(
         namespace=AGENT_ROLE_BINDING_NAMESPACE,
-        version="1.16.0",
+        version="1.20.0",
         description=(
             "Fleet session-management Phase B, D1 — L0 schema deltas. "
             "+1.1.0: session_context_status (maintenance-verbs M1). "
@@ -2810,11 +2340,11 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             "+1.3.0: session_context_status_history (GAU-15 gauge series). "
             "+1.4.0: gauge_notice_record (GAU-21 durable notice record). "
             "+1.5.0: gauge_canary_registry + gauge_canary_tamper (GAU-15 "
-            "item 4 tamper canary). +1.6.0: managed_dispatch + append-only "
-            "managed_dispatch_event, with additive managed_session dispatch/first-turn/"
+            "item 4 tamper canary). +1.6.0: a dispatch record + append-only "
+            "event log, with additive managed_session dispatch/first-turn/"
             "liveness evidence. +1.7.0: inbox_consumption_status (CDX-06 part "
-            "C, the honesty field). +1.9.0: managed_session.lane_repo_root and "
-            "managed_dispatch.repository_root retain the foreign lane checkout root. "
+            "C, the honesty field). +1.9.0: the session and dispatch records "
+            "retain the foreign lane checkout root. "
             "+1.10.0: append-only deployment-native Phase-A fleet-liveness and "
             "Phase-B per-workstream progress records. +1.11.0: model capability "
             "catalog (observation, cell, refresh_run) for cost-aware dispatch. "
@@ -2825,17 +2355,22 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             "+1.14.0: retired_role, the authoritative retired-role registry "
             "(iss_d9c955a2). +1.15.0: append-only allowance_pool_reading_history. "
             "+1.16.0: model capability cells may preserve an unknown policy "
-            "staleness window as null."
+            "staleness window as null. "
+            "+1.17.0: session_effect_grant, append-only per-lane effect-class grants (frq_ff7da32f). "
+            "+1.19.0: session_effect_grant is kept declared for one release before it is retired by name (frq_ff7da32f). "
+            "+1.20.0: session_effect_grant is retired by name (frq_ff7da32f). "
+            "Release 74, at the same version: the three dispatch and lane tables "
+            "are retired by name (retired_tables), managed_session drops its other "
+            "work-model columns and session_dependency drops its lane column; three "
+            "managed_session declarations stay as session-origin upgrade "
+            "input until release 75 removes them with their classifier."
         ),
         tables={
             TABLE_SESSION_ROLE_CLAIM: get_session_role_claim_schema(),
             TABLE_MANAGED_SESSION: get_managed_session_schema(),
-            TABLE_MANAGED_DISPATCH: get_managed_dispatch_schema(),
-            TABLE_MANAGED_DISPATCH_EVENT: get_managed_dispatch_event_schema(),
             TABLE_SESSION_TRANSITION: get_session_transition_schema(),
             TABLE_SESSION_DEPENDENCY: get_session_dependency_schema(),
             TABLE_SESSION_CLAUDE_MAPPING: get_session_claude_mapping_schema(),
-            TABLE_LANE_CHARTER: get_lane_charter_schema(),
             TABLE_SESSION_CONTEXT_STATUS: get_session_context_status_schema(),
             TABLE_SESSION_CONTEXT_STATUS_HISTORY: (get_session_context_status_history_schema()),
             TABLE_HELD_AUTHORIZATION: get_held_authorization_schema(),
@@ -2853,6 +2388,7 @@ def get_session_lifecycle_schema_definition() -> SchemaDefinition:
             TABLE_ALLOWANCE_POOL_READING_HISTORY: get_allowance_pool_reading_history_schema(),
             TABLE_RETIRED_ROLE: get_retired_role_schema(),
         },
+        retired_tables=("session_effect_grant", "managed_dispatch", "managed_dispatch_event", "lane_charter"),
     )
 
 
@@ -2872,7 +2408,6 @@ __all__ = [
     "CAPTURE_SOURCE_HOOK_STARTUP",
     "CAPTURE_SOURCE_INIT_EVENT",
     "CONDITION_DEADLINE",
-    "CONDITION_LANE_CLOSED",
     "CONDITION_SESSION_TERMINAL",
     "GAUGE_CANARY_REGISTRY_ID_PREFIX",
     "GAUGE_CANARY_TAMPER_ID_PREFIX",
@@ -2881,7 +2416,6 @@ __all__ = [
     "FLEET_LIVENESS_RUN_ID_PREFIX",
     "FLEET_PROGRESS_RUN_ID_PREFIX",
     "INBOX_CONSUMPTION_STATUS_ID_PREFIX",
-    "LANE_CHARTER_ID_PREFIX",
     "LIFECYCLE_IDLE",
     "LIFECYCLE_LIVE",
     "LIFECYCLE_OVERDUE",
@@ -2899,8 +2433,6 @@ __all__ = [
     "CELL_ACCEPTANCE_CROSSCHECK_CONFLICT",
     "CELL_ACCEPTANCE_PENDING_CROSSCHECK",
     "CELL_ACCEPTANCE_WITHDRAWN",
-    "MANAGED_DISPATCH_EVENT_ID_PREFIX",
-    "MANAGED_DISPATCH_ID_PREFIX",
     "NOTICE_DELIVERY_APPENDED",
     "NOTICE_DELIVERY_APPEND_FAILED",
     "NOTICE_DELIVERY_NO_STEWARD_BINDING",
@@ -2935,19 +2467,13 @@ __all__ = [
     "TABLE_ACCEPTED_AUTHORIZATION_EVENT",
     "TABLE_HELD_AUTHORIZATION",
     "TABLE_INBOX_CONSUMPTION_STATUS",
-    "TABLE_LANE_CHARTER",
     "TABLE_MANAGED_SESSION",
-    "TABLE_MANAGED_DISPATCH",
-    "TABLE_MANAGED_DISPATCH_EVENT",
     "TABLE_SESSION_CLAUDE_MAPPING",
     "TABLE_SESSION_CONTEXT_STATUS",
     "TABLE_SESSION_CONTEXT_STATUS_HISTORY",
     "TABLE_SESSION_DEPENDENCY",
     "TABLE_SESSION_ROLE_CLAIM",
     "TABLE_SESSION_TRANSITION",
-    "WORK_CLASS_ANALYSIS_DELIVERABLE",
-    "WORK_CLASS_PRODUCTION_MUTATION",
-    "WORK_CLASS_READ_ONLY",
     "get_accepted_authorization_event_schema",
     "get_accepted_authorization_schema",
     "get_accepted_authorization_schema_definition",
@@ -2964,10 +2490,7 @@ __all__ = [
     "get_model_capability_observation_schema",
     "get_model_capability_refresh_run_schema",
     "get_held_authorization_schema",
-    "get_lane_charter_schema",
     "get_managed_session_schema",
-    "get_managed_dispatch_event_schema",
-    "get_managed_dispatch_schema",
     "get_peer_binding_schema",
     "get_peer_binding_schema_definition",
     "get_role_binding_schema",

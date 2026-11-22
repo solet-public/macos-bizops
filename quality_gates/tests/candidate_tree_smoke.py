@@ -407,12 +407,12 @@ def _assert_census_excludes_exhaust(candidate: candidate_tree.CandidateTree) -> 
 def _check_external_aggregation_symlink() -> int:
     """A scoped sibling-repository link is faithful in both candidate modes."""
 
-    target = "../../project-solet/docs"
+    target = "../../sibling-repo/docs"
     with TemporaryDirectory() as temporary:
         workspace = Path(temporary)
         root = workspace / "candidate"
         root.mkdir()
-        (workspace / "project-solet" / "docs").mkdir(parents=True)
+        (workspace / "sibling-repo" / "docs").mkdir(parents=True)
         _git(root, "init", "-q")
         _write(root, "README", "base\n")
         _git(root, "add", "README")
@@ -426,10 +426,10 @@ def _check_external_aggregation_symlink() -> int:
             "-qm",
             "base",
         )
-        link = root / "knowledge_bases" / "project_solet"
+        link = root / "knowledge_bases" / "sibling_repo"
         link.parent.mkdir()
         link.symlink_to(target)
-        scope = ("knowledge_bases/project_solet",)
+        scope = ("knowledge_bases/sibling_repo",)
 
         with candidate_tree.build_candidate_tree(root, scope) as candidate:
             materialized = candidate.root / scope[0]
@@ -608,7 +608,7 @@ def _check_gate_script_resolves_from_candidate_not_invoking_checkout() -> int:
     ``--run-identity-gate`` must run the identity-gate SCRIPT from the
     materialized candidate's own copy, never from whatever happens to sit on
     disk at ``--repo-root`` — the invoking checkout is routinely a stale or
-    behind-master lane worktree whose on-disk gate code predates the very fix
+    behind-master linked worktree whose on-disk gate code predates the very fix
     a review is trying to verify.
 
     A stale stub sits at exactly the on-disk path the old bug read the gate
@@ -658,7 +658,7 @@ def _check_gate_script_resolves_from_candidate_not_invoking_checkout() -> int:
         ).stdout.strip()
 
         # The stale on-disk copy: exactly where the OLD bug ran the gate
-        # from. Left uncommitted, the way a lane worktree's own dirty or
+        # from. Left uncommitted, the way a linked worktree's own dirty or
         # behind-master gate copy differs from the base_ref it is building a
         # candidate against.
         _write(repo, identity_gate_relpath, f'print("{stale_sentinel}")\n')

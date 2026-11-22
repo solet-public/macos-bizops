@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise battery admission with injected capacity and time, never host load."""
+"""Exercise battery admission against neutral leases with controlled time."""
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import io
 import json
 import os
@@ -12,17 +13,73 @@ import sys
 import tempfile
 import time
 import unittest
-from collections.abc import Callable
-from contextlib import redirect_stderr
+from collections.abc import Callable, Generator
+from contextlib import contextmanager, nullcontext, redirect_stderr
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from quality_gates import run_smokes  # noqa: E402
+from quality_gates import host_compute_budget, run_smokes  # noqa: E402
+from quality_gates.tests import host_compute_budget_smoke  # noqa: E402
 
 admission = run_smokes.battery_admission
 _SELF = "quality_gates/tests/run_smokes_admission_smoke.py"
+
+
+class _PeerLeaseFixture:
+    """An independent writer and reader of the shared on-disk lease format."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.pid = os.getpid()
+        birth = host_compute_budget.process_birth(self.pid)
+        if birth is None:
+            raise AssertionError("lease fixture owner has no live process identity")
+        self.birth = birth
+        host_compute_budget_smoke.write_host_snapshot(root)
+        self.leases = root / "leases"
+        self.leases.mkdir(mode=0o700)
+
+    @contextmanager
+    def _locked(self) -> Generator[None]:
+        descriptor = os.open(self.root / "settings.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "r+b") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            yield
+
+    def try_acquire(self, token: str, cpu_slots: int) -> bool:
+        with self._locked():
+            snapshot = json.loads((self.root / "settings.json").read_text())
+            capacity = snapshot["capacities"]["cpu_slots"]["value"]
+            running = 0
+            for path in self.leases.glob("*.json"):
+                row = json.loads(path.read_text())
+                if path.stem != token and row["schema"] == 1 and row["state"] == "running" and (row["pid"], row["owner_start"]) == (self.pid, self.birth):
+                    running += row["demand"]["cpu_slots"]
+            admitted = running + cpu_slots <= capacity
+            row = {
+                "schema": 1,
+                "token": token,
+                "job_id": token,
+                "pid": self.pid,
+                "owner_start": self.birth,
+                "started_at": time.time(),
+                "launcher": "fixture-peer",
+                "job_kind": "landing_gate",
+                "workers": None,
+                "demand": {"cpu_slots": cpu_slots, "pg_segments": 0},
+                "state": "running" if admitted else "waiting",
+                "reason": "admitted" if admitted else f"cpu_slots running={running} candidate={cpu_slots} capacity={capacity}",
+            }
+            pending = self.leases / f".{token}.pending"
+            pending.write_text(json.dumps(row))
+            pending.replace(self.leases / f"{token}.json")
+            return admitted
+
+    def release(self, token: str) -> None:
+        with self._locked():
+            (self.leases / f"{token}.json").unlink()
 
 
 class _AdmissionFixture(unittest.TestCase):
@@ -31,10 +88,14 @@ class _AdmissionFixture(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.directory = self.root / "tickets"
-        environment = patch.dict(os.environ, {admission.DIRECTORY_ENV: str(self.directory), "RUN_SMOKES_PRIORITY": "normal"})
+        home = self.root / "home"
+        home.mkdir()
+        host = self.root / "host"
+        environment = patch.dict(os.environ, {"HOME": str(home), admission.DIRECTORY_ENV: str(self.directory), "RUN_SMOKES_PRIORITY": "normal", "HOST_HEAVY_LEASE_DIR": str(host)})
         environment.start()
         self.addCleanup(environment.stop)
         os.environ.pop(admission.INHERITED_ENV, None)
+        self.peer = _PeerLeaseFixture(host)
 
     def _seed(self, ticket: admission.Ticket) -> None:
         with admission._locked(self.directory):
@@ -50,11 +111,68 @@ class _AdmissionFixture(unittest.TestCase):
 
 
 class AdmissionSmoke(_AdmissionFixture):
+    def test_peer_lease_holds_local_battery(self) -> None:
+        self.assertTrue(self.peer.try_acquire("peer-holder", 18))
+        sleeps: list[float] = []
+
+        def release_after_wait(seconds: float) -> None:
+            sleeps.append(seconds)
+            waits = [row for row in self._rows() if row["state"] == "waiting"]
+            self.assertEqual(len(waits), 1)
+            self.assertIn("cpu_slots running=18 candidate=8 capacity=24", str(waits[0]["reason"]))
+            self.peer.release("peer-holder")
+
+        with admission.admit(8, job_kind="full_battery", reference_workers=8, sleep=release_after_wait, report=lambda _line: None):
+            self.assertEqual(len(sleeps), 1, "PEER_LEASE_18_PLUS_LOCAL_8_EXCEEDS_24")
+
+    def test_local_battery_holds_peer_lease(self) -> None:
+        with admission.admit(8, job_kind="full_battery", reference_workers=8, report=lambda _line: None):
+            self.assertTrue(self.peer.try_acquire("peer-fits", 16))
+            self.peer.release("peer-fits")
+            self.assertFalse(self.peer.try_acquire("peer-waits", 18), "LOCAL_LEASE_8_PLUS_PEER_18_EXCEEDS_24")
+        self.assertTrue(self.peer.try_acquire("peer-waits", 18))
+        self.peer.release("peer-waits")
+
+    def test_first_local_ticket_waits_when_running_lease_exceeds_capacity(self) -> None:
+        self.assertTrue(self.peer.try_acquire("only-holder", 18))
+        waits: list[float] = []
+
+        def release_after_wait(seconds: float) -> None:
+            waits.append(seconds)
+            self.peer.release("only-holder")
+
+        with admission.admit(8, job_kind="landing_battery", reference_workers=8, sleep=release_after_wait, report=lambda _line: None):
+            self.assertEqual(len(waits), 1, "FIRST_TICKET_RESPECTS_RUNNING_LEASE")
+
+    def test_wait_does_not_expire_after_1200_seconds(self) -> None:
+        self.assertTrue(self.peer.try_acquire("long-holder", 18))
+        now = [0.0]
+        waits: list[float] = []
+
+        def advance(_seconds: float) -> None:
+            now[0] += 601
+            waits.append(now[0])
+            if len(waits) == 3:
+                self.peer.release("long-holder")
+
+        with admission.admit(8, job_kind="full_battery", reference_workers=8, clock=lambda: now[0], sleep=advance, report=lambda _line: None):
+            self.assertEqual(len(waits), 3, "KNOWN_CAPACITY_CANNOT_AGE_OUT")
+
     def test_priority_default(self) -> None:
         with patch.dict(os.environ), patch.object(sys, "argv", ["run_smokes"]):
             os.environ.pop("RUN_SMOKES_PRIORITY", None)
             args = run_smokes._parse_args()
         self.assertEqual(getattr(args, "priority", None), "normal", "RUN_SMOKES_PRIORITY_DEFAULT")
+
+    def test_proof_runner_without_register_uses_landing_demand(self) -> None:
+        args = argparse.Namespace(jobs=8, priority="normal")
+        expected: tuple[list[str], list[str], list[str], list[str], float] = ([], [], [], [], 0.0)
+        with (
+            patch.object(admission, "admit", return_value=nullcontext()) as admit,
+            patch.object(run_smokes, "_run_admitted_suite", return_value=expected),
+        ):
+            self.assertEqual(run_smokes._run_suite_with_environment([], args, frozenset()), expected)
+        admit.assert_called_once_with(8, "normal", job_kind="landing_battery", reference_workers=run_smokes._DEFAULT_JOBS)
 
     def test_priority_environment_and_cli(self) -> None:
         with patch.dict(os.environ, {"RUN_SMOKES_PRIORITY": "critical"}):
@@ -64,36 +182,31 @@ class AdmissionSmoke(_AdmissionFixture):
                 self.assertEqual(run_smokes._parse_args().priority, "normal")
 
     def test_overload_waits_with_quoted_reason_and_refreshes(self) -> None:
-        self._holder()
-        now = [100.0]
+        self.assertTrue(self.peer.try_acquire("overload", 22))
         messages: list[str] = []
-        observed: list[dict[str, object]] = []
+        sleeps: list[float] = []
 
         def sleep(seconds: float) -> None:
-            rows = [row for row in self._rows() if row["state"] == "waiting"]
-            self.assertEqual(len(rows), 1, "ONE_VISIBLE_WAITING_TICKET")
-            observed.append(rows[0])
-            now[0] += seconds
+            sleeps.append(seconds)
+            self.assertEqual(len([row for row in self._rows() if row["state"] == "waiting"]), 1)
+            self.peer.release("overload")
 
-        with admission.admit(4, capacity=lambda: (8, 8.0 if now[0] < 162 else 0.0), clock=lambda: now[0], sleep=sleep, report=messages.append) as ticket:
-            self.assertIsNotNone(ticket)
+        with admission.admit(4, sleep=sleep, report=messages.append) as ticket:
             self.assertEqual(ticket.state if ticket else None, "running")
-            self.assertEqual(now[0], 162, "WAIT_UNTIL_MEASURED_CAPACITY_FREES")
         waiting = [line for line in messages if ": waiting " in line]
-        self.assertEqual(len(waiting), 3, "REFRESH_EVERY_30_SECONDS")
-        self.assertIn("waiting 'capacity: load 8.0 + demand 4 > 8 cpus", waiting[0])
+        self.assertEqual(len(waiting), 1)
+        self.assertIn("cpu_slots running=22 candidate=4 capacity=24", waiting[0])
         self.assertIn("priority normal; ticket ", waiting[0])
         self.assertIn("waiting since ", waiting[0])
         self.assertTrue(waiting[0].endswith("'"), "QUOTED_WAIT_REASON")
-        self.assertTrue(observed, "WAIT_PATH_WAS_REACHED")
-        self.assertIn("capacity: load 8.0", str(observed[0]["reason"]))
-        self.assertEqual([row["name"] for row in self._rows()], ["holder"], "ONLY_OWN_TICKET_REMOVED")
+        self.assertEqual(len(sleeps), 1)
+        self.assertEqual(self._rows(), [])
 
     def test_under_capacity_starts_without_sleep(self) -> None:
         def no_sleep(_seconds: float) -> None:
             self.fail("UNDER_CAPACITY_MUST_START_IMMEDIATELY")
 
-        with admission.admit(4, capacity=lambda: (8, 4.0), sleep=no_sleep, report=lambda _line: None) as ticket:
+        with admission.admit(4, sleep=no_sleep, report=lambda _line: None) as ticket:
             self.assertIsNotNone(ticket)
             rows = self._rows()
             self.assertEqual(len(rows), 1)
@@ -102,27 +215,31 @@ class AdmissionSmoke(_AdmissionFixture):
         self.assertEqual(self._rows(), [], "RELEASE_ON_SUCCESS")
 
     def test_priority_precedes_older_normal_and_fifo_within_priority(self) -> None:
-        normal = admission.Ticket("normal", os.getpid(), 2, "normal", 0, "fixture")
-        high = replace(normal, name="high", priority="critical", requested_at=1)
-        later_high = replace(high, name="later-high", requested_at=2)
-        rows = [normal, high, later_high]
-        self.assertFalse(admission._decision(normal, rows, 8, 0, 3)[0], "HIGH_AHEAD_OF_OLDER_NORMAL")
-        self.assertTrue(admission._decision(high, rows, 8, 0, 3)[0], "HIGH_ADMITS_FIRST")
-        self.assertFalse(admission._decision(later_high, rows, 8, 0, 3)[0], "FIFO_WITHIN_PRIORITY")
-        self.assertTrue(admission._decision(normal, [normal, replace(high, state="running")], 8, 0, 3)[0], "RUNNING_HIGH_DOES_NOT_EXCLUDE_NORMAL")
+        self._seed(admission.Ticket("critical-head", os.getpid(), 2, "critical", 0, "fixture"))
+        waits: list[float] = []
+
+        def release_head(seconds: float) -> None:
+            waits.append(seconds)
+            (self.directory / "critical-head.json").unlink()
+
+        with admission.admit(2, "normal", sleep=release_head, report=lambda _line: None):
+            self.assertEqual(len(waits), 1, "HIGH_PRIORITY_AHEAD")
 
     def test_no_running_head_can_start_under_pressure(self) -> None:
-        with admission.admit(4, capacity=lambda: (8, 80.0), report=lambda _line: None) as ticket:
+        with patch("os.getloadavg", return_value=(80.0, 80.0, 80.0)), admission.admit(4, report=lambda _line: None) as ticket:
             self.assertIsNotNone(ticket)
-            self.assertIn("ADVISORY", ticket.reason if ticket else "")
-            self.assertIn("no running battery", ticket.reason if ticket else "")
+            self.assertEqual(ticket.state if ticket else None, "running")
+            self.assertIn("ADVISORY host load", ticket.reason if ticket else "")
 
     def test_reservation_covers_load_average_startup_lag(self) -> None:
-        holder = self._holder()
-        waiting = replace(holder, name="waiting", state="waiting", demand=5)
-        admitted, reason = admission._decision(waiting, [holder, waiting], 8, 0, 1)
-        self.assertFalse(admitted, "RESERVATIONS_PREVENT_STARTUP_OVERSUBSCRIPTION")
-        self.assertIn("reserved 4", reason)
+        self.assertTrue(self.peer.try_acquire("reserved", 22))
+        try:
+            observed = host_compute_budget.try_acquire("full_battery", 4, token="candidate")
+            self.assertFalse(observed.admitted, "RUNNING_LEASE_PREVENTS_STARTUP_OVERSUBSCRIPTION")
+            self.assertIn("running=22", observed.reason)
+            host_compute_budget.release(observed)
+        finally:
+            self.peer.release("reserved")
 
 
 class TicketLifecycleSmoke(_AdmissionFixture):
@@ -154,28 +271,29 @@ class TicketLifecycleSmoke(_AdmissionFixture):
         subprocess.run([sys.executable, "-c", code, str(self.directory)], check=True)
         self.assertTrue((self.directory / "dead.json").is_file(), "REAL_EXITED_PID_FIXTURE_EXISTS")
         messages: list[str] = []
-        with admission.admit(2, capacity=lambda: (8, 0), report=messages.append):
+        with admission.admit(2, report=messages.append):
             self.assertFalse((self.directory / "dead.json").exists(), "DEAD_PID_SWEPT")
             self.assertTrue((self.directory / "holder.json").exists(), "LIVE_PID_RETAINED")
         self.assertTrue(any("swept dead pid" in line for line in messages))
 
-    def test_aging_admits_with_advisory_despite_priority_and_load(self) -> None:
-        self._holder()
-        self._seed(admission.Ticket("priority-head", os.getpid(), 4, "critical", 0, "fixture"))
+    def test_known_capacity_wait_does_not_age_out(self) -> None:
+        self.assertTrue(self.peer.try_acquire("age-holder", 22))
         now = [0.0]
-        messages: list[str] = []
+        waits: list[float] = []
 
         def sleep(_seconds: float) -> None:
-            now[0] += 600
+            now[0] += 601
+            waits.append(now[0])
+            if len(waits) == 3:
+                self.peer.release("age-holder")
 
-        with admission.admit(4, "normal", capacity=lambda: (8, 80), clock=lambda: now[0], sleep=sleep, report=messages.append) as ticket:
-            self.assertEqual(now[0], 1200, "BOUNDED_20_MINUTE_AGING")
-            self.assertIn("ADVISORY aging limit 1200s reached", ticket.reason if ticket else "")
-        self.assertTrue(any("ADVISORY aging limit" in line for line in messages))
+        with admission.admit(4, "normal", clock=lambda: now[0], sleep=sleep, report=lambda _line: None) as ticket:
+            self.assertEqual(ticket.state if ticket else None, "running")
+        self.assertEqual(len(waits), 3, "CAPACITY_WAIT_HAS_NO_AGING_BYPASS")
 
     def test_two_processes_run_concurrently_under_capacity(self) -> None:
-        code = "import json, sys\nfrom pathlib import Path\nfrom quality_gates import battery_admission as a\nroot = Path(sys.argv[1])\nwith a.admit(2, directory=root, capacity=lambda: (8, 0), report=lambda line: None):\n    print(json.dumps([json.loads(p.read_text()) for p in root.glob('*.json')]))\n"
-        with admission.admit(2, capacity=lambda: (8, 0), report=lambda _line: None):
+        code = "import json, sys\nfrom pathlib import Path\nfrom quality_gates import battery_admission as a\nroot = Path(sys.argv[1])\nwith a.admit(2, directory=root, report=lambda line: None):\n    print(json.dumps([json.loads(p.read_text()) for p in root.glob('*.json')]))\n"
+        with admission.admit(2, report=lambda _line: None):
             environment = os.environ.copy()
             environment.pop(admission.INHERITED_ENV, None)
             completed = subprocess.run([sys.executable, "-c", code, str(self.directory)], env=environment, capture_output=True, text=True, check=True)
@@ -186,16 +304,17 @@ class TicketLifecycleSmoke(_AdmissionFixture):
         self.assertEqual(self._rows(), [])
 
     def test_nested_runner_reuses_and_preserves_parent_ticket(self) -> None:
-        with admission.admit(4, capacity=lambda: (8, 0), report=lambda _line: None) as parent:
-            with admission.admit(4, capacity=lambda: (8, 80), report=lambda _line: None) as child:
+        with admission.admit(4, report=lambda _line: None) as parent:
+            with admission.admit(4, report=lambda _line: None) as child:
                 self.assertEqual(child, parent, "NESTED_RUNNER_CANNOT_QUEUE_BEHIND_ITS_PARENT")
             self.assertEqual(len(self._rows()), 1, "CHILD_MUST_NOT_RELEASE_PARENT")
         self.assertEqual(self._rows(), [])
 
     def test_unknown_measurement_and_unavailable_storage_advise(self) -> None:
         messages: list[str] = []
-        with admission.admit(4, capacity=lambda: (None, float("nan")), report=messages.append) as ticket:
-            self.assertIn("capacity unknown", ticket.reason if ticket else "")
+        (self.peer.root / "settings.json").unlink()
+        with admission.admit(4, report=messages.append) as ticket:
+            self.assertIn("capacity_unknown", ticket.reason if ticket else "")
         bad_directory = self.root / "file"
         bad_directory.write_text("fixture")
         with admission.admit(4, directory=bad_directory, report=messages.append) as ticket:
@@ -207,24 +326,25 @@ class TicketLifecycleSmoke(_AdmissionFixture):
         malformed = self.directory / "unknown.json"
         malformed.write_text("{}")
         messages: list[str] = []
-        with admission.admit(4, capacity=lambda: (8, 0), report=messages.append):
+        with admission.admit(4, report=messages.append):
             self.assertEqual(malformed.read_text(), "{}", "UNKNOWN_TICKET_HAS_NO_CLEANUP_AUTHORITY")
         self.assertEqual(sum("unreadable ticket" in line for line in messages), 1)
 
     def test_exception_and_interruption_release_waiting_and_running_tickets(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "fixture"):
-            with admission.admit(4, capacity=lambda: (8, 0), report=lambda _line: None):
+            with admission.admit(4, report=lambda _line: None):
                 raise RuntimeError("fixture")
         self.assertEqual(self._rows(), [], "RELEASE_ON_BODY_EXCEPTION")
-        self._holder()
+        self.assertTrue(self.peer.try_acquire("interrupt-holder", 22))
 
         def interrupt(_seconds: float) -> None:
             raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            with admission.admit(4, capacity=lambda: (8, 8), sleep=interrupt, report=lambda _line: None):
+            with admission.admit(4, sleep=interrupt, report=lambda _line: None):
                 self.fail("OVERLOAD_CANNOT_START")
-        self.assertEqual([row["name"] for row in self._rows()], ["holder"], "RELEASE_ON_WAIT_INTERRUPTION")
+        self.assertEqual(self._rows(), [], "RELEASE_ON_WAIT_INTERRUPTION")
+        self.peer.release("interrupt-holder")
 
     def test_invalid_environment_priority_advises_and_directory_is_per_user(self) -> None:
         diagnostics = io.StringIO()
@@ -364,6 +484,12 @@ class SerialOrderingSmoke(_AdmissionFixture):
             self.assertEqual((event, next_event), ("end", "start"), f"SERIAL_SMOKES_OVERLAP: {first}/{second}")
             self.assertGreaterEqual(started, ended, "PHYSICAL_SERIAL_MUTEX_PRESERVED")
         self.assertEqual(self._rows(), [], "ALL_SERIAL_WAITING_TICKETS_RETIRED")
+
+
+def load_tests(loader: unittest.TestLoader, tests: unittest.TestSuite, _pattern: str | None) -> unittest.TestSuite:
+    """Run the host protocol cases through the registered admission smoke."""
+    tests.addTests(loader.loadTestsFromModule(host_compute_budget_smoke))
+    return tests
 
 
 if __name__ == "__main__":

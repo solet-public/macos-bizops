@@ -10,7 +10,7 @@
     "presentation_guidance": "This call only confirms the ABORT REQUEST was queued -- do not present job_id/status as proof the bulk job stopped. Once delivered, confirm the resulting state plainly and remind the user that records processed BEFORE the abort are not rolled back -- point them to bulk_job_results if they need to know exactly what landed."
   },
   "error_processor_customizations": {
-    "action_context": "Abort a running Bulk API v2 ingest job in the registered Salesforce org.",
+    "action_context": "Abort a running Bulk API v2 ingest job in the bound Salesforce org.",
     "error_interpretation": "sf.invalid_params: missing job_id. sf.not_found: no bulk job with that id exists. sf.api_error: the job is already in a terminal state (JobComplete/Failed/Aborted) and cannot be aborted again. sf.permission_denied: the CLI's authenticated user cannot abort this job.",
     "recovery_guidance": "sf.not_found: verify the job_id via bulk_job_status first. sf.api_error naming a terminal-state conflict: the job already finished -- use bulk_job_results to see the outcome instead of retrying the abort. sf.permission_denied: ask the operator to check bulk API job-management permission for this user."
   }

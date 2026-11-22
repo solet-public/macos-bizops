@@ -85,30 +85,6 @@ def _assert_unpriced_notes() -> None:
 def _assert_estimates() -> None:
     from agent_messaging_plugin import session_usage_pricing as pricing_module
 
-    receipt = {
-        "selected": {
-            "runtime": "claude_code",
-            "model": "claude-opus-5-5",
-            "effort": "high",
-            "cost_per_task_usd": 0.41,
-        },
-    }
-    state, raw = _state()
-    _spawn(
-        state,
-        raw,
-        "agi-receipt-estimate",
-        model="claude-opus-5-5",
-        effort="high",
-        receipt=receipt,
-        difficulty=45.0,
-    )
-    _mapping(state, "agi-receipt-estimate", "runtime-receipt-estimate")
-    receipt_answer = _unit(
-        state,
-        {"agent_instance_id": "agi-receipt-estimate"},
-        [_total("runtime-receipt-estimate", model="claude-opus-5-5")],
-    )
     cell = {
         "runtime": "claude_code",
         "model": "claude-opus-5-5",
@@ -137,20 +113,21 @@ def _assert_estimates() -> None:
             [_total("runtime-no-estimate", model="claude-opus-5-5", usage=_usage(output_tokens=100))],
         )
     _check(
-        receipt_answer["estimate"]["basis"] == "receipt" and receipt_answer["estimate"]["usd"] == 0.41 and receipt_answer["difficulty_score"] == 45.0 and lookup_answer["estimate"]["basis"] == "catalog_lookup" and lookup_answer["estimate"]["usd"] == 0.62 and none_answer["estimate"]["basis"] == "none",
-        "ESTIMATE_RECEIPT_THEN_CATALOG_LOOKUP_THEN_NONE",
+        lookup_answer["estimate"]["basis"] == "catalog_lookup" and lookup_answer["estimate"]["usd"] == 0.62 and none_answer["estimate"]["basis"] == "none",
+        "ESTIMATE_CATALOG_LOOKUP_THEN_NONE",
     )
 
 
 def _assert_bridge_window_arguments() -> None:
-    unit_method = AgentMessagingPlugin.read_unit_usage
+    label_method = AgentMessagingPlugin.read_label_usage
     window_method = AgentMessagingPlugin.read_session_usage_window
-    unit_key = "plugin::agent_messaging_plugin::read_unit_usage"
+    label_key = "plugin::agent_messaging_plugin::read_label_usage"
     window_key = "plugin::agent_messaging_plugin::read_session_usage_window"
     _submit(window_method, window_key, {"since": "2026-10-17T00:00:00Z", "until": "2026-10-18T00:00:00Z", "vendor": "claude_code", "priced": True})
-    for _method, key in ((unit_method, unit_key), (window_method, window_key)):
+    for _method, key in ((label_method, label_key), (window_method, window_key)):
+        customizations = AgentMessagingPlugin.get_edge_process_definitions(object.__new__(AgentMessagingPlugin))[key.rsplit("::", 1)[1]].error_processor_template_customizations
         _check(
-            AgentMessagingPlugin.get_edge_process_definitions(object.__new__(AgentMessagingPlugin))[key.rsplit("::", 1)[1]].error_processor_template_customizations.retryable,
+            customizations is not None and customizations.retryable,
             "BRIDGE_ACCEPTS_PRICED_WINDOW_ARGUMENTS",
         )
     try:
@@ -308,7 +285,7 @@ def _assert_fixture_adapter_profile() -> None:
 
             with patch.object(helpers_module, "USAGE_ECONOMICS_PROFILE_PATH", catalog_path):
                 catalog_path.write_text(json.dumps(profile_data), encoding="utf-8")
-                before = module.read_unit_usage(
+                before = module.read_label_usage(
                     state,
                     {"agent_instance_id": "agi-fixture-harness"},
                     totals_reader=reader,
@@ -316,7 +293,7 @@ def _assert_fixture_adapter_profile() -> None:
                 )
                 profile_data["profiles"].append(fixture_profile)
                 catalog_path.write_text(json.dumps(profile_data), encoding="utf-8")
-                after = module.read_unit_usage(
+                after = module.read_label_usage(
                     state,
                     {"agent_instance_id": "agi-fixture-harness"},
                     totals_reader=reader,
@@ -334,7 +311,7 @@ def _assert_fixture_adapter_profile() -> None:
 ASSERTIONS: tuple[tuple[str, Callable[[], None]], ...] = (
     ("PRICING_AND_POOLS_ATTACHED_END_TO_END", _assert_pricing_and_pools),
     ("UNPRICED_COUNTED_IN_NOTES", _assert_unpriced_notes),
-    ("ESTIMATE_RECEIPT_THEN_CATALOG_LOOKUP_THEN_NONE", _assert_estimates),
+    ("ESTIMATE_CATALOG_LOOKUP_THEN_NONE", _assert_estimates),
     ("BRIDGE_ACCEPTS_PRICED_WINDOW_ARGUMENTS", _assert_bridge_window_arguments),
     ("PRICED_WINDOW_ONE_PRICED_ONE_UNPRICED_MODEL", _assert_priced_window_models),
     ("PRICED_ABSENT_EXACT_S1_KEYS", _assert_raw_window_exact),

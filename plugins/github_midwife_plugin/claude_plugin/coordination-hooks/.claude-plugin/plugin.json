@@ -1,5 +1,5 @@
 {
   "name": "coordination-hooks",
-  "version": "0.9.3",
-  "description": "Fleet coordination hooks: knowledge-base-first reminder and live session context; idle-wake; heartbeat report-alive, rotation-due watch, and rotation-due notice; memory-passthrough capture, session context, drain, hydrate, index and sync utilities; spawn-injected worker hooks; and owner-qualified receipt guards for heartbeat, rotation-due, and wake effects. Live session context (session_start_context.py) observes a register-wide digest and peer inbox counts."
+  "version": "0.10.1",
+  "description": "Fleet coordination hooks: knowledge-base-first reminder and live session context; idle-wake; heartbeat report-alive, rotation-due watch, and rotation-due notice; memory-passthrough capture, session context, drain, hydrate, index and sync utilities; spawn-injected worker hooks; owner-qualified receipt guards for heartbeat, rotation-due, and wake effects; and working-tree recovery saves (recovery_claude.py) that keep a local copy of uncommitted work before a shell command discards it and at the end of every turn, and never block. Live session context (session_start_context.py) observes a register-wide digest and peer inbox counts."
 }

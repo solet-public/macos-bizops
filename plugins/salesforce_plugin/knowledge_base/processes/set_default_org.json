@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::set_default_org",
+  "display_name": "Salesforce: Set Default Org",
+  "description": "Make one bound org (org: its alias, username or 18- or 15-character org id; required) the default that every Salesforce verb uses when a request names no org. The default is stored in the plugin's vault index together with the bindings, in one write. With a single bound org that org is always used; with several and no default, a request without org is refused with the list of bound orgs. Returns job_id/status queued.",
+  "embedding_description": "Choose which connected Salesforce org this solet uses when a request does not say, for example switching the default from production to a sandbox or scratch org while testing. The other connected orgs stay available by alias.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce default org change queued",
+    "result_type": "salesforce_set_default_org_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: org (the alias), org_id and default true.",
+    "presentation_guidance": "Confirm the new default org by alias and username, since later requests without an org go to it."
+  },
+  "error_processor_customizations": {
+    "action_context": "Change the default bound Salesforce org.",
+    "error_interpretation": "sf.invalid_params: org is missing. sf.unknown_org: org matches no bound org (the message lists them). sf.org_registry_failed: the vault index could not be read or written.",
+    "recovery_guidance": "Pick an org from list_orgs, or bind it first with bind_org or login."
+  }
+}

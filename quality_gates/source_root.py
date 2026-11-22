@@ -4,7 +4,7 @@ Gate and test machinery must resolve the CODE it runs from an explicitly
 named tree, never from ``sys.path``, a bare ``__file__``-relative guess, or
 whatever checkout happens to be invoking it — the invoking checkout and the
 tree under test are routinely different copies (a materialized candidate, a
-stale lane worktree, a linked worktree behind master). Confusing the two is
+stale linked worktree, a linked worktree behind master). Confusing the two is
 the wrong-tree defect class measured in ``iss_ec0db9c7`` / ``iss_77fe09ad``:
 a caller built the right candidate content, then ran the identity gate
 SCRIPT from wherever it happened to sit on disk in the invoking checkout,
@@ -43,9 +43,7 @@ def resolve_source_root(explicit_root: Path) -> Path:
         raise SourceRootError(f"source root is not a directory: {resolved}")
     marker = resolved / "quality_gates" / "__init__.py"
     if not marker.is_file():
-        raise SourceRootError(
-            f"source root does not contain a quality_gates package: {resolved}"
-        )
+        raise SourceRootError(f"source root does not contain a quality_gates package: {resolved}")
     return resolved
 
 
@@ -64,9 +62,7 @@ def gate_script_path(source_root: Path, relative_script: str) -> Path:
     try:
         candidate.relative_to(resolved_root)
     except ValueError as exc:
-        raise SourceRootError(
-            f"{relative_script!r} escapes its source root {resolved_root}"
-        ) from exc
+        raise SourceRootError(f"{relative_script!r} escapes its source root {resolved_root}") from exc
     if not candidate.is_file():
         raise SourceRootError(f"gate script does not exist: {candidate}")
     return candidate

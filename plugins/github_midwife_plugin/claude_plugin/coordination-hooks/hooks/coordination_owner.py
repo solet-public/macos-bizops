@@ -25,7 +25,6 @@ _SCHEMA = "solet_coordination_installation_v1"
 _RECEIPT_RELATIVE = Path("data/coordination-hooks/claude/installation.v1.json")
 _HASH = re.compile(r"[0-9a-f]{64}$")
 _CAPABILITIES = {
-    "heartbeat": "heartbeat_report_alive.py",
     "context_watch": "rotation_due_watch.py",
     "wake": "wake_waiter.py",
 }
@@ -106,14 +105,17 @@ def _managed(environ: Mapping[str, str]) -> bool:
     # A partial launch identity is never authority to invoke a coordination
     # bridge, watcher, or marker.  Only a completely unarmed process may take
     # the inert path; every supplied coordination hint must prove ownership.
-    return any(environ.get(name, "").strip() for name in (
-        "AGENT_INSTANCE_ID",
-        "AGENT_SESSION_ID",
-        "AGENT_WAKE_CLI",
-        _RECEIPT_ENV,
-        "SOLET_NAME",
-        _GAUGE_ENV,
-    ))
+    return any(
+        environ.get(name, "").strip()
+        for name in (
+            "AGENT_INSTANCE_ID",
+            "AGENT_SESSION_ID",
+            "AGENT_WAKE_CLI",
+            _RECEIPT_ENV,
+            "SOLET_NAME",
+            _GAUGE_ENV,
+        )
+    )
 
 
 def _verify_receipt_path(environ: Mapping[str, str]) -> tuple[dict[str, object], Path, Path]:
@@ -135,7 +137,7 @@ def _validate_surface_files(surface: dict[str, object], root: Path) -> None:
         raise ValueError("receipt surface files are not an object")
     file_names = {key for key in files if isinstance(key, str)}
     if len(file_names) != len(files) or file_names.symmetric_difference(_REQUIRED_FILES):
-        raise ValueError("receipt surface file set is incomplete")
+        raise ValueError("receipt surface file set is incomplete; republish the coordination receipt by running the existing-install migration")
     for filename in _REQUIRED_FILES:
         hook = _contained_file(root, root / filename, f"surface.files.{filename}")
         _digest_matches(hook, files.get(filename), f"surface.files.{filename}")

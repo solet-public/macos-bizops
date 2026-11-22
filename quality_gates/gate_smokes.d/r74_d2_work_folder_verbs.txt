@@ -1,0 +1,2 @@
+# r74-d2-a5: work folder verbs smoke; offline, exits 0 when run once under the gate environment.
+ananta/tests/lifecycle_management_service/work_folder_verbs_smoke.py

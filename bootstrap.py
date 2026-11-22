@@ -71,6 +71,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 
 from bootstrap_adapter.models import AdapterError, AdapterRuntime  # noqa: E402
 from bootstrap_adapter.postgres import atomic_write_scram_hba, postgres_binaries  # noqa: E402
+from bootstrap_adapter.postgres_install import install_pgvector_from_source, pgvector_build_commands  # noqa: E402
 from bootstrap_adapter.protocol import resolve_brew_executable  # noqa: E402
 
 __all__ = ["execute_adapter_request"]
@@ -90,6 +91,7 @@ def operation_adapter_main() -> int:
     from bootstrap_adapter import operation_adapter_main as run_adapter
 
     return run_adapter()
+
 
 # The solet-name grammar, inlined from
 # `github_midwife_plugin.constants.NAME_PATTERN` (== `is_valid_solet_name`).
@@ -515,24 +517,25 @@ def probe_pgvector(ctx: BootstrapContext) -> PgvectorState:
 
 
 def ensure_pgvector(ctx: BootstrapContext) -> dict[str, Any]:
+    """Leave a working pgvector alone; otherwise build the pinned source, because Homebrew's pgvector has no PostgreSQL 17 module."""
+
     state = probe_pgvector(ctx)
     if state is PgvectorState.AVAILABLE:
         return {"step_name": "pgvector", "status": "skipped", "state": state.value}
-    completed = _run_confirmed_brew_step(
-        ctx,
-        step_name="pgvector",
-        state=state.value,
-        command_arguments=(("install", "pgvector"),),
-        message_prefix="pgvector extension not available. Will run:",
-        declined_detail="user declined to install pgvector",
-        completed_state="installed",
-    )
-    if completed["status"] != "completed":
-        return completed
+    brew = _brew_executable(ctx)
+    if brew is None:
+        return {"step_name": "pgvector", "status": "needs_user_action", "state": state.value, "detail": "Homebrew executable is unavailable"}
+    message = "pgvector extension not available for PostgreSQL 17. Will check the Xcode Command Line Tools, then build the pinned, checksummed source with:\n  " + "\n  ".join(pgvector_build_commands())
+    if not ctx.confirm(message):
+        return {"step_name": "pgvector", "status": "needs_user_action", "state": state.value, "detail": "user declined to build pgvector"}
+    try:
+        install_pgvector_from_source(_resolution_runtime(ctx), brew)
+    except AdapterError as exc:
+        raise BootstrapError(str(exc)) from exc
     state_after = probe_pgvector(ctx)
     if state_after is not PgvectorState.AVAILABLE:
-        raise BootstrapError("pgvector install reported success but the extension is still not available")
-    return completed
+        raise BootstrapError("pgvector build reported success but the extension is still not available")
+    return {"step_name": "pgvector", "status": "completed", "state": "installed"}
 
 
 # ── Role + database + scram (NO credential value -- Layer 1's job) ─
@@ -816,11 +819,7 @@ def _write_default_scram_block(ctx: BootstrapContext, pg_hba_path: Path) -> None
         atomic_write_scram_hba(pg_hba_path)
     except AdapterError as exc:
         if "safety or layout changed" in str(exc):
-            raise BootstrapError(
-                "pg_hba.conf layout is unrecognized or unsafe; inspect the file, "
-                "extend the recognizer or edit it manually, and re-run bootstrap. "
-                "bootstrap will not auto-write an unrecognized authentication file"
-            ) from exc
+            raise BootstrapError("pg_hba.conf layout is unrecognized or unsafe; inspect the file, extend the recognizer or edit it manually, and re-run bootstrap. bootstrap will not auto-write an unrecognized authentication file") from exc
         raise BootstrapError(f"could not safely apply pg_hba.conf SCRAM policy: {exc}") from exc
     except OSError as exc:
         raise BootstrapError(f"could not safely apply pg_hba.conf SCRAM policy: {exc}") from exc
@@ -859,21 +858,14 @@ def ensure_lm_server(ctx: BootstrapContext) -> dict[str, Any]:
             "step_name": "lm_server",
             "status": "needs_user_action",
             "state": state.value,
-            "detail": (
-                f"LM Server is running but {_REQUIRED_EMBEDDING_MODEL_ID!r} is not loaded. "
-                f"Fetch it — the full HF URL is required, the owner/repo shorthand fails:\n"
-                f"  lms get \"https://huggingface.co/gaianet/Nomic-embed-text-v1.5-Embedding-GGUF\" --yes"
-            ),
+            "detail": (f'LM Server is running but {_REQUIRED_EMBEDDING_MODEL_ID!r} is not loaded. Fetch it — the full HF URL is required, the owner/repo shorthand fails:\n  lms get "https://huggingface.co/gaianet/Nomic-embed-text-v1.5-Embedding-GGUF" --yes'),
         }
     return {
         "step_name": "lm_server",
         "status": "needs_user_action",
         "state": state.value,
         "detail": (
-            f"no local embeddings server reachable at {_LM_SERVER_BASE_URL}. Install/launch LM Studio, "
-            f"enable server mode, then fetch {_REQUIRED_EMBEDDING_MODEL_ID!r} — the full HF URL is required, "
-            f"the owner/repo shorthand fails:\n"
-            f"  lms get \"https://huggingface.co/gaianet/Nomic-embed-text-v1.5-Embedding-GGUF\" --yes"
+            f'no local embeddings server reachable at {_LM_SERVER_BASE_URL}. Install/launch LM Studio, enable server mode, then fetch {_REQUIRED_EMBEDDING_MODEL_ID!r} — the full HF URL is required, the owner/repo shorthand fails:\n  lms get "https://huggingface.co/gaianet/Nomic-embed-text-v1.5-Embedding-GGUF" --yes'
         ),
     }
 

@@ -1,4 +1,4 @@
-"""Generic Salesforce calls through the existing pinned-org CLI transport.
+"""Generic Salesforce calls through the CLI transport of the bound org a call names.
 
 No operation policy lives here: Salesforce decides what its credential may do.
 Only request framing and credential/tenant integrity are checked locally.

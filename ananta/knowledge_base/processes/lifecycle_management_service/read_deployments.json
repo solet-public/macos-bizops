@@ -1,0 +1,18 @@
+{
+  "process_key": "service_interface::lifecycle_management_service::read_deployments",
+  "display_name": "Read Deployments",
+  "description": "Read the solet's own deployment records. Use it to answer what is deployed now and since when, to list past deployments, or to re-read one record before changing it. Mode 'current' returns the newest deployment by deployed_at whose state is 'recorded' (zero or one row; a withdrawn row is skipped). Mode 'history' returns deployments newest first with withdrawn rows included, a page of 'limit' rows (default 20, maximum 100) and a 'next' token to pass as 'after' for the following page. Mode 'get' returns one row by deployment_id and needs that parameter. Every mode is scoped to solet_name. No side effects.",
+  "embedding_description": "What is deployed right now and since when for this solet. List past deployments newest first, page through them, or look up one deployment by id. Read-only view of the deployment records.",
+  "result_processor_customizations": {
+    "action_label": "Deployments read",
+    "result_type": "deployment_list",
+    "result_description": "Object with rows (list of deployment rows, each with deployment_id, solet_name, release_id, git_sha, deployed_at, trigger, state, version) and next (string token for the next history page, or null). Mode current returns zero or one row; mode get returns exactly one row.",
+    "presentation_guidance": "For current, state the release id, short sha and deployed_at, or say plainly that nothing is recorded. For history, one line per row with release, sha, time and state; mark withdrawn rows. If next is not null, say more pages exist.",
+    "output_action_guidance": "Pass the row's version as expected_version to set_deployment_state if a change follows. Pass next as after to read the following page. Do not re-read immediately to confirm; one read is authoritative for the moment."
+  },
+  "error_processor_customizations": {
+    "action_context": "Reading deployment records of one solet from the solet's own database through the state service",
+    "error_interpretation": "invalid_argument: mode is not current, history or get, mode get has no deployment_id, limit is outside 1..100, or after is not a next token from a previous page. unknown_deployment: mode get found no record with that id for that solet. state_service_unavailable: the state service is not bound. The code is in data.error_code and prefixes the error text.",
+    "recovery_guidance": "For invalid_argument, fix the named parameter; for after, restart from the first page. For unknown_deployment, read mode history to find the right id and check solet_name. For state_service_unavailable, wait for the solet to finish starting and retry once."
+  }
+}

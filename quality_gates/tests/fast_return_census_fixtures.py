@@ -299,6 +299,32 @@ def _audit(event: str, args: tuple[Any, ...]) -> None:
         guard.refuse(f"uninstrumented host boundary: {event}")
 
 
+def _linked_dependency_roots(site: Path) -> set[Path]:
+    """Collect site-package parents of symlinked dependencies."""
+    return {entry.resolve().parent for entry in site.iterdir() if entry.is_symlink() and entry.resolve().parent.name in {"site-packages", "dist-packages"}}
+
+
+def _declared_dependency_roots(site: Path) -> set[Path]:
+    """Collect site-package directories declared by plain path-file lines."""
+    roots: set[Path] = set()
+    for pth_file in site.glob("*.pth"):
+        for line in pth_file.read_text(encoding="utf-8").splitlines():
+            path = Path(line)
+            if line.startswith("/") and path.is_dir() and path.resolve().name in {"site-packages", "dist-packages"}:
+                roots.add(path.resolve())
+    return roots
+
+
+def _site_dependency_roots(sites: set[Path]) -> set[Path]:
+    """Collect dependency stores linked or declared by interpreter site paths."""
+    roots: set[Path] = set()
+    for site in sites:
+        if site.is_dir():
+            roots.update(_linked_dependency_roots(site))
+            roots.update(_declared_dependency_roots(site))
+    return roots
+
+
 def library_roots() -> tuple[Path, ...]:
     """Include active interpreter libraries and their linked dependency stores.
 
@@ -306,15 +332,15 @@ def library_roots() -> tuple[Path, ...]:
     packages. Third-party distributions are symlinked individually to the
     installed dependency store, so resolving sys.prefix alone does not cover
     their physical source and bytecode paths. Read permission follows those
-    links only to a site-packages or dist-packages parent.
+    links only to a site-packages or dist-packages parent. A path file may also
+    declare the dependency store.
 
     This does not admit arbitrary link targets or another first-party tree.
     Plugin class origins still have to belong to the measured repository.
     Writes remain confined to the caller's scratch even for library files.
     """
     sites = {Path(sysconfig.get_path(name)).resolve() for name in ("purelib", "platlib")}
-    linked = {entry.resolve().parent for site in sites if site.is_dir() for entry in site.iterdir() if entry.is_symlink()}
-    return tuple(sorted(sites | {path for path in linked if path.name in {"site-packages", "dist-packages"}}))
+    return tuple(sorted(sites | _site_dependency_roots(sites)))
 
 
 def _owned_descriptor_path(guard: _AuditGuard, identity: os.stat_result) -> Path:

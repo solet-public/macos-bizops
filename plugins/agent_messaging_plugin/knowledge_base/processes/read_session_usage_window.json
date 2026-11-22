@@ -9,7 +9,7 @@
     "result_type": "read_session_usage_window_result",
     "result_description": "The raw S1 response unchanged when priced is absent/false; priced mode preserves those fields and adds pricing_by_model, unpriced_token_count and unpriced_models.",
     "presentation_guidance": "Keep S1 completeness status and advisories with the token totals. When priced, distinguish priced USD from known unpriced tokens, name the per-model basis, and state that the USD is a catalog estimate. Do not claim unknown model usage is free or complete when S1 reports partial/bounded data.",
-    "output_action_guidance": "Pass since, until and vendor unchanged to S1. Set priced=true only when USD estimates are wanted. Leave runtime_session_ids, unit_id and agent_instance_id out of this window call."
+    "output_action_guidance": "Pass since, until and vendor unchanged to S1. Set priced=true only when USD estimates are wanted. Leave runtime_session_ids and agent_instance_id out of this window call."
   },
   "error_processor_customizations": {
     "action_context": "One read-only S1 window request, followed by in-memory S2 pricing only when priced=true. No persisted pricing cache or writes.",

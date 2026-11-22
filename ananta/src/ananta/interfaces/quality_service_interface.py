@@ -85,20 +85,20 @@ class QualitySmokeProofInterface(ABC):
         ...
 
     @abstractmethod
-    def ensure_full_smoke_schedule(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
-        """Ensure the six-hour full battery and five-minute durable retry schedules."""
+    def trigger_full_smoke_battery(self, trigger: str = "manual", *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Request a full battery run of the newest master commit; it runs once, after any run in progress."""
         ...
 
     @abstractmethod
-    def trigger_full_smoke_battery(self, trigger: str = "schedule", *, call_context: CallContext | None = None) -> dict[str, Any]:
-        """Queue a full battery or retry pending work off the action queue."""
+    def list_full_smoke_campaigns(self, finished_after: str | None = None, limit: int = 50, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Read closed full-battery campaign records, oldest first, without changing them."""
         ...
 
 
 class QualityServiceInterface(QualitySmokeProofInterface):
     """Enumerate, run, and read-only verify platform quality/landing evidence."""
 
-    INTERFACE_VERSION: ClassVar[str] = "1.2.0"
+    INTERFACE_VERSION: ClassVar[str] = "2.0.0"
 
     @abstractmethod
     def list_gates(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
@@ -136,7 +136,6 @@ class QualityServiceInterface(QualitySmokeProofInterface):
     @abstractmethod
     def verify_hash_manifest(
         self,
-        unit_id: str,
         root_path: str,
         manifest: dict[str, str],
         *,
@@ -149,7 +148,7 @@ class QualityServiceInterface(QualitySmokeProofInterface):
     def predict_gate_smokes_merge(
         self,
         base_ref: str,
-        lane_root_path: str,
+        candidate_root_path: str,
         current_master: str,
         register_path: str = "quality_gates/gate_smokes.txt",
         *,

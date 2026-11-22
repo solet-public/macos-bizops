@@ -8,42 +8,67 @@ Article Role: plugin_reference
 
 Article Tags: planning-stage:agent-to-agent-coordination, evidence-category:operator-ruling, domain:agent-messaging, domain:managed-dispatch
 
-Embedding Description: Current open dispatch-kind provenance, scope tags, selector receipt replay, retired state-schema model floor, and separation of Main-seat launcher choice from work-unit selection.
+Embedding Description: How any session or outside caller chooses a capable model cell by required score and optional narrowing, using the solet's cost objective and returning alternatives, notices, catalog guidance, usage weights, and pin behavior.
 
 ## Current contract
 
-The source is `plugins/agent_messaging_plugin/model_dispatch_policy.v1.json`
-(`schema_version: 2`, `policy_version: model-dispatch-policy-v3`). It is read for each managed spawn. The historical `.v1.json` filename remains the consumer path. The schema contains only version, dispatch-kind provenance examples, and capability floors; the retired `orchestrator` field or any other extra top-level field refuses policy loading.
-Its `dispatch_kinds` section is an empty object because dispatch kinds are
-open provenance text, not a model-pair assignment map. The policy parser checks
-its shape and rejects nonempty rule objects; it does not restrict callers to
-keys in that section. Project Solet's `UnitDispatch.__post_init__` accepts
-nonblank unit-kind text. All 16 kind values observed in the live register on
-2026-09-24, including `test`, `implement`, `implementation`, `integration`,
-`smoke-test`, and `build`, therefore pass as provenance. An additional
-nonblank phase minted later also passes without a policy edit. Blank or
-non-string values refuse; no case folding, aliasing, or score change occurs.
+`select_dispatch_tier` takes the capability a job needs as `required_score` and
+optional narrowing: `runtime`, an exact named model and effort with its
+`pin_basis`, `effort_ceiling`, excluded model prefixes and runtimes,
+`score_margin`, `cost_tolerance`, and `max_staleness_hours`. Any session or
+outside caller may use it. The verb resolves the cost objective from the
+solet's own usage plan and returns the chosen cell with its alternatives,
+shortfall or exclusion counts, and notices; callers do not choose a separate
+cost objective.
 
-`spawn_session` and `dispatch_managed_work` require `dispatch_kind`.
-`select_dispatch_tier` may omit it; when supplied, it uses the same nonblank
-text rule. `reviewed_report_vendor` and `pair_id` are optional provenance
-fields. A selector receipt records the required score, billing objective,
-selected runtime/model/effort, policy version, and applied floors. Managed
-spawn replays an enforced receipt for the exact tuple.
-
-`select_dispatch_tier` also takes an optional `runtime` (`claude_code` or
-`codex`). A coordinator that has chosen the runtime passes it so the cheapest
-cell of the other runtime cannot dominate its choice out: the catalog is
-filtered to that runtime before domination and selection, and the selector
-stays cheapest-within-runtime with no runtime preference of its own. The
-receipt carries the value as `runtime_constraint` (null when absent), replay
-re-applies it, and a receipt without that key is refused; re-select to get one.
+The catalog is filtered to an explicitly supplied runtime before comparison.
+Without that narrowing, all runtimes compete. The selector chooses the
+cheapest enabled accepted scored cell that clears the effective threshold, or
+the strongest eligible enabled cell with an explicit shortfall when none
+clears it. Freshness is reported and a refresh is requested when needed;
+stale readings remain usable.
 
 Allowance pools are independent telemetry. Record/read/retract verbs retain
 operator readings, expiry and pool identity. No exhausted, unknown, missing,
-expired or unreadable allowance reading affects selection, pins, cost ranking
-or receipt replay. Selection does not read these records and carries no quota
-admission, quota advisory or expired-reading fields.
+expired or unreadable allowance reading affects selection, pins, or cost
+ranking. Selection does not read these records and carries no quota admission,
+quota advisory or expired-reading fields.
+
+It takes no kind of work. A rule scoped to a kind reaches a grant only through `select_model_cell_for_kind` (see Kinded rules and the rule layer below), which applies that kind's rules and then calls this selector with the caller's `required_score` and narrowing.
+
+## Above-ceiling selection and shortfall
+
+Within the requested runtime, the ordinary path still picks the cheapest
+eligible cell clearing `required_score + score_margin`. If none clears, the
+selector returns the strongest eligible enabled cell with
+`selection_mode: strongest_available`. It ranks by descending measured
+`capability_score`, then lexical runtime, model and effort, independently of
+cost, preference weights and input order. A strongest-score tie is counted in
+`advisories.strongest_score_tie` and disclosed in a `STRONGEST SCORE TIE` warning.
+
+The optional `shortfall` object contains `required_score`,
+`effective_required_score`, `capability_score` and positive `gap` (effective
+threshold minus the selected measured score). A prominent `CAPABILITY SHORTFALL`
+warning names those numbers and the selected tuple. Keep the original difficulty
+score and dispatch the selected cell. `excluded.below_threshold` counts failed
+clearance even when those eligible cells enter strongest selection. Stale selected
+fallback readings keep their age and refresh notices. A fresh clearing selection
+omits `shortfall`; pins retain their existing `pin_below_threshold` semantics.
+
+Operator-disabled, unknown-effort, unaccepted, unpriced and per-call
+constrained cells remain ineligible. `catalog_empty` means no enabled scored
+cells; `catalog_unknown_effort` means no enabled effort can be ordered;
+`catalog_unaccepted` means none of the enabled known-effort cells is accepted;
+`catalog_ineligible` names the actual price or constraint exclusions.
+These are empty-set refusals, separate from a capability shortfall.
+
+This is immutable per-call evidence: correct or clear inputs by selecting again.
+The selection result is the complete answer for the call; there is no separate
+token or stored selector result.
+Carry the shortfall and warnings onto the Unit when the caller supports them.
+The dispatching engine’s `dispatch-lane` and `delivered-to-review` discard them on
+success; persisting them on the Unit is separate follow-on work. This selector change
+makes the shortfall loud in the verb reply, without claiming Unit persistence.
 
 ## Model catalog policy and source lifecycle
 
@@ -64,8 +89,9 @@ continue by passing that exact `[revision, id]` as `after` with the same
 `expected_revision`, `predecessor_revision_id`, server-derived `actor`,
 `reason`, `action`, `recorded_at`, and `lifecycle_state`.
 
-The Operator-only writers are `set_model_catalog_policy` and
-`set_model_catalog_source`. Both require `stable_id`, `action`,
+The writers are `set_model_catalog_policy` and `set_model_catalog_source`;
+any session with a derived identity may call them, and holding Operator is
+not required. Both require `stable_id`, `action`,
 `expected_revision`, and a nonblank `reason`. An initial `set` creates an
 absent record with an explicit `expected_revision: null`; existing-record
 actions use the positive revision returned by `read_model_catalog_policy`.
@@ -105,14 +131,17 @@ of model-cell enablement. Read source current/history with
 `read_model_catalog_policy` using `kind: "source"` and the same stable id.
 
 These processes do not fetch networks, apply schemas, resolve credentials,
-deploy, or manage sessions. The server derives the current Operator identity;
-callers must not supply `actor`, `agent_session_id`, or `agent_instance_id`.
+deploy, or manage sessions. The server derives the calling session and records
+it with the required `reason` in the immutable history; that history is
+advisory data about who changed what, not an authority check. Callers must not
+supply `actor`, `agent_session_id`, or `agent_instance_id`.
 On `parameter_invalid`, correct the action, kind, stable id, reason, typed
 values/clear fields, revision, or pagination frontier. On
 `stale_catalog_revision`, read current state again and make a new decision.
 On `invalid_transition`, read `lifecycle_state` before choosing retire or
-reopen. `operator_required` means invoke from the currently bound Operator;
-`operator_identity_spoofed` means remove caller identity fields.
+reopen. `dispatch_authentication_required` and `dispatch_identity_unregistered`
+mean call from a registered session with a derived identity (no role is
+needed); `operator_identity_spoofed` means remove caller identity fields.
 `state_service_unavailable` means restore the state-service binding and retry
 after checking current state. These errors never justify inventing defaults or
 partially applying a revision.
@@ -122,16 +151,18 @@ partially applying a revision.
 Every catalog cell has `enabled=true` by default, independently of acceptance.
 `select_dispatch_tier` applies this filter once before pins, constraints,
 frontier and ladders. Disabled cells remain visible in catalog and policy reads.
-Existing receipt replay uses the same filter; disabling a selected cell makes
-its previous receipt fail replay. Re-enable restores eligibility and retains
-scores and acceptance. Seed, refresh, harness withdraw/reinstate and manual
+The selector uses the same filter; disabling a selected cell removes it from
+the next selection. Re-enable restores eligibility and retains scores and
+acceptance. Seed, refresh, harness withdraw/reinstate and manual
 recording preserve existing flags. New cells evaluate the standing policy.
 
-The current Operator calls `read_model_cell_policy` first, then passes its
-`updated_at` as `expected_updated_at` to `set_model_cells_enabled`, with a
-nonempty reason. Only the initial uninitialized policy accepts an explicit null
-premise. The wrapper derives session identity from server state and checks the
-current Operator binding on each call; caller actor strings confer no authority.
+Any session with a derived identity calls `read_model_cell_policy` first, then
+passes its `updated_at` as `expected_updated_at` to `set_model_cells_enabled`,
+with a nonempty reason; holding Operator is not required. Only the initial
+uninitialized policy accepts an explicit null premise. The wrapper derives the
+calling session from server state on each call and records it with the reason
+in the immutable history as advisory data about who changed what; caller actor
+strings are refused, never trusted.
 
 Examples below are verb parameters (substitute the latest premise for `STAMP`):
 
@@ -145,7 +176,7 @@ Examples below are verb parameters (substitute the latest premise for `STAMP`):
 ```
 
 Dimensions combine with AND; absent dimensions are wildcards. Ordered rules
-use the last matching decision, with default-on. A zero-match rule is retained
+use the last matching decision, with default-on. A rule with a kind decides only for requests of that kind (see Kinded rules and the rule layer). A zero-match rule is retained
 for future models and produces an advisory. Normal set adds a rule and preserves
 unrelated rules; correct replaces an identified rule, retire/clear with a rule
 id removes it. Clear without a rule id restores all-on. The only form atomically
@@ -155,6 +186,120 @@ Stale premises refuse without partial writes. Malformed stored policy is an
 integrity error. Current readback includes rule identifiers, cell provenance,
 and bounded immutable policy_change history (history_limit 1..100); per-cell
 history includes enabled_change observations. Immutable history is never cleared.
+
+### Preference weight
+
+The operator's preference between models that can both do the job (for example
+Sonnet over Opus) changes often, so it is one verb call on the same policy, with
+the same premise, audit and history, and no landing. A rule may carry a `weight`:
+a positive finite number, `1.0` when no rule sets one. When `select_dispatch_tier`
+chooses, it scales each cell's cost by the weight of the last matching weight rule,
+under every billing objective (`metered_usd`, `relative` and `allowance_weighted`),
+so callers that hard-code `metered_usd` get the preference with no change of their
+own. Below 1 favors a model; above 1 disfavors it.
+
+Three different things, kept apart on purpose:
+
+- **Preference is weight.** It orders the choice among cells that already clear the
+  score. It never makes a cell clear a score it does not, and nothing is a last
+  resort: a weight does not exclude a cell, it only makes it less or more likely.
+- **Disabled is off.** A weight rule has no opinion on `enabled`. A cell turned off
+  by an `enabled` rule stays off under any weight, and a pin to it is still refused.
+  Weight and enablement resolve independently, the last matching rule that carries
+  each one winning, so setting a weight on a family never re-enables a cell an
+  earlier rule disabled, and never disables one a later rule enabled.
+- **The weight is not a cost.** It is the ordering key inside the selector and is
+  never written into a reported figure. `cost_per_task_usd`, `relative_cost_multiplier`,
+  the effort ladder, `pin_cost_delta`, the frontier and the dominated pairs keep the
+  true cost, so usage meters and cost reports match what was spent. The selection
+  adds `preference: {weight, rule_id}` as advisory data when a weight rule applied to
+  the chosen cell; the selection result reports the applied weight and rule id.
+
+Worked example, the live catalog at score 55 under `metered_usd`: Sonnet 5.5 max costs
+$10.02 and Opus 5.5 xhigh costs $6.05, so Opus is chosen. With one rule
+`{"selector":{"model_family_prefix":"claude-sonnet"},"weight":0.5}` Sonnet orders at
+$5.01 against Opus at $6.05 and is chosen, and it is still reported at $10.02. At score
+57 only Opus xhigh clears, so Opus is chosen whatever the weight.
+
+```json
+{"selector":{"model_family_prefix":"claude-sonnet"},"weight":0.5,"expected_updated_at":"STAMP","reason":"prefer Sonnet where it can do the job"}
+{"action":"correct","rule_id":"RULE","selector":{"model_family_prefix":"claude-sonnet"},"weight":0.8,"expected_updated_at":"STAMP","reason":"prefer Sonnet less"}
+{"action":"correct","rule_id":"RULE","selector":{"model_family_prefix":"claude-sonnet"},"enabled":true,"expected_updated_at":"STAMP","reason":"keep the rule, drop the weight"}
+{"action":"retire","rule_id":"RULE","expected_updated_at":"STAMP","reason":"no preference"}
+```
+
+A rule carries `enabled`, `weight` or both, and at least one; a null or omitted one is
+no opinion. `correct` replaces the rule with exactly what is supplied, so a correction
+without `weight` clears it, and `retire` removes the rule and its weight. Readback
+returns each rule with its weight and each cell's `preference_weight` with
+`preference_provenance` (a rule id, or `default_weight`). A stored rule list without
+weights reads and selects exactly as before. `only=true` replaces every rule, weight
+rules included, and says which weight rules it replaced; the history snapshot keeps them.
+
+Things to know when changing a weight:
+
+- Under `allowance_weighted` the plan's declared dispatch weight and the policy
+  weight both multiply, because they are two preferences (the plan table and the
+  operator's); a weight of 0.5 in both gives 0.25.
+- A new selection reads the live policy like it reads the live enabled flags, so
+  a changed weight affects the next choice.
+- If the stored policy cannot be read, selection does not stop: it chooses by cost
+  with every weight 1.0 and adds a warning saying the weights were not applied.
+
+## Kinded rules and the rule layer
+
+A rule may name one kind of work. `kind` is one nonempty word with no whitespace,
+matched exactly; the solet keeps no list of kinds and no floor per kind. `words` keeps
+the user's words on the rule, defaults to the reason, and is shown wherever the rule is
+read. `ends_at` is an offset-bearing ISO timestamp. At that instant the rule has no
+opinion and reads as `lapsed`; the end is exclusive. A rule without a kind applies to
+every request. Ordered rules still use the last applicable decision, and `enabled` and
+`weight` still resolve independently.
+
+Three verbs are involved, and only one of them reads the kind:
+
+- `select_model_cell_for_kind` takes the kind, the caller's `required_score` and the
+  narrowing the selector already accepts (`runtime`, `pin` with `pin_basis`,
+  `effort_ceiling`, `exclude_model_prefixes`, `exclude_runtimes`). It applies the global
+  rules and the rules for that kind at the call's instant, takes each cell's enablement
+  and preference from that decision, and calls the capability selector with the
+  unchanged score and that narrowing. The answer returns the original score, the
+  selection evidence and a `grant` naming the kind, the deciding `rule_id` and its
+  `words`. A kinded weight rule scales the cost the rule layer's selection uses, for
+  that kind only. The rule layer is `model_kind_rule_layer.py`, apart from the selector.
+- `select_dispatch_tier` takes no kind. Its enablement is the stored cell flag, which only
+  rules without a kind set, so a kinded rule never reaches it.
+- Generic `spawn_session` takes no kind. It decides from the live global rules at the
+  start and refuses a cell they turn off with `model_cell_disabled`, naming the rule's id,
+  even when a kinded rule granted that cell.
+
+When a kind's rules leave no cell, the rule layer answers `no_rule_serves` with the kind,
+the `rule_id` and `words` of the rule that removed the last otherwise selectable cell. A
+grant describes a selection. It starts nothing.
+
+Example, two rules in order:
+
+```json
+{"selector":{},"enabled":false,"words":"Turn everything off.","expected_updated_at":"STAMP","reason":"everything off"}
+{"selector":{"model_family_prefix":"claude-fable"},"enabled":true,"kind":"planning","words":"Use Fable for planning.","expected_updated_at":"STAMP","reason":"Fable for planning"}
+```
+
+With those rules, `select_model_cell_for_kind` with kind `planning` grants a Fable cell,
+with `grant` set to the kind `planning`, the planning rule's id and `"Use Fable for planning."`.
+With kind `author`, or with no kind, no cell is left, and the answer is `no_rule_serves`
+carrying `"Turn everything off."` and the everything-off rule's id. `select_dispatch_tier`
+never selects the Fable cell, because its stored flag is off. A generic start of the Fable
+cell the grant chose is refused with `model_cell_disabled`, naming the everything-off rule:
+the kind steered the choice and never reaches the start. Once the planning rule's `ends_at`
+has passed, it reads as `lapsed`, grants nothing, and `planning` gives the same
+`no_rule_serves` answer as `author`.
+
+Live reads and the stored flag differ in time. `read_model_cell_policy`,
+`select_model_cell_for_kind` and generic start decide from the live rules at the call's
+instant, so an end time takes effect at once for them. `select_dispatch_tier` reads the
+stored flag, which only the next policy write brings up to date, so a global rule that
+lapses reaches it at that write. Check a rule's `lapsed` field before relying on the
+direct selector across an end time.
 
 ## Where the catalog's models come from: discovery, the harness pass and degraded mode
 
@@ -224,10 +369,10 @@ unconstrained or Codex selections are never weighted, so allowance units are not
 compared with dollars. A covering plan with no table keeps the metered-dollar
 ranking and the answer carries a `warnings` line, which is not a refusal. The
 answer's `cost_basis` names the plan, the table and the weight applied, and
-`frontier`, `dominated` and `ladder` are in weighted units. The receipt keeps its
-keys; `billing_objective` records the ranking, and replay recomputes it from the
-profile, so editing a weight makes an in-flight receipt mismatch until the
-dispatcher re-selects. Operator enablement and capability floors filter cells before ranking.
+`frontier`, `dominated` and `ladder` are in weighted units. The returned result
+names the resolved objective and the ranking uses the current profile, so
+editing a weight affects the next selection. Operator enablement and the score
+threshold filter cells before ranking.
 
 Two refusals belong to the weighted path. With a runtime constraint the profile
 is loaded to read its weights, so an unloadable or malformed profile (a bad
@@ -238,20 +383,14 @@ same runtime the weights would be ambiguous, so the selection also refuses
 
 ## Schema scope provenance
 
-`scope_tags: ["state_schema"]` records that a dispatch touches state schema.
-It is accepted as nonblank provenance and does not constrain the model pair.
-The `state_schema` capability floor was retired under operator ruling
-`rul_0c6ec7c7-70c6-442a-9695-3738efb61ccd`: `capability_floors` is now
-empty, and schema identifiers in a brief do not apply a model-choice gate.
-Selectors still require a fresh accepted catalog cell that clears the numeric
-difficulty score. Policy loading requires a `capability_floors` object and
-validates any configured future floor, but accepts an empty object and refuses
-an attempted restoration of the retired `state_schema` model floor.
+Schema identifiers in a brief do not alter model choice. Selectors require a
+fresh accepted catalog cell that clears the numeric difficulty score, and the
+catalog and its cell policy remain the sources of eligibility and ranking.
 
 The ruling's remedy is a state-documentation link and mechanically assembled
 linked information in each schema-touching work-unit brief. This policy change
 does not implement brief assembly; `iss_25f79570-9b0d-48e7-a73f-e3a56242b181`
-tracks retirement of the model floor in this candidate.
+tracks the related documentation and assembly work.
 
 The landing companion `quality_gates/schema_init_gate.py` boots the real
 `initialize_schemas` path against a candidate tree. A successful dispatch
@@ -267,16 +406,12 @@ temporarily callable as a no-op for active Claude processes retaining a cached
 hook command; it makes no model or role-authorization decision. After relevant
 seats confirm settings reload, a separate cleanup can remove the script and its
 registered transition smoke. The server still authenticates managed-dispatch
-role authority and replays selection receipts before host dispatch.
+role authority before host dispatch.
 
-The dispatch ledger records kind, declared scope tags, and applied floors
-(currently empty) with source and detail. A missing or blank spawn kind returns
-`dispatch_kind_required`; a non-string kind returns
-`dispatch_policy_violation`. Missing or malformed policy/profile data returns
-`dispatch_policy_unavailable` or `dispatch_policy_invalid`. A blank or
-non-string scope tag returns `scope_tag_invalid`. A forged, absent, or stale
-selection receipt and a caller without the held coordinator role retain their
-server-side refusals.
+The dispatch ledger records source and detail. Missing or malformed
+policy/profile data returns `dispatch_policy_unavailable` or
+`dispatch_policy_invalid`; the caller without the held coordinator role
+retains its server-side refusal.
 
 ## Usage and the two meters
 
@@ -286,7 +421,7 @@ Extension Contract](16_usage_meters_and_extension_contract.md). This article
 defines the dispatch-plugin behavior; the companion explains how to interpret
 its readings without turning allowance percentages into token or dollar usage.
 
-`read_unit_usage` joins every managed session for one `unit_id`, or one
+`read_label_usage` joins every managed session for one `label`, or one
 `agent_instance_id`, to the runtime ids in `session_claude_mapping` plus that
 worker's current `session_context_status`. It asks the session ledger for S1
 totals in bounded groups of at most 200 ids. `coverage` is `full` only when
@@ -311,11 +446,11 @@ model stays `unknown`, is counted in notes, is not a mismatch, and is priced as
 `unpriced:model_unknown`. Historical runtime ids whose effort cannot be
 matched to current context stay at effort `unknown` and are counted.
 
-The estimate is independent of the actual-token meter. The earliest managed
-session with a selection receipt supplies `estimate.basis: receipt` and its
-selected cell/cost. With no receipt, the highest-output observed tuple is
+The estimate is independent of the actual-token meter. The highest-output
+observed (runtime, model, effort) tuple, the model the session actually ran, is
 looked up in the accepted capability catalog (`catalog_lookup`); with no
-matching cell or no observed tuple the estimate basis is `none`. `as_of` uses
+matching cell or no observed tuple the estimate basis is `none`. Stored dispatch
+choices are not read. `as_of` uses
 the oldest available last-poll/event bound across the joined ids, and
 `lag_seconds` measures its age at read time.
 
@@ -358,12 +493,12 @@ allowance into token usage or a cash charge.
 
 ## References
 
-- `plugins/agent_messaging_plugin/model_dispatch_policy.v1.json`
-- `plugins/agent_messaging_plugin/src/agent_messaging_plugin/model_dispatch_policy.py`
 - `plugins/agent_messaging_plugin/src/agent_messaging_plugin/model_capability_verbs.py`
 - `plugin::agent_messaging_plugin::spawn_session`
 - `plugin::agent_messaging_plugin::dispatch_managed_work`
 - `plugin::agent_messaging_plugin::select_dispatch_tier`
+- `plugin::agent_messaging_plugin::select_model_cell_for_kind`
+- `plugins/agent_messaging_plugin/src/agent_messaging_plugin/model_kind_rule_layer.py`
 - `quality_gates/schema_init_gate.py`
 
 ## Constraints
@@ -375,19 +510,17 @@ before feasibility, domination and the selected model's ladder. A dropped cell
 has one reason: runtime first, model prefix second, effort ceiling last. Active
 constraints add `constraint_runtime`, `constraint_model_prefix` and
 `constraint_effort_ceiling` counts; unconstrained answers retain existing counts.
-An empty constrained set returns `no_cell_clears_threshold` with those counts.
+An empty constrained eligible set returns `catalog_ineligible` with those counts.
 Clear or correct the inputs and select again; stale readings
 remain advisory.
 
-Every new immutable receipt includes the three inputs, defaulting to null and
-empty lists. Spawn replay uses the same constraints and compares canonical copies;
-predeploy seven-key receipts use absent defaults and return unchanged. Unknown
-receipt fields still refuse. Correct or clear inputs by issuing a new selection,
-never editing a saved receipt. Existing dispatch history provides readback; no
-new mutable object or storage is introduced. Pin selection belongs to s2.
+Every selection result includes the applied constraints and freshness details.
+Correct or clear inputs by issuing a new selection; no mutable selector result
+is edited or stored. Existing dispatch history provides readback; no new
+mutable object or storage is introduced. Pin selection belongs to s2.
 
 
-## Pin and receipt replay
+## Pin
 
 `select_dispatch_tier` accepts `pin={runtime,model,effort}` and nonempty
 `pin_basis` caller provenance under the existing process authorization. The
@@ -397,21 +530,17 @@ nearest accepted scored cells in that runtime, ordered by score distance,
 objective cost, model and effort. Catalog refresh/manual cell recording supplies
 accepted scored measurements; pricing alone supplies no capability score.
 
-A pin overrides threshold, effort/model/runtime constraints and capability floor; it never overrides operator enablement. Answers carry `selection_mode=pinned`, `pin_basis`,
-`pin_overrides_constraints`, `pin_below_threshold`, and `pin_cost_delta` against
-the cheapest feasible cell under the same objective. Unpriced pins and empty
-feasible sets have null delta. Floor overrides carry `pin_floor_disallowed` warnings. Stale selected pins appear in readings and
-advice even outside the feasible set. An unavailable advisory refresh-history
-read is logged and warned about and retains the refresh request; normal history
-reads still deduplicate. Catalog and receipt integrity faults still propagate.
+A pin overrides the threshold and the effort, model and runtime constraints;
+it never overrides operator enablement. Answers carry `selection_mode=pinned`,
+`pin_basis`, `pin_overrides_constraints`, `pin_below_threshold`, and
+`pin_cost_delta` against the cheapest feasible cell under the same objective.
+Unpriced pins and empty feasible sets have null delta. Stale selected pins
+appear in readings and advice even outside the feasible set. An unavailable
+advisory refresh-history read is logged and warned about and retains the refresh
+request; normal history reads still deduplicate. Catalog integrity faults
+still propagate.
 
-New receipts contain the original seven keys plus `pin`, `pin_basis`,
-`effort_ceiling` (null defaults), `exclude_model_prefixes` and `exclude_runtimes`
-(empty-list defaults). Spawn replay canonicalizes absent additions in copies,
-requires original keys, refuses unknown keys and selected-tuple mismatches, and
-returns the supplied receipt unchanged. Predeploy seven-key receipts and saved
-tiers need no replacement selection. Replay establishes selection consistency,
-not historical provenance authenticity; managed-session retry integrity still
-protects the stored receipt. Correct pin/basis by issuing a new selection; clear
-both to null for cheapest mode. Issued receipts remain immutable. No new stored
-object or lifecycle service is introduced.
+The selection result includes the pin, its basis, constraint overrides, and
+cost delta when applicable. Correct pin/basis by issuing a new selection; clear
+both to null for cheapest mode. No new stored object or lifecycle service is
+introduced.

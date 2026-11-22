@@ -5,7 +5,9 @@ Mirrors the seed's ``target_reconciliation.detect_topology`` rule exactly
 is a materialized supervisor, a direct ``-m ananta.cli`` launch is the legacy
 direct vintage, and anything else is unsupported.  The seed re-derives the
 same value from the same plist and refuses on disagreement, so this module
-must never grow a vintage the seed does not know.
+must never grow a vintage the seed does not know.  It also owns the reason the
+Manager gives for a supervisor launch that needs a restart it cannot perform,
+and the words that name the hand route.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ __all__ = [
     "LEGACY_DIRECT",
     "MATERIALIZED_SUPERVISOR",
     "PLIST_PARSE_ERRORS",
+    "SUPERVISOR_LAUNCH_NEEDS_HAND_ROUTE",
     "SUPPORTED_TOPOLOGIES",
     "UNSUPPORTED_TOPOLOGY",
     "derive_launch_topology",
@@ -28,12 +31,18 @@ __all__ = [
     "plist_label",
     "plist_program_arguments",
     "plist_sha256",
+    "supervisor_hand_route_guidance",
 ]
 
 LEGACY_DIRECT = "legacy_direct"
 MATERIALIZED_SUPERVISOR = "materialized_supervisor"
 UNSUPPORTED_TOPOLOGY = "unsupported_launch_topology"
 SUPPORTED_TOPOLOGIES = frozenset({LEGACY_DIRECT, MATERIALIZED_SUPERVISOR})
+
+#: The runtime preview's reason when a release needs a single-colour restart and the LaunchAgent runs the blue-green supervisor.
+SUPERVISOR_LAUNCH_NEEDS_HAND_ROUTE = "supervisor_launch_needs_hand_route"
+_HAND_ROUTE_ARTICLE: Final = "plugins/default_thinking_plugin/knowledge_base_joseki/deploy_local_blue_green_release.md"
+_HAND_ROUTE_SECTION: Final = "Installing a release the cutover refuses"
 
 
 def launchagent_plist_path(home: Path, label: str) -> Path:
@@ -72,6 +81,16 @@ def derive_launch_topology(raw: bytes) -> str:
     if "-m" in arguments and "ananta.cli" in arguments:
         return LEGACY_DIRECT
     return UNSUPPORTED_TOPOLOGY
+
+
+def supervisor_hand_route_guidance(label: str) -> tuple[str, str]:
+    """``(message, repair)`` for ``supervisor_launch_needs_hand_route``.
+
+    Launchd runs the supervisor and never a colour, so no kill or kickstart can make a single-colour restart true there.
+    """
+    message = f"The LaunchAgent {label} launches this solet through the blue-green supervisor. This release needs a single-colour restart, which the Manager cannot do for a supervisor launch; nothing was started."
+    repair = f"Install this release by hand: follow `{_HAND_ROUTE_ARTICLE}`, section '{_HAND_ROUTE_SECTION}'."
+    return message, repair
 
 
 #: Every way ``plistlib.loads`` rejects bytes it cannot read.  This is the Manager's twin of the seed's ``target_reconciliation.PLIST_PARSE_ERRORS``:

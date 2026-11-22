@@ -1,7 +1,7 @@
 {
   "process_key": "service_interface::plugin_schema_service::get_installed_schema",
   "display_name": "Get Installed Plugin Schema",
-  "description": "Read-only introspection. Returns the recorded SchemaDefinition snapshot and per-table status (active or inactive) for the namespace, plus install/update/uninstall timestamps.",
+  "description": "Registered calls admit one schema-lifecycle job and return its job_id/status before the ownership read; read service_interface::job_service::get_job by that exact id for the snapshot. Read-only introspection. Returns the recorded SchemaDefinition snapshot and per-table status (active or inactive) for the namespace, plus install/update/uninstall timestamps.",
   "embedding_description": "Read-only introspection: return the recorded SchemaDefinition snapshot and per-table status (active/inactive) for a plugin namespace, plus install/update/uninstall timestamps. Returns object with namespace + tables map (each entry: status, schema_snapshot, installed_at, updated_at, uninstalled_at). Use to inspect what's installed before mutating; unknown namespace returns empty tables dict.",
   "result_processor_customizations": {
     "action_label": "Plugin schema fetched",

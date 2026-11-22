@@ -1,17 +1,21 @@
 # Security notes — coordination-hooks
 
-This page describes the reviewed data-flow surface. The plugin is fifteen Claude Code hooks/utilities:
+This page describes the reviewed data-flow surface. The plugin is fourteen Claude Code hooks/utilities:
 one context reminders entry (`step_zero_reminder.py`), live session context
 (`session_start_context.py`), `wake_waiter.py`,
-`heartbeat_report_alive.py`, `rotation_due_watch.py`, `rotation_due_notice.py`,
-`capture.py`, `session_context.py`, `drain.py`, `hydrate_render.py`,
+`rotation_due_watch.py` (the context gauge report), `capture.py`,
+`session_context.py`, `drain.py`, `hydrate_render.py`,
 `index_render.py`, `sync.py`, `headless_tool_allowlist_gate.py`, and
-`capture_session_mapping.py`, and `session_cron_sentinel.py`. The worker hooks are also registered in hooks.json.
+`capture_session_mapping.py`, `session_cron_sentinel.py`, and `recovery_claude.py`
+(working-tree recovery saves, described in its own section below). The worker hooks are also registered in hooks.json.
 The memory utilities share `_journal.py`. Four hooks share `_session_identity.py`
 (env-less session identity, described in its own section below).
+`recovery_claude.py` calls 23 engine modules that ship beside it as byte-identical
+copies; they are not hooks, and the recovery section inventories them.
 
 Six hooks/utilities can execute children: live session context, wake waiter,
-heartbeat, rotation-due watch, sync and the session-cron sentinel. The other nine hooks execute nothing.
+rotation-due watch, sync, the session-cron sentinel and `recovery_claude.py`
+(read-only git children, spawned only by the engine's `recovery_git.py`). The other eight hooks execute nothing.
 The first is a read-only observer described below; the existing four retain
 their documented effect and output boundaries.
 
@@ -27,14 +31,18 @@ An operator-guidance channel (`operator_guidance.js`) shipped here until
 2026-08-01, when the operator ruled it out of the plugin fleet-wide:
 deployment-specific guidance belongs in the project's own instruction files
 (`CLAUDE.md`), never in an environment-supplied variable a hook emits verbatim.
-The live register/inbox observations added here are bounded data, disclosed
+The live inbox and principle-statement observations added here are bounded data, disclosed
 below, and do not replace authoritative full reads. The guidance channel's removal is
 complete as of this page — no hook in this plugin emits environment-supplied
 prose, and there is no longer a full-trust content class to describe here.
 
 ## Inputs and outputs — the complete data-flow surface
 
-The heartbeat, rotation-due, and wake entrypoints first import
+The working-tree recovery hook's inputs, outputs, files and children are
+disclosed in its own section, *Working-tree recovery*, where the shipped-hook
+due-diligence checklist is answered item by item.
+
+The rotation-due watch and wake entrypoints first import
 `coordination_owner.py`. For a managed session it requires
 `AGENT_COORDINATION_RECEIPT_PATH` to be the fixed profile-data receipt for the
 exact `SOLET_NAME`, selector, selected root, manifest, interpreter, and hook
@@ -43,7 +51,7 @@ designation refuses before every marker, lock, watcher, lifecycle write, or
 bridge call. This receipt detects installed-state drift; it is not a grant of
 authority.
 
-The heartbeat's state lives under the runtime root the receipt names, in
+The rotation-due watch's state lives under the runtime root the receipt names, in
 directories named by the SHA-256 of `SOLET_NAME`, `AGENT_INSTANCE_ID` and
 `AGENT_SESSION_ID`. The receipt binds different files by surface: for an
 installed plugin, the plugin's own `coordination_owner.py`; for a development
@@ -57,9 +65,8 @@ Inputs, exhaustively:
   tool name, tool input, and — for the rotation-due watch hook only — its
   own `transcript_path`/`session_id`). Parsed defensively; malformed input
   degrades to a no-op (rotation-due watch, the
-  memory-passthrough capture/session-context hooks) or an allow (gate). The
-  heartbeat never reads stdin.
-- **Environment variables**: the live context uses `PROJECT_SOLET_CLI`,
+  memory-passthrough capture/session-context hooks) or an allow (gate).
+- **Environment variables**: the live context uses
   `SOLET_BRIDGE`, `SOLET_NAME`, `AGENT_SESSION_ID`, `AGENT_INSTANCE_ID`, and
   `HOME`, as described below. It does not read `AGENT_SESSION_LABEL`.
   `AGENT_SESSION_ID` also arms the wake waiter;
@@ -75,16 +82,14 @@ Inputs, exhaustively:
   `agent_messaging_plugin` module for threshold constants; and by every
   memory-passthrough file as the required root for deriving this agent's
   own memory directory and origin tag — see below), `AGENT_INSTANCE_ID`
-  (required by the heartbeat and rotation-due watch hooks — a functional
-  precondition: `report_alive`/`session_status` are both keyed on this id,
-  never a protection), `AGENT_SESSION_ID` and `AGENT_COORDINATION_RECEIPT_PATH`
-  (the heartbeat's owner receipt gate; `AGENT_CONTEXT_GAUGE_REPORTER_PATH`
-  selects the heartbeat's hook root; `AGENT_WAKE_CLI` is appended to `PATH`
-  only, see the heartbeat paragraph below), `AGENT_HEARTBEAT_MARKER_DIR`
-  (rotation-due watch's throttle-marker directory; the heartbeat never reads
-  it; when `AGENT_INSTANCE_ID` is set but this is not, rotation-due watch
-  falls back to a fixed OS-temp-dir marker root — see the "heartbeat and
-  rotation-due watch" section below), `SOLET_NAME` (rung 1 of the memory-passthrough origin-
+  (required by the rotation-due watch hook — a functional precondition: the
+  gauge row it reports is keyed on this id, never a protection),
+  `AGENT_SESSION_ID` and `AGENT_COORDINATION_RECEIPT_PATH` (the rotation-due
+  watch's owner receipt gate; `AGENT_CONTEXT_GAUGE_REPORTER_PATH` names which
+  copy of the watch hook is the designated reporter; `AGENT_WAKE_CLI` is
+  appended to `PATH` only, see the rotation-due watch section below;
+  `CLAUDE_EFFORT` is passed through as the reported effort),
+  `SOLET_NAME` (rung 1 of the memory-passthrough origin-
   resolution ladder — see the memory-passthrough section below; read-only,
   also required by the live inbox observer), `FLEET_HEADLESS_TOOL_ALLOWLIST` (arms
   the spawn-injected tool-allowlist gate — set only by a spawning host
@@ -93,16 +98,11 @@ Inputs, exhaustively:
   (the spool directory the spawn-injected session-mapping capture writes
   to — also adapter-supplied only). `step_zero_reminder.py` reads no
   environment variable at all — see the Configuration surface section.
-- **One local file read**: `~/.claude/sessions/<parent_pid>.json`, to
-  resolve the calling session's name (see the identity caveat below).
-- **Local state reads**: the heartbeat reads its owner receipt, the manifest
-  and the four hook files that receipt hashes, its failure record and its
-  worktree snapshot, and `stat()`s its throttle stamp and failure record. Its
-  git reads are listed in the heartbeat paragraph below. Rotation-due watch
-  `stat()`s its own throttle marker's mtime to decide whether to skip a
-  tick, and additionally reads its own latch marker's existence and the
-  calling session's **own** transcript file (never another session's) to
-  compute current context usage.
+- **Local state reads**: the rotation-due watch reads its owner receipt, the
+  manifest and the hook files that receipt hashes, `stat()`s its own throttle
+  marker's mtime to decide whether to skip a tick, and reads the calling
+  session's **own** transcript file (never another session's) to compute
+  current context usage and cache state.
 - **Memory-passthrough reads** (`capture.py`, `session_context.py`,
   `drain.py`, `hydrate_render.py`, `index_render.py`, `_journal.py`):
   this agent's own memory directory (existence check, and its contents
@@ -118,11 +118,10 @@ Inputs, exhaustively:
 Outputs, exhaustively:
 
 - **stdout**: `step_zero_reminder.py` emits a fixed knowledge-base reminder;
-  `session_start_context.py` emits bounded live register data, measured counts
+  `session_start_context.py` emits the solet's own principle statement, measured inbox counts
   and roles or explicit read-failure lines. `session_context.py` emits its
   existing instruction template over resolved paths and pending count.
-  `rotation_due_notice.py` emits the qualified notice described below.
-  Gate, heartbeat, rotation-due watch and capture have no context output.
+  Gate, rotation-due watch and capture have no context output.
   The four agent-invoked CLI
   utilities (`drain.py`, `hydrate_render.py`, `index_render.py`,
   `sync.py`) print their own result JSON to stdout when run — this is
@@ -135,24 +134,18 @@ Outputs, exhaustively:
   the trust-classes note below and in the Threat model section, never
   third-party or message content; the wake waiter's **fixed** nudge or
   fixed-format failure note (the numeric exit status is the only variable
-  part; the child's own output is discarded unread); the heartbeat and
-  rotation-due watch's fixed-template diagnostic lines on a missing
-  env var, an unreadable transcript, or a failed `solet` call; the
-  heartbeat's diagnostic lines, whose content classes are set out in its
-  failure paragraph below — always best-effort telemetry, never read by
+  part; the child's own output is discarded unread); the rotation-due
+  watch's diagnostic lines on a missing env var, an unreadable transcript, or
+  a failed `solet-bridge` call, whose content classes are set out in its
+  section below — always best-effort telemetry, never read by
   anything, never blocking;
   `hydrate_render.py`/`sync.py`'s own fixed-template failure lines
   (malformed record, unreachable platform on export) on their own error
   paths, same non-blocking telemetry contract.
-- **Local file writes**: the heartbeat writes three files under its
-  receipt-derived identity directory (see the heartbeat paragraph below): a
-  bare `str(time.time())` throttle stamp, a failure record, and a worktree
-  snapshot (worktree-resync.json). Rotation-due watch writes a bare
-  `str(time.time())` throttle/latch marker per `agent_instance_id` (and,
-  rotation-due watch only, a self-notification marker on the
-  no-steward-resolved path, carrying the hook's own generated notification
-  text — still same-user, same-machine content the hook itself generated,
-  never third-party input). The memory-passthrough files write more, by
+- **Local file writes**: the rotation-due watch writes one file, a bare
+  `str(time.time())` throttle marker per `agent_instance_id` under its
+  receipt-derived identity directory (see its section below). The
+  memory-passthrough files write more, by
   design: `capture.py` appends one journal record (path, hash, timestamp —
   never file CONTENT) to this agent's own journal; `hydrate_render.py`
   writes this agent's own per-fact `.md` files and `MEMORY.md`, content
@@ -180,19 +173,18 @@ Outputs, exhaustively:
   agent that invoked them.
 
 **Context and authority are separate.** Only the knowledge-base reminder
-is a fixed literal. Live session context carries measured register data and
+is a fixed literal. Live session context carries the solet's own principle statement and
 role/count observations under the contract below. No hook treats a
 local label as proof of a held role.
 
 Beyond that: no network I/O of any kind in any hook (no HTTP, no sockets,
-no DNS) — the hooks/utilities that shell out to `solet` (or, for the heartbeat, `solet-bridge`) do not
-perform network I/O themselves; the `solet` CLI is a separate,
+no DNS) — the hooks/utilities that shell out to `solet-bridge` do not
+perform network I/O themselves; the `solet-bridge` CLI is a separate,
 independently reviewable local process, same reasoning as the wake
 waiter's configured CLI below. No hook writes a file as an action of its
-own, **except the eight disclosed exceptions** — the heartbeat and
-rotation-due watch hooks each write a bare-timestamp throttle/latch
-marker (the heartbeat also writes its failure record and worktree
-snapshot); `capture.py`/`hydrate_render.py`/`index_render.py`/`_journal.py`
+own, **except the seven disclosed exceptions and the local recovery store
+described in its own section** — the rotation-due watch hook writes a
+bare-timestamp throttle marker; `capture.py`/`hydrate_render.py`/`index_render.py`/`_journal.py`
 write this agent's own memory/journal files, content sourced from an
 already-exported snapshot or this agent's own already-resolved path,
 never anything read from stdin, tool input, or another session (see
@@ -200,15 +192,16 @@ Outputs above and the memory-passthrough section below for the exact
 per-file contract); `capture_session_mapping.py` writes a file-per-firing
 session-mapping record to the adapter-declared spool directory (see the
 spawn-injected worker hooks section below). One interpreter side effect is disclosed rather than
-claimed away: a hook that imports the shared `_journal.py` library lets
-CPython byte-compile it, so `hooks/__pycache__/*.pyc` can appear beside the
-scripts. Nothing in the plugin reads those files back,
+claimed away: a hook that imports the shared `_journal.py` library or the
+recovery engine's modules lets CPython byte-compile them, so
+`hooks/__pycache__/*.pyc` can appear beside the scripts. Nothing in the plugin reads those files back,
 and an operator who wants them gone can set `PYTHONDONTWRITEBYTECODE=1` in
-the session environment. The live-context hook delegates the register's credential lookup to psolet;
-no credential or raw error output is injected. The other five subprocess
+the session environment. The live-context hook reads the inbox through the solet's bridge
+and the approved statement from one fixed path of the solet's own knowledge base (through
+the bridge only when no file is found); no credential or raw error output is injected. The other five subprocess
 owners retain their fixed argv contracts described in their sections. The
-other nine hooks execute nothing; file-writing effects remain those disclosed
-above.
+other eight hooks execute nothing; file-writing effects remain those disclosed
+above, plus the local recovery store disclosed in its own section.
 
 ## The wake waiter — the one privileged hook, in full
 
@@ -268,176 +261,121 @@ keeps untrusted message text out of the turn-opening position entirely.
 separately-stated guarantee described in the trust-classes note above — it
 never opens a turn at all; it is stderr fed back after a blocked tool call.)
 
-## The heartbeat and rotation-due watch hooks — the other two privileged hooks
+## The rotation-due watch hook — the context gauge report
 
-**What they do.** Both fire on `PostToolUse`, unconditionally (every tool
-call, no tool-name matcher), and both are throttled via a local marker
-file's mtime. For the rotation-due watch, most firings take one `stat()` and
-nothing more; a throttled tick costs no CLI or network round trip. The
-heartbeat throttles only its `report_alive` call (its other work is below).
+**What it does.** `rotation_due_watch.py` fires on `PostToolUse`,
+unconditionally (every tool call, no tool-name matcher), and reports this
+session's own context gauge to the platform. It reads and sends; it acts on
+nothing. It sends no message to any session, resolves no role or steward,
+writes no notice marker, and does not call `clear_session`, `report_alive` or
+any lifecycle-transition verb: when a session rotates is the session's and the
+operator's decision, made from the gauge when they choose to read it. The
+file's name is historical. The rotation notice it once delivered, the notice
+hook that surfaced it and the heartbeat hook no longer ship.
 
-`heartbeat_report_alive.py`: on every firing outside its failure backoff it
-first verifies its owner receipt, then takes a worktree attestation: three
-`git` reads in the session's current directory (`rev-parse --show-toplevel`,
-`rev-parse HEAD` and `status --porcelain=v1 --untracked-files=all -z`), each
-run with `--no-optional-locks`, through `subprocess.run` with no shell, a 10 s
-timeout and the inherited environment. The attestation runs before the
-throttle check, so it runs on every such firing, and it then rewrites the
-worktree snapshot. When the throttle allows (at most once per ~180 s per
-`agent_instance_id`), it runs
-`["solet-bridge", "call", "plugin::agent_messaging_plugin::report_alive", <payload>]`
-(`subprocess.run`, no shell, a 20 s timeout), the fixed process key
-`report_alive`. The payload is built from this session's own
-`AGENT_INSTANCE_ID`, two fixed literals (`status: "heartbeat"` and
-`status_note: "t2-posttooluse-heartbeat"`), a count of failures since the
-last success and, after a recorded failure, its first-failure time and last
-reason. It carries no tool-call content. git runs with the inherited
-environment and honours that repository's and the user's git configuration,
-as `git status` run there by hand would (for example a configured
-core.fsmonitor helper). It has no persistent process
-of its own: it only runs synchronously inside an actual tool-call
-lifecycle, so an idle or dead session simply stops firing it — nothing is
-left running to keep stamping liveness on a session's behalf after it goes
-away, unlike a standalone background-loop design this hook was built to
-replace (a prior loop shape survived a session `/clear` and kept reporting
-a dead session as live for hours; disclosed in the hook's own module
-docstring as the incident that shaped this design).
+Per firing, in order: (1) it verifies its owner receipt (see Arming below);
+(2) it reads the stdin payload for the session's own `transcript_path` and
+`session_id`; (3) one `stat()` of its throttle marker ends the firing when a
+report completed within the last ~120 s for this `agent_instance_id` (a
+throttled firing starts no subprocess and makes no bridge call); (4) otherwise
+it reads the session's **own** transcript file (never another session's — the
+path comes from this session's own stdin payload) and scans it from the end for
+the most recent assistant usage block and the most recent forty assistant
+calls (their timestamps and cache-read token counts), then computes current
+context tokens (input, cache-creation and cache-read tokens of that usage
+block), the model's context ceiling and a cache state with the constants and
+classifier of `agent_messaging_plugin.rotation_thresholds`; (5) it runs one
+`solet-bridge call` for `report_context_status` (`subprocess.run`, no shell, a
+20 s timeout); (6) only when the platform completed that call it touches the
+throttle marker, so a failed report is retried on the next tool call.
 
-`rotation_due_watch.py`: when un-throttled (at most once per ~120s per
-`agent_instance_id`), reads the calling session's **own** transcript file
-(never another session's — the path comes from this session's own stdin
-payload) to compute current context-token usage, then (a) unconditionally
-caches that reading via one `report_context_status` call, and (b), only
-once per session generation (latch-gated) and only if a declared threshold
-is crossed, delivers ONE notification — `peer_send_by_name` to the
-session's resolved steward role if one exists, else a local marker file —
-built from a fixed template interpolating only this session's own
-`agent_instance_id`, `session_label`, `model`, and measured token counts,
-never tool-call content or another session's data. It never acts on the
-signal: it does not clear, rotate, or otherwise mutate the session it
-measures — rotation timing stays a steward/operator decision, stated
-explicitly in the notification text itself.
+**What it sends, and to whom.** The payload goes to the local platform's
+`report_context_status` verb, which stores one row for the session;
+`session_context_status`, `fleet_status` and usage accounting read that row on
+demand. It carries: this session's `agent_instance_id`, its `agent_session_id`
+(when set) and the Claude Code session id from stdin as `runtime_session_id`;
+the fixed literals `provider: "anthropic"` and `runtime: "claude_code"`;
+`effort` from `CLAUDE_EFFORT` (`unknown` when unset); the model name,
+`current_tokens` and `ceiling`; `measured_at` (the hook's own clock) and
+`reading_at` (the transcript line's own timestamp, omitted when the line has
+none); `cache_read_tokens`, `cache_cold` and `cache_overage_signature`
+(omitted when they cannot be measured); and which copy of the hook reported
+(`reporter_surface`, a path class and never an absolute path, plus
+`reporter_generation`). It carries no tool-call content, no prompt or
+transcript text and nothing about another session.
 
-**Arming.** The heartbeat is armed by its owner receipt gate, not by
-`AGENT_INSTANCE_ID` alone. When none of the six managed variables
-`AGENT_INSTANCE_ID`, `AGENT_SESSION_ID`, `AGENT_WAKE_CLI`,
-`AGENT_COORDINATION_RECEIPT_PATH`, `SOLET_NAME` and
-`AGENT_CONTEXT_GAUGE_REPORTER_PATH` is set, it is a silent no-op. When any is
-set but `AGENT_INSTANCE_ID` or `AGENT_SESSION_ID` is missing, or the receipt
+**Arming.** The owner receipt gate, via `coordination_owner.py`. When none of
+the six managed variables `AGENT_INSTANCE_ID`, `AGENT_SESSION_ID`,
+`AGENT_WAKE_CLI`, `AGENT_COORDINATION_RECEIPT_PATH`, `SOLET_NAME` and
+`AGENT_CONTEXT_GAUGE_REPORTER_PATH` is set, it is a silent no-op (for an
+env-less session, `_session_identity.py` first supplies them: see its section
+below). When any is set but `AGENT_INSTANCE_ID` or `AGENT_SESSION_ID` is
+missing, or the receipt
 fails verification, each firing prints one `[coordination-owner]` stderr line
-and exits `0`, before any marker, git or bridge call. Only a receipt that
-passes lets it proceed, and its state then lives under the receipt-derived
-runtime root, keyed by `SOLET_NAME`, `AGENT_INSTANCE_ID` and
-`AGENT_SESSION_ID`. The heartbeat never reads `AGENT_HEARTBEAT_MARKER_DIR`:
-the hook defines that constant and never uses it. Rotation-due watch
-requires `AGENT_INSTANCE_ID` set; absent, it is a silent no-op (`session_status`
-is keyed on this id, so there is nothing to watch without it — a functional
-precondition, never a protection). `AGENT_HEARTBEAT_MARKER_DIR` affects its
-*throttling*, not its arming: when `AGENT_INSTANCE_ID` is set but the marker
-dir is not, it falls back to a fixed OS-temp-dir marker root so its throttle
-and once-per-generation latch still work. That fallback exists because an
-unlatched rotation-due notification would `peer_send` a steward on every
-single completed tool call above threshold.
+and exits `0`, before any marker, bridge call or subprocess. Only a receipt
+that passes lets it proceed, and its state then lives under the
+receipt-derived runtime root, keyed by `SOLET_NAME`, `AGENT_INSTANCE_ID` and
+`AGENT_SESSION_ID`.
 
-**Command provenance.** The rotation-due watch resolves `solet` via `PATH`,
-the same convention this plugin's other subprocess-capable hook and this
-checkout's other hooks already rely on for `python3`. Its command is literally
-`solet`. The heartbeat resolves `solet-bridge` via `PATH` in the same way, with
-one widening: when `AGENT_WAKE_CLI` names a file whose directory holds a
+**Designated reporter.** One `PostToolUse` event can reach more than one
+registered copy of this hook (a checkout's own and the installed plugin-cache
+copy). A spawned worker's host adapter exports `AGENT_CONTEXT_GAUGE_REPORTER_PATH`
+naming the one copy that reports, and every other copy exits `0` before it
+claims the throttle marker or makes any call. When that variable is absent,
+the copy that passed ownership verification reports.
+
+**Command provenance.** The hook runs `solet-bridge` by name through `PATH`;
+its argv is `["solet-bridge", "call",
+"plugin::agent_messaging_plugin::report_context_status", <payload>]`, no
+shell. When `AGENT_WAKE_CLI` names a file whose directory holds a
 `solet-bridge` file, that directory is appended to `PATH` for the call
-(appended, never prepended, so no existing resolution changes). Neither takes
-an operator-configurable executable name (unlike the wake waiter's
-`$AGENT_WAKE_CLI`). Only the JSON payload varies, built entirely from this
-session's own environment and (for rotation-due watch) its own transcript
-file, never from tool-call content or another session's input.
+(appended, never prepended, so no existing resolution changes; a dangling
+`AGENT_WAKE_CLI` adds nothing). It takes no operator-configurable executable
+name, unlike the wake waiter's `$AGENT_WAKE_CLI`. Only the JSON payload
+varies, and it is built from this session's own environment and its own
+transcript file.
 
-**Dynamic information conveyed.** Neither hook ever prints a
-`hookSpecificOutput` block — no output reaches the session's context
-through either of them, ever, success or failure. The heartbeat writes nothing
-to stdout. Their only possible output is stderr diagnostics, never read by
-anything (content classes in the heartbeat failure paragraph below), and, for rotation-due watch, at most one `peer_send_by_name` call
-per session generation carrying this session's own already-known identity
-and measured token counts to its own resolved steward — not to the
-calling session's own context.
+**Dynamic information conveyed.** The hook never prints a
+`hookSpecificOutput` block and writes nothing to stdout, so no output reaches
+the session's context through it, on success or failure. Its only effects are
+the platform report above, the throttle marker below and stderr diagnostics.
 
-**Failure posture.** Both are non-fatal by design, the same contract as
-every other hook in this plugin. The rotation-due watch's missing env var,
-unreadable transcript, malformed stdin payload, unresolvable `solet`
-binary, or failed `solet-bridge call` all warn to stderr and exit `0`.
-Neither hook can ever cost a tool call, and neither uses exit code `2`.
+**Writes.** One file: the throttle marker
+`context_watch/<agent_instance_id>.rotation_due_check.stamp` under the
+identity directory, holding `str(time.time())`. The hook keeps no latch, no
+failure record and no notification marker.
 
-**Heartbeat failure record.** A failed `report_alive` call (a non-zero exit,
-a timeout, a launch error, or a rejected or unreadable response) and a
-worktree attestation fault are each recorded in `<agent_instance_id>.failures.json`
-under the identity's heartbeat directory, holding a count, the first failure
-time and the last reason. A reason is the exception type plus at most 200
-characters of detail, the child's stderr capped at 200 characters, or the
-rejection or fault text, and is cut to 216 characters when written. The next
-successful payload carries the record as `heartbeat_failures_since_last`,
-`heartbeat_failure_first_at` and `heartbeat_failure_last_reason`, and that
-success deletes the record unless a worktree attestation fault is still
-pending. After a recorded failure, every firing within 180 s of the record's
-mtime returns before any git or report call. Diagnostics go to stderr as
-`[heartbeat-report-alive]` lines. Exception text is printed uncapped there, so
-a timed-out call's line includes its full argv and payload, and an attestation
-fault's OS error text is uncapped; only the child's stderr is capped at 200
-characters.
-One accepted gap, stated in the heartbeat's own docstring rather than
-engineered around: a single tool call longer than a session's report-by
-window still trips an overdue alarm mid-call, since the hook only fires
-*after* a tool call completes. Rare; disclosed, not chased.
+**Failure posture.** Non-fatal by design, the same contract as every other
+hook in this plugin. A missing `CLAUDE_PROJECT_DIR`, an
+`agent_messaging_plugin` module that cannot be imported, an unreadable
+transcript, a malformed stdin payload, an unresolvable `solet-bridge` binary
+and a failed or unparseable `solet-bridge call` each warn to stderr and exit
+`0`. The hook cannot cost a tool call and does not use exit code `2`. A failed
+report leaves the throttle marker untouched, so the next tool call retries it,
+with no backoff.
 
-## The rotation-due notice hook — the one hook whose output enters a prompt
+**Diagnostics.** Stderr lines are prefixed `[rotation-due-watch]`. Their
+content classes are fixed text; exception text from stdin parsing, the module
+import, transcript timestamps or the throttle-marker write; for a failed call, the process key with the
+OS or timeout exception text (a timed-out call's line includes its full argv
+and payload, which carry counts and identifiers only) or the exit status with
+at most 200 characters of the child's stderr; and, when the platform does not
+complete the call, at most 300 characters of its reply. Best-effort
+telemetry, read by nothing.
 
-`rotation_due_notice.py` (`UserPromptSubmit`, unconditional) is the delivery
-half of the rotation-due signal for a session the fleet's own sweep cannot
-reach. It reviews no state and measures nothing: when `rotation_due_watch.py`
-finds no steward to notify (an operator-present session has none) it writes
-the notice to a local marker file, and this hook surfaces that marker as
-context on the session's own next turn, once, then stamps it so it never
-repeats.
-
-**Why it gets its own section.** It is the only hook in this plugin that puts
-FILE CONTENT into a prompt. The knowledge-base reminder injects a compiled-in literal; live context injects the bounded data disclosed above; and
-`session_context.py` injects a fixed template; this one injects text it read
-from disk. That is a different class of claim and is bounded explicitly rather
-than by category:
-
-- **Provenance is checked before injection.** A marker is refused unless it is
-  owned by the current user AND is not group- or world-writable. The relevant
-  exposure is concrete: the writer's fallback marker root lives under the
-  system temp directory, which on a shared host is world-writable, so without
-  this check any local user could place text into another user's next prompt.
-  On a platform with no `geteuid` the ownership half cannot run and is SKIPPED
-  rather than faked — the permission half still applies.
-- **Scope of what is injected.** The marker's `content` field verbatim, inside
-  a fixed frame this hook compiles in. No other field of the marker reaches
-  the prompt, and nothing else on disk is read.
-- **Bounded volume.** At most one `hookSpecificOutput` object per prompt
-  however many markers match, and each marker is surfaced at most once —
-  the stamp is written INTO the marker, so there is no second file that could
-  disagree with it about whether the notice was delivered.
-
-**Execution and writes.** No subprocess of any kind — it is not one of the
-five subprocess-capable files. It writes exactly one file: the marker it just
-surfaced, rewritten with a `surfaced_at` timestamp added.
-
-**Failure posture.** Non-fatal by design like every hook here: an unreadable,
-unparseable, foreign-owned or world-writable marker is skipped with a stderr
-diagnostic and exit `0`. A marker that cannot be stamped is still DELIVERED
-and will repeat on the next prompt — deliberately, since a repeated warning is
-a smaller failure than a swallowed one.
-
-**On the ordinary path it does nothing.** No marker means: read stdin, glob at
-most two directories, emit nothing. This hook fires on every prompt, so its
-empty path is the cost that is actually paid.
+**Code the hook does not reach.** The source file also contains a
+seat-identity helper (`_resolve_seat_instance_id` and what it calls: a `ps`
+read of the process tree and a `peer_list` bridge call). `main()` calls none
+of it, so it is not behavior of this hook; it is named here so that a reader
+auditing the file's `subprocess.run` call sites does not mistake it for a
+disclosed one.
 
 ## The memory-passthrough files — two hooks, four CLI utilities, one shared library
 
 Six files, three of which are already covered above by category (`capture.py`
 writes and never subprocesses; `session_context.py` neither writes nor
-subprocesses; `sync.py` is one of the five disclosed subprocess-capable
-files). This section states each file's full, individual contract.
+subprocesses; `sync.py` is one of the disclosed subprocess-capable
+files listed at the top of this document). This section states each file's full, individual contract.
 
 **`capture.py`** (`PostToolUse`, `Write`/`Edit`/`MultiEdit` only — the
 ONE hook in this plugin with a tool-name matcher, since it only needs to
@@ -486,8 +424,8 @@ Configuration surface section.)
   No subprocess, no network.
 - `sync.py`: the disclosed subprocess exception in this group — wraps the
   hydrate/drain steps above into one Bash call per direction and DOES
-  shell out, via the same PATH-resolved `solet` convention as the
-  rotation-due watch hook (the heartbeat calls `solet-bridge` the same way): one `export_memories` call on
+  shell out, via the same PATH-resolved `solet-bridge` convention as the
+  rotation-due watch hook: one `export_memories` call on
   hydrate, and — on drain — one `upsert_memory_by_tag` call PER pending
   journal entry (unbounded per invocation, bounded only by how many local
   edits are actually pending). Every argv is `["solet-bridge", "call",
@@ -542,7 +480,7 @@ shipped copy (exactly the file you are reading about) on a born clone
 that carries no `.claude/hooks/` directory at all. The two copies must
 stay behaviorally byte-identical — the checkout-external cross-copy
 parity smoke (see Verification below) is the guard, same pattern as the
-heartbeat/rotation-due-watch/capture/session-context parity legs above.
+rotation-due-watch/capture/session-context parity legs above.
 
 **`headless_tool_allowlist_gate.py`** (`PreToolUse`, would be wired only
 into a spawned worker's own generated settings, never this plugin's
@@ -591,16 +529,11 @@ fixed-template stderr diagnostic on a non-fatal failure path.
 
 ## Live session context — reviewer due diligence (2026-10-08)
 
-`session_start_context.py` replaces the static message and role reminders on
-SessionStart `startup`, `resume`, and `clear`. It performs two read operations:
+A compaction runs SessionStart again with source `compact`; the same two reads run under the same caps and the output has the same shape, so nothing new is read, written or retained.
 
-- `[PROJECT_SOLET_CLI, "resume-digest", "--limit", "1"]` reads the bounded,
-  **register-wide** digest. The default executable is
-  `$HOME/Workspace/project-solet/.venv/bin/psolet`; installations elsewhere
-  set `PROJECT_SOLET_CLI` to one executable path. The child resolves its normal
-  `PROJECT_SOLET_DATABASE_DSN` or Keychain credentials; the hook neither reads
-  credentials itself nor prints child stderr. Register previews are data,
-  not instructions or a substitute for full authoritative reads.
+`session_start_context.py` replaces the static message and role reminders on
+SessionStart `startup`, `resume`, `clear`, and `compact`. It performs two read operations:
+
 - `[SOLET_BRIDGE, "call", "plugin::agent_messaging_plugin::peer_inbox", JSON]`
   pages the instance and role sections with `observer: true`. `SOLET_BRIDGE`
   defaults to `solet-bridge` on PATH. The original `SOLET_NAME`,
@@ -608,6 +541,22 @@ SessionStart `startup`, `resume`, and `clear`. It performs two read operations:
   Current bound role names come from `role_read_coverage`, never the local
   label. Forward instance cursors preserve timestamp ties; role cursors are
   independent. The hook never acknowledges a page or advances a covered mark.
+- The article principles_statement.md (knowledge base ananta_platform, folder 24_operator_communication) is read
+  from the solet's own knowledge-base file,
+  `ananta/knowledge_bases/ananta_platform/24_operator_communication/principles_statement.md`, under the first of
+  these roots that holds it as a regular file: `CLAUDE_PROJECT_DIR`, the working directory, the tree the bridge runs
+  from (`<root>` of `<root>/.venv/bin/solet-bridge`, `<release>` of `<release>/venv/bin/solet-bridge`; a bare
+  `SOLET_BRIDGE` name is looked up in `PATH`) and that tree's `code` directory. The path is fixed and the file is
+  opened for reading only: the hook reads no other file, writes none, and the text is clipped and labelled as
+  before. Only when no root holds the file does the hook run
+  `[SOLET_BRIDGE, "call", "service_interface::knowledge_service::read_file", JSON]` for the same article. Either
+  way the hook emits the text under the `## Approved statement` heading verbatim after one label line naming the
+  article, capped at 8000 UTF-8 bytes; a longer article is clipped at a line
+  boundary with a one-line advisory. A file without that heading gives one typed `StatementMissing` line and no
+  bridge read. The hook neither reads credentials nor prints child stderr.
+
+A session with no launcher identity also gets one line naming the fleet identity
+that the read-only `_session_identity.py` helper found and the CLI claim path.
 
 The role count means **pending above role covered mark (display/consumption
 unknown)**. Observer mode includes display-receipted rows; it cannot prove
@@ -620,14 +569,18 @@ Paging produces an observation over an interval, not an atomic cross-page
 snapshot; a binding change, repeated cursor, partial role failure or identity
 mismatch makes the count unavailable.
 
-The digest child has a three-second timeout, and all inbox pages share a
-separate three-second deadline. The manifest timeout is eight seconds. A failed
+The principles are read before the inbox. All inbox pages share one 3.5-second
+deadline, and the bridge read of the principles, made only when no statement
+file is found, keeps a 3.5-second timeout of its own, so the worst case is 3.5
+seconds with the file and seven seconds without, under the thirty-second
+manifest timeout. A failed
 read adds one explicit `unavailable (ErrorClass)` line and exits zero; a missing
 identity is `MissingIdentity`, never zero messages. No cache or static reminder
-fallback exists. JSON serialization escapes all observed strings. The digest
-context is capped at 5800 UTF-8 bytes and inbox context at 1000, leaving room
-inside 8192 for the unchanged knowledge-base reminder. Over-budget output is
-reported as `ByteBudgetExceeded`, never silently clipped into apparent success.
+fallback exists. JSON serialization escapes all observed strings. Inbox context
+is capped at 1000 UTF-8 bytes and the principle text at 8000, leaving room
+for the unchanged knowledge-base reminder. Over-budget inbox output is
+reported as `ByteBudgetExceeded`, never silently clipped into apparent success;
+the principle text is clipped only with its one-line advisory.
 
 This stdlib Python 3.13 hook uses `subprocess.run` with argument arrays and no
 shell. It creates no files, performs no register writes, claims no role. Hook installation/trust is separate from candidate delivery;
@@ -639,10 +592,248 @@ This candidate makes no claim of live host deployment.
 The independent review unit records the due-diligence verdict required by
 `rul_af7c73e3` and `rul_f0e51f93`.
 
+## Working-tree recovery — reviewer due diligence (0.10.0)
+
+`recovery_claude.py` saves a copy of uncommitted work before a shell command
+discards it and at the end of every turn, so a lost edit can be put back. It is
+not a control: it never refuses, blocks or steers a tool call, prints no
+`decision` or `permissionDecision` field, and exits `0` on every path. The save
+happens, then the command runs. This section answers the shipped-hook
+due-diligence checklist (`rul_f0e51f93`) against these exact bytes; items are
+numbered as in that checklist.
+
+**1. Inventory.** One hook and five `hooks.json` entries, each exec form through
+`optional_hook_runner.py` (`python3 optional_hook_runner.py recovery_claude.py <Event>`):
+
+- `PreToolUse`, matcher `Bash`, timeout 15;
+- `PostToolUse`, matcher `Write|Edit|MultiEdit|NotebookEdit|Bash`, timeout 10;
+- `Stop`, no matcher, `async` true, timeout 120;
+- `SessionEnd`, no matcher, timeout 10;
+- `SessionStart`, matcher `startup|resume|clear`, timeout 10.
+
+Beside the hook ship the shared engine's 23 modules, byte-identical copies of
+`coordination_hooks_common/` made by the source repository's materialization tool
+(`materialize_hook_common.py`) and listed
+by the literal `MODULES` tuple in `working_tree_recovery.py`: `command_lex.py`,
+`command_resolve.py`, `command_types.py`, `command_walk.py`, `custody_store.py`,
+`discard_forms.py`, `recovery_capture.py`, `recovery_cli.py`,
+`recovery_content.py`, `recovery_deadline.py`, `recovery_events.py`,
+`recovery_git.py`, `recovery_journal.py`, `recovery_lifecycle.py`,
+`recovery_metadata.py`, `recovery_packets.py`, `recovery_rebuild.py`,
+`recovery_refs.py`, `recovery_restore.py`, `recovery_retention.py`,
+`recovery_rules.py`, `recovery_types.py` and `working_tree_recovery.py`. None is
+registered as a hook. `working_tree_recovery.py` is also the user's command line
+(`list`, `show`, `restore`, `correct`, `forget`, `unforget`, `prune`, `purge`,
+`save`), run by hand like the memory utilities.
+
+**2. Inputs.** From the hook payload: `hook_event_name`, `session_id`, `cwd`,
+`tool_name`, `tool_input.command`, `tool_input.file_path`,
+`tool_input.notebook_path`, `tool_input.edits[].file_path` and `turn_id` (falling
+back to `tool_use_id`), and nothing more. The transcript (`transcript_path`) is
+never read. From the environment: `SOLET_RECOVERY_ROOT` (an optional store
+location), `HOME`, `TMPDIR`, `XDG_DATA_HOME` and `XDG_RUNTIME_DIR` (non-macOS) and
+`PATH` for `git`. It reads the working files that git reports as changed, to copy
+them. At `Stop` and `SessionEnd` the hook saves the working folder and every other
+folder recorded in this session's journal.
+
+**3. Outputs.** The only stdout of the hook is one JSON object whose only keys are
+`systemMessage` and `hookSpecificOutput` (`hookEventName`, `additionalContext`).
+`PreToolUse` prints it when a save included changes this session did not make,
+when paths could not be saved, when low disk reduced the save, or when no save
+could be made ("could not save before ...; the command will run").
+`SessionStart` prints `additionalContext` alone when recovery is inactive or the
+store is over its cap. `PostToolUse`, `Stop` and `SessionEnd` print nothing. The
+command line (`working_tree_recovery.py`, run by hand and registered nowhere)
+prints its result as one JSON object on stdout. No
+`decision`, `permissionDecision`, `continue`, `stopReason`, `suppressOutput` or
+`updatedInput` key can be emitted: the adapter smoke
+(`plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/recovery_claude_adapter_smoke.py`)
+walks every output of every fixture, the fault fixtures included, at every depth against
+a closed key set, and checks that the adapter source names none of those keys.
+The text carries up to ten file names from the user's repository (never
+contents), a restore command line, and, in `additionalContext`, one sentence
+addressed to the model ("If the user did not mean to discard these changes, stop
+and tell them before continuing."). File names are repository-controlled text and
+so enter the model's context; they are capped at ten and never interpreted.
+
+**4. Children executed.** `recovery_claude.py` spawns nothing itself. The engine
+has one spawn boundary, `recovery_git.py` (`_spawn`): `subprocess.Popen` with an
+argument list and no shell, running
+`git -c core.fsmonitor=false -c core.quotePath=false <subcommand>` in the folder
+concerned. Stdin is `/dev/null` or a pipe the hook owns; no child inherits the
+hook's stdin, stdout or stderr; each child gets its own session, and a watchdog
+kills its process group when the shared deadline expires. Its environment is the
+hook's with every `GIT_*` variable removed, then `GIT_OPTIONAL_LOCKS=0`,
+`GIT_TERMINAL_PROMPT=0`, `LC_ALL=C` and `GIT_NO_LAZY_FETCH=1`. The subcommands of
+a save, all read-only against the user's repository: `rev-parse`, `symbolic-ref`,
+`config --get core.ignoreCase`, `config --get-regexp ^alias\.` (aliases are read as
+text and never executed), `ls-files` (`--stage`; `-o --exclude-standard`),
+`ls-tree -r -z`, `diff-files --no-ext-diff -z --raw`, `clean -n` (a dry run),
+`stash list`, `for-each-ref`, `log -1 --format=%B`, `rev-list --parents -n 1`,
+`merge-base`, and three that take requests on a pipe the hook owns:
+`cat-file --batch-check`, `cat-file --batch` and `check-ignore --stdin -z -v -n`.
+Only on an explicit user `restore`, never from a hook: `hash-object -w --no-filters
+--stdin-paths`, `read-tree`, `update-index -z --index-info`, `write-tree`,
+`commit-tree`, `stash store` and `branch`, in the two restore modules. No module
+names `pack-objects`, `index-pack`, `checkout`, `reset`, `add`, `commit`,
+`update-ref`, `gc`, `fetch`, `push` or `pull`; `manifest_consistency_smoke.py`
+checks both statements against the source.
+
+**5. No writes to the user's repository during a save.** Reads use
+`GIT_OPTIONAL_LOCKS=0`, so no index refresh is attempted, and no subcommand that
+writes a ref, the index, configuration, a hook or an object is named outside the
+restore modules. A save never makes a commit or a branch.
+The adapter smoke takes a digest of every file under `.git`
+before and after a real `PreToolUse` save and requires them equal. The ignore-rule
+check for what a stash or deleted branch carries runs against a throwaway
+directory outside the repository and the store (item 7) and only reads the
+repository.
+
+**6. Repository-configured programs.** Every read passes `-c core.fsmonitor=false`,
+uses raw diff output with `--no-ext-diff` and no `--textconv`, and reads objects
+without filters, so a save never runs a program named in the repository's
+configuration. Configuration is read only as text (aliases); the hook never
+executes it. On restore, `hash-object` runs with `--no-filters`, so no clean filter
+runs, and `restore --refs` updates refs through git, so the repository's own
+`reference-transaction` hook, if any, runs and may refuse that entry.
+
+**7. Files written.** The store, and nothing else outside the repository except
+the throwaway rules directory below and Python's own byte-code (the `__pycache__`
+note above). Default root: `~/Library/Application Support/Solet/Recovery/v1` on
+macOS, `$XDG_DATA_HOME/Solet/Recovery/v1` (default `~/.local/share/`) elsewhere;
+`SOLET_RECOVERY_ROOT` overrides it, and an override inside a git repository or under
+`Documents`, `Desktop`, `Downloads`, `.claude`, `.codex`, iCloud or CloudStorage is
+ignored with an advisory. An empty or blank `SOLET_RECOVERY_ROOT` is
+treated as unset. Directories are mode `0700` and owned by the user; stored content, manifests
+and the `.metadata_never_index` marker (which keeps Spotlight out) are `0400`; the
+append-only journal and history files and the per-folder lock files are `0600`. Content is stored
+once, in a pool, and hard-linked into each save (a verified copy where the volume
+refuses links). Beside the saves it keeps a per-session journal (`edits.jsonl`: for
+each edit a file tool reported, the absolute path, a content hash, the folder and a
+timestamp, never content), per-folder lock files, an append-only history of saves,
+restores and prunes, and an optional `config.json`. The one file written elsewhere:
+when a stash or deleted branch carries ignore rules that must be applied, those
+rule files are written to a `0700` directory made with `mkdtemp`
+(`solet-recovery-rules-<pid>-*`) under the OS temporary directory, the macOS
+per-user temporary directory, `~/Library/Caches/Solet/recovery-rules` (macOS) or
+`$XDG_RUNTIME_DIR` (elsewhere). Before any
+byte is written the directory is checked not to resolve inside the store, through a
+symlink or an alias too; it is removed in a `finally`, and a killed run's
+leftovers (dead pid, older than ten minutes) are swept by the next run. If no
+candidate is outside the store, no ref-rule classification runs and nothing that
+needed it is copied.
+
+**8. Content sensitivity.** Saves are copies of the user's own working files. They
+can contain secrets that the user keeps tracked, or untracked but not ignored; that
+includes a tracked file force-added despite an ignore pattern, because git treats
+tracked files as visible. The invariant: no ignored file content is ever
+persisted in the store.
+Every path is classified with git's own matcher (`check-ignore`) before any byte is
+stored; for a stash or deleted branch a path is left out when the folder's current
+rules or the ignore files that ref carries match it; a classification that is
+incomplete copies nothing. Names of ignored paths can appear in a save's unsaved
+list and in a notice; their contents cannot. One residual, a known limit: a rule
+that lived only in `.git/info/exclude` or `core.excludesFile` and was removed before
+the save cannot be applied to a stash's untracked files. Another, also a known
+limit (R19): the rule text a ref carries, which can include a `.gitignore` that is
+itself ignored, sits briefly in the rules directory outside the store and is
+removed when the classification ends; it is never written to the store. The store is user-only,
+never indexed by Spotlight, and backed up by Time Machine like any user data; the
+hook does not change backup settings. Nothing leaves the machine.
+
+**9. Network.** None. No recovery module imports a network module, and none calls
+the bridge, the register or a solet verb; `manifest_consistency_smoke.py` checks
+the imports of the adapter and of every engine module.
+
+**10. Resource bounds.** Per save: 512 MiB of new content, 50,000 files and 64 MiB
+per file. A 5 GiB store: past it a prune pass runs and the person is told once per
+session at `SessionStart`; saves not yet delivered are never pruned. At most once an
+hour the `Stop` hook also runs a prune pass of its own, which deletes only inside
+the store (below). A 10 GiB disk
+floor: below it only the index and tracked files are saved, and the person is told
+once per session. Time: one shared deadline covers the whole hook, every git child
+included: 8 seconds for `PreToolUse`, `PostToolUse`, `SessionStart` and
+`SessionEnd` (inside their declared 15, 10, 10 and 10), and 60 seconds for `Stop`
+(inside its declared 120, asynchronous); one second of the budget is reserved to
+publish what was captured, two to list untracked files, and a held store lock is
+waited for at most one second. A save counts as delivered when its content is found
+in `HEAD` or a local branch; it is then kept for 30 days, trashed for one day and
+purged, and the newest turn-end save of each session is always kept. These figures
+are fields of `<store>/config.json`, set or corrected there and restored to their
+default by removing the field: `cap_bytes`, `cap_files`, `cap_file_size`,
+`store_bytes`, `disk_floor`, `grace_seconds`, `trash_seconds`, `hard_seconds` (the
+8 second deadline, applied to `PreToolUse` only), `publication_seconds` (the one
+second publish reserve) and `untracked_seconds` (the two second untracked-listing
+budget). The 60 second `Stop` budget, the 8 second deadline of `PostToolUse`,
+`SessionStart` and `SessionEnd` and the one second lock wait are fixed in the code.
+
+**11. Failure modes.** Every path exits `0` and prints a few short `[recovery]`
+lines on stderr (at most one for a fault and one for advisories). In effect: `git`
+missing, no save and nothing said; not a
+repository, no save for that folder; store unwritable or disk full, "could not save
+before <command>: <reason>; the command will run" to the person and the model, then
+the command runs; a git child that stalls is killed at its deadline, and what was
+captured is published with the rest named unsaved; paths whose ignore status cannot
+be determined are not saved and are named in the notice; a file that changes while
+it is read is read once more and then named unreadable; a FIFO, socket or device
+file is never opened; a held store lock is waited for at most one second, after
+which the save is published without it; a malformed or unknown
+payload, or a `hook_event_name` that does not match the event, is a no-op; Python
+below 3.11, the adapter exits `0` before importing any engine module and
+`SessionStart` says recovery is inactive; the script missing from a stale or partial
+plugin cache, `optional_hook_runner.py` skips it with exit `0`. A hook killed by
+Claude Code's own timeout is, by its documented default, reported and the action
+goes ahead; that default is not measured here (see Unmeasured below). Restore never
+overwrites a newer edit: an existing file is parked in a private sibling directory,
+kept, and its path reported.
+
+**12. Never blocking.** The threat-model statement that this plugin has no control
+stays true and is extended: the recovery hooks are not a control either. They save,
+then the command runs; they never refuse, and nothing in them can emit a decision
+field.
+
+**13. Supply chain.** Standard library only. The adapter imports `json`, `sys`,
+`contextlib`, `pathlib` and the engine facade; no engine module imports a network
+module or a third-party package. A Python 3.11 floor guard runs before any engine
+import. No new dependency. The engine copies are byte-identical to
+`coordination_hooks_common/`: the check is the materialization tool's
+`--check --dest <this hooks directory>` mode (`materialize_hook_common.py`, in the
+source repository; its identity smoke,
+`plugins/github_midwife_plugin/tests/hook_common_identity_smoke.py`, exercises the
+tool against a temporary destination, not this directory), and the manifest smoke proves that every module
+the shipped `MODULES` tuple names is present.
+
+**14. Registration.** Exec form (`command` `python3` plus an `args` array), no shell
+string, `${CLAUDE_PLUGIN_ROOT}` substituted per argument. The entries go through
+`optional_hook_runner.py` because a bare interpreter call on a missing script exits
+`2`, which blocks a `PreToolUse`, while the runner skips a missing script with exit
+`0`. `manifest_consistency_smoke.py` pins the five entries (events, matchers,
+timeouts, `async`, argument vector), pins the twelve existing entries unchanged and
+proves that twelve named defects in the registration are each caught.
+
+**15. Trust and revocation.** Claude Code runs the entries once this plugin is
+installed and enabled; disabling or uninstalling it revokes them. Uninstalling
+leaves the store in place. To remove saves, run `python3 working_tree_recovery.py
+forget <save>` and `purge`, or delete the store folder; nothing else refers to it.
+
+**16. Interpreter pin.** The Manager's `pin_hook_interpreter` rewrites every bare
+`python3` hook command in `hooks.json` to `<clone>/.venv/bin/python3`; the five
+entries use the same bare `python3` form and are covered. The two routes are the
+pinned interpreter and the bare `python3` on `PATH`; below 3.11 either exits `0`
+and says so at `SessionStart`.
+
+**Unmeasured, stated so it is not read as measured.** The fixtures behind
+the adapter smoke are synthetic: they follow Claude Code's
+documented hook payloads and were not captured from a live session. Two assumptions
+stay unmeasured until the live acceptance run: that Claude Code honours
+`hookSpecificOutput.additionalContext` on `PreToolUse` (if it does not, the person
+still sees `systemMessage` and only the model-facing sentence is lost), and the
+bound Claude Code puts on a `SessionEnd` hook (the declared timeout is 10).
+
 ## Deployment context (disclosed so nothing is discovered later)
 
 The knowledge-base reminder stays generic. Live context explicitly calls the
-local psolet and solet-scoped bridge interfaces under the configuration above.
+solet-scoped bridge interfaces under the configuration above.
 Unavailable services are named in context. The wake waiter retains its own
 operator-configured `AGENT_WAKE_CLI` fixed-argv contract and discards its child
 output. The hook scripts have no direct network/database client.
@@ -657,7 +848,7 @@ running as the same OS user as a legitimate sender can therefore construct
 a message a receiver cannot distinguish from a genuine one — the same
 single-user, cooperating-peers boundary this page draws everywhere else,
 applied to who a message says it is from rather than to what a hook can
-do. None of the five hooks in this plugin read, send, or attribute a peer
+do. None of the hooks in this plugin read, send, or attribute a peer
 message themselves — the messaging path is entirely outside this plugin's
 own surface — so the guarantee to carry forward is precisely this: treat a
 message's stated sender as advisory, never as authenticated identity,
@@ -758,7 +949,7 @@ its own row rather than a silent gap.
 
 Hooks run as the same OS user as the Claude Code session that invokes them.
 There is **no privilege boundary** here to defend, and the plugin claims
-none. Its reminders, wake waiter, liveness and rotation hooks, memory-passthrough
+none. Its reminders, wake waiter, context gauge report, memory-passthrough
 utilities and headless tool-allowlist gate are steering and bookkeeping, not a
 git-mutation control. The git-text gate removed in `0.9.0` (operator ruling
 `rul_e71e43be`) is inventoried in `README.md` under *Retired behaviours*: its
@@ -768,7 +959,20 @@ operator-confirmation prefix, and its refusal of `git` beside a shell evaluator
 word or an untokenisable construct are all unenforced, and no control in this
 plugin replaces any of them.
 
+The working-tree recovery hooks (`recovery_claude.py`, in their own section) are
+not a control either: they save uncommitted work and let the command run. They
+never refuse, restore nothing by themselves, and put no decision field in their
+output.
+
 ## Failure modes
+
+- **Working-tree recovery**: every path exits `0`, never `2`, and prints a few
+  short `[recovery]` stderr lines (at most one for a fault and one for
+  advisories). A store that cannot be written, a missing `git`, a
+  malformed payload and an interpreter below 3.11 each degrade to "no save", with
+  the person told only where a save was expected; a script missing from a stale
+  plugin cache is skipped by `optional_hook_runner.py`. The full account is item 11
+  of the Working-tree recovery section.
 
 - **Knowledge-base reminder**: always emits context, exit `0`.
 - **Live session context**: read failures emit named unavailable context, exit `0`; no zero-count fallback.
@@ -778,22 +982,16 @@ plugin replaces any of them.
   configured CLI cannot be spawned it exits `0` with a one-line stderr note
   — a broken wake path degrades to "messages wait for the next turn"
   (where the reminders prompt an explicit check), never to a stuck session.
-- **Heartbeat**: silent exit `0` when none of the six managed variables is
-  set. When any is set but `AGENT_INSTANCE_ID` or `AGENT_SESSION_ID` is
-  missing, or the receipt fails verification, it prints one
-  `[coordination-owner]` stderr line and exits `0`. A failed `report_alive`
-  call or a worktree attestation fault is recorded for the next payload and
-  warns to stderr; it exits `0`, never `2`, never blocking a tool call. A
-  broken heartbeat degrades to "liveness reporting stops" (the fleet's own
-  overdue-session detection is the backstop, not this hook).
-- **Rotation-due watch**: disarmed (no `AGENT_INSTANCE_ID`) →
-  immediate exit `0`, silent. Every other failure mode (missing marker
-  dir, unreadable transcript, malformed stdin, unresolvable `solet`
-binary, a non-zero or unparseable `solet-bridge call` result) warns to
-  stderr and exits `0` — never `2`, never blocking a tool call. A broken
-  rotation-due watch degrades to "no threshold notification fires" (a
-  session simply rotates later than it ideally would, never a stuck or
-  crashed tool call).
+- **Rotation-due watch**: none of the six managed variables set →
+  immediate exit `0`, silent. When any is set but `AGENT_INSTANCE_ID` or
+  `AGENT_SESSION_ID` is missing, or the receipt fails verification, it prints
+  one `[coordination-owner]` stderr line and exits `0`. Every other failure
+  mode (missing `CLAUDE_PROJECT_DIR`, unreadable transcript, malformed stdin,
+  unresolvable `solet-bridge` binary, a non-zero or unparseable
+  `solet-bridge call` result) warns to stderr and exits `0` — never `2`, never
+  blocking a tool call. A broken rotation-due watch degrades to "the stored
+  context gauge row goes stale" (a session's context reading stops updating,
+  never a stuck or crashed tool call).
 - **Memory-passthrough capture/session-context**: no memory directory →
   `capture.py` silently ignores the write; `session_context.py` emits
   nothing (the shared bare-session guard). Any other failure (unparseable
@@ -816,14 +1014,10 @@ binary, a non-zero or unparseable `solet-bridge call` result) warns to
   temp files, no ordering dependencies, and no state carried between
   invocations (the only files those four ever produce are the
   interpreter's own `__pycache__` byte-code artifacts disclosed above,
-  which the plugin never reads). The heartbeat and rotation-due watch
-  hooks carry small, local state between invocations by design (that state
-  IS the throttle, latch and failure-record mechanism) — never read by
-  anything outside those two hooks. The heartbeat's state is its throttle
-  stamp, its failure record (count, first failure time, last reason) and its
-  worktree snapshot (repository root, HEAD, a dirty flag and a hash of the
-  status output); its failure counts reach the register in its payload.
-  The memory-passthrough
+  which the plugin never reads). The rotation-due watch hook carries one
+  small, local piece of state between invocations by design (its throttle
+  marker, `write_text(str(time.time()))`) — never read by anything outside
+  that hook. The memory-passthrough
   files carry real, meaningful state between invocations by design (the
   journal, the watermark, the hydrated-hash oracle, and this agent's own
   memory directory itself) — that persistence is the whole point of the
@@ -856,14 +1050,18 @@ way Claude Code invokes them.
 
 | Claim on this page | Where it is proved |
 |---|---|
-| Exactly the five disclosed hooks/utilities (live session context, wake waiter, heartbeat, rotation-due watch, `sync.py`) can execute a subprocess; each uses `subprocess.run` only, no `shell=True` | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| Exactly the six disclosed hooks/utilities (live session context, wake waiter, rotation-due watch, `sync.py`, the session-cron sentinel, and `recovery_claude.py` through the engine's one spawn boundary) can execute a subprocess; each uses `subprocess.run` only, no `shell=True`, except that boundary, which uses `subprocess.Popen` with an argument list and no shell | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | No network I/O in any hook | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
-| No hook writes a file as an action of its own, except the eight disclosed exceptions | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` and `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
-| The two MARKER_ONLY writers (heartbeat, rotation-due watch) each contain the bare timestamp marker write `write_text(str(time.time()))`; the heartbeat also writes its failure record and worktree snapshot (see the heartbeat paragraphs above) | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| No hook writes a file as an action of its own, except the seven disclosed exceptions and the local recovery store, which only the engine modules write | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` and `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
+| The one MARKER_ONLY writer (rotation-due watch) contains the bare timestamp marker write `write_text(str(time.time()))` (see its section above) | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | Supply chain is stdlib/built-ins only, except `rotation_due_watch.py`'s disclosed same-platform import and the memory-passthrough CLI utilities' disclosed intra-plugin imports of each other | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | Agent-invoked CLI utilities (`drain.py`/`hydrate_render.py`/`index_render.py`/`sync.py`) are correctly NOT wired in `hooks.json` — they never fire automatically | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | `hooks.json` is exec-form with no shell in the invocation path | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | The hook inventory on this page matches the tree | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| `recovery_claude.py` prints only `systemMessage` and `hookSpecificOutput` (`hookEventName`, `additionalContext`) for every fixture, the fault fixtures included, and never a decision-shaped key; it exits `0` on every fault; below Python 3.11 it exits `0` before any engine import | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/recovery_claude_adapter_smoke.py` |
+| A real `PreToolUse` save leaves the repository's `.git` byte-identical, and the saved bytes restore after the discard | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/recovery_claude_adapter_smoke.py` |
+| The five recovery entries (events, matchers, timeouts, `async`, argument vector) are pinned, the nine existing `hooks.json` groups are unchanged, and twelve named registration defects are each caught | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| The engine ships as the 23 listed modules, with one spawn boundary, no shell, no network import, no history-, ref-, pack- or remote-writing git subcommand, and object- or index-writing ones only in the restore modules | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | The knowledge-base reminder is a fixed literal | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` |
 | Knowledge-base context does not interpolate the label | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` |
 | The knowledge-base reminder is always armed | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` |
@@ -874,13 +1072,10 @@ way Claude Code invokes them.
 | The prose surfaces (README.md, this page) describe the wake waiter's real argv — expected tokens derived from the source literal, the stale unbounded form refused | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
 | A broken wake path never traps the session | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
 | Legacy guarded hooks retain their opt-in behavior; knowledge-base and live context are always armed | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/reminder_hooks_smoke.py` and `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/wake_waiter_smoke.py` |
-| The heartbeat and rotation-due watch hooks' `solet-bridge call` argv carries their fixed process key, never a shell, never `subprocess.call`/`Popen` | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
-| The heartbeat and rotation-due watch hooks never print a `hookSpecificOutput` block | disclosed here (source-read); no dedicated behavioral smoke ships in this plugin's own `tests/` yet (the heartbeat's checkout-external smoke is named in the Known gaps note below) |
-| The rotation-due notice hook refuses to inject a marker owned by another uid or one that is group/world-writable, and skips the ownership half rather than faking it where no uid exists | the checkout's .claude/hooks/tests/rotation_due_notice_smoke.py — checkout-external, see the Known gaps note below |
-| The rotation-due notice hook surfaces a marker at most once (the stamp is written into the marker itself), emits exactly ONE `hookSpecificOutput` object however many markers match, and still delivers when the stamp cannot be written | the checkout's .claude/hooks/tests/rotation_due_notice_smoke.py — same external caveat |
-| The rotation-due notice hook's copies in this plugin and in the checkout's `.claude/hooks/` are BYTE-IDENTICAL (it has no adaptation window) and behave identically on the empty and the surfaced path | `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity leg — same external caveat |
+| The rotation-due watch hook's `solet-bridge call` argv carries its fixed process key, never a shell, never `subprocess.call`/`Popen` | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/manifest_consistency_smoke.py` |
+| The rotation-due watch hook never prints a `hookSpecificOutput` block | disclosed here (source-read); no dedicated behavioral smoke ships in this plugin's own `tests/` yet (see the Known gaps note below) |
 | The origin-resolution ladder (env → root_manifest.yaml, placeholder-skipped → dirname) resolves identically across both independent implementations (the hooks' `_journal.py` and the memory-tag verb resolver), across a matrix of env/file/dirname combinations | `.claude/hooks/tests/memory_passthrough_origin_ladder_smoke.py` — checkout-external, see the Known gaps note below |
-| The heartbeat, rotation-due watch, capture, and session-context hook copies in this plugin and in the checkout's `.claude/hooks/` behave identically (throttle/latch marker paths, arming, argv/output shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — external to this plugin's own `tests/`, so not run by `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/run_all.py`; see the Known gaps note below |
+| The rotation-due watch, capture, and session-context hook copies in this plugin and in the checkout's `.claude/hooks/` behave identically (throttle marker path, arming, argv/output shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — external to this plugin's own `tests/`, so not run by `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/run_all.py`; see the Known gaps note below |
 | The spawn-injected `headless_tool_allowlist_gate.py`/`capture_session_mapping.py` copies in this plugin and in the checkout's `.claude/hooks/` behave identically (exit code, block/no-op decision, spool record shape) | the checkout's own `.claude/hooks/tests/coordination_hook_ports_smoke.py` parity legs — same external-to-this-plugin caveat as the row above |
 | Every hook filename a spawning host adapter (`headless_adapter.py`/`tmux_adapter.py`) injects into a spawned worker's generated `--settings` exists in this plugin's own shipped `hooks/` — the two-rung resolution ladder's fallback rung never points at a missing file | `plugins/agent_messaging_plugin/tests/worker_hook_shipping_smoke.py` — checkout-external, adapter-side |
 | `drain.py --advance` binds to the offset its own prior listing recorded rather than the journal's current end, so a capture landing between a listing and its `--advance` is never swallowed; a bare `--advance` with no recorded listing fails loud (exit 2) rather than silently no-op-ing | `plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/memory_passthrough_regression_smoke.py` |
@@ -900,8 +1095,8 @@ directory (mirroring `wake_waiter_smoke.py`'s role) — their behavioral
 coverage tonight is the checkout-external cross-copy parity smoke only,
 which proves the copies agree with each other, not that any one copy's
 behavior is independently correct against a live `solet` fixture. The
-heartbeat's behavioral smoke is checkout-external
-(.claude/hooks/tests/heartbeat_report_alive_smoke.py), not in this plugin's `tests/`.
+rotation-due watch's behavioral smoke is checkout-external
+(.claude/hooks/tests/rotation_due_watch_smoke.py), not in this plugin's `tests/`.
 `manifest_consistency_smoke.py`'s source-level checks (fixed process key,
 no shell, `subprocess.run` only, marker/write shape) still apply and are
 real coverage, just not a live-process behavioral proof. Additionally:
@@ -959,19 +1154,24 @@ four of these hooks, which depended on a runtime nothing guaranteed and
 could silently fail to launch with no signal Claude Code surfaces to the
 user (measured 2026-08-08; retired the same day). Hook registration
 (`hooks.json`) uses exec-form invocation (`command` + `args` array): no
-shell string interpolation anywhere in the invocation path.
+shell string interpolation anywhere in the invocation path. The 23
+working-tree-recovery engine modules are standard library only and need Python
+3.11 or later; `recovery_claude.py` exits `0` before importing them on an older
+interpreter (Working-tree recovery, items 13 and 16).
 
 ## Configuration surface
 
-Twelve of the fifteen hooks are default-off or agent-invoked utilities;
+Ten of the fourteen hooks are default-off or agent-invoked utilities;
 `session_cron_sentinel.py` observes matching tool attempts;
 `step_zero_reminder.py` and `session_start_context.py` always run at the
-registered start sources. Missing register or identity configuration produces
-explicit unavailable context for the latter. Existing heartbeat, rotation,
+registered start sources; `recovery_claude.py` always runs, in every session, with
+no environment gate (it has to fire in a user's own session), and reads only the
+optional `SOLET_RECOVERY_ROOT` and the store's `config.json`. Missing register or identity configuration produces
+explicit unavailable context for the latter. Existing rotation-due watch,
 wake, memory and spawn-injected guards retain their documented behavior.
 
-**Adopter setup note.** The heartbeat and rotation-due watch hooks'
-arming variable, `AGENT_INSTANCE_ID` (the heartbeat also needs `AGENT_SESSION_ID` and a valid owner receipt), and `SOLET_NAME` (rung 1 of
+**Adopter setup note.** The rotation-due watch hook's
+arming variable, `AGENT_INSTANCE_ID` (it also needs `AGENT_SESSION_ID` and a valid owner receipt), and `SOLET_NAME` (rung 1 of
 the memory-passthrough origin-resolution ladder — see that section above;
 also read by other platform verbs these hooks call into) are both
 expected to be exported in the environment Claude Code is launched from
@@ -1014,9 +1214,8 @@ record exists yet the library derives those same three values itself.
 `AGENT_COORDINATION_RECEIPT_PATH`, `ANANTA_SESSION_MAPPING_SPOOL_DIR`, and,
 when `<root>/.venv/bin/solet-bridge` is a file, `AGENT_WAKE_CLI` and
 `SOLET_BRIDGE`. The hooks then follow their existing contracts with that
-identity. The receipt still gates the heartbeat and rotation-due effects
-through `coordination_owner.py`, unchanged. `heartbeat_report_alive.py` does
-not import this library: an env-less session has no fleet ledger row.
+identity. The receipt still gates the rotation-due watch's effects
+through `coordination_owner.py`, unchanged.
 
 The venv-side twin is `agent_messaging_plugin.env_contract`, which the MCP
 bridge and the bridge CLI use. The checkout-external

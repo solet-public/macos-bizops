@@ -69,6 +69,7 @@ from ananta.llm.session_ledger.vendor.claude_code import (
     PAYLOAD_KIND_TOOL_CALL,
     PAYLOAD_KIND_TOOL_RESULT,
 )
+from ananta.services.vault_service.vault_service_proxy import VaultServiceProxy
 
 from claude_code_cloud_session_source_plugin import backfill_jobs
 from claude_code_cloud_session_source_plugin.walker import (
@@ -215,6 +216,7 @@ class ClaudeCodeCloudSessionSourcePlugin(
         super().__init__()
         self.name = _PLUGIN_NAME
         self._backfill = backfill_jobs.BackfillRuntime(self.name, self._job_manager, self._backfill_lock_path, self._execute_backfill)
+        self._vault_service: VaultServiceProxy | None = None
 
     # ------------------------------------------------------------------
     # PluginBase lifecycle
@@ -225,6 +227,10 @@ class ClaudeCodeCloudSessionSourcePlugin(
 
     def initialize(self, config: dict[str, object]) -> None:
         self.config_provider = ConfigProvider(self.name, config)
+
+    def set_vault_service(self, vault_service: VaultServiceProxy) -> None:
+        """Receive the caller-bound vault proxy from platform startup."""
+        self._vault_service = vault_service
 
     # ------------------------------------------------------------------
     # LLMSessionSourceInterface
@@ -373,7 +379,12 @@ class ClaudeCodeCloudSessionSourcePlugin(
         if should_stop():
             raise ClaudeCodeCloudWalkerError("worker_interrupted", "Service stopping; retry with a fresh force=True request.")
         walker_config = replace(self._build_walker_config(), should_stop=should_stop)
-        creds = load_credentials(keychain_service=walker_config.keychain_service, envelope_path=walker_config.keychain_envelope_path)
+        vault = self._vault_service
+        creds = load_credentials(
+            keychain_service=walker_config.keychain_service,
+            envelope_path=walker_config.keychain_envelope_path,
+            read_external_keychain=vault.read_external_keychain if vault is not None else None,
+        )
         report = asyncio.run(self._run_backfill(walker_config=walker_config, creds=creds, force=bool(parameters.get("force")), progress=progress))
         return _success(report)["data"]
 

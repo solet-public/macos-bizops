@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -29,15 +30,17 @@ sys.path.insert(0, str(ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.interfaces.state_management_interface import StateManagementInterface  # noqa: E402
+from ananta.llm.agent_messaging.state_results import require_updated  # noqa: E402
 from ananta.services.store import open_store  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from session_origin_backfill_smoke import seed_legacy  # noqa: E402
 
 from agent_messaging_plugin import http_routes  # noqa: E402
 from agent_messaging_plugin import operator_codex_launcher as launcher  # noqa: E402
 from agent_messaging_plugin import operator_codex_registration as registration  # noqa: E402
+from agent_messaging_plugin import operator_repository_mapping as mapping  # noqa: E402
 from agent_messaging_plugin.bridge_sessions import BridgeSessionManager  # noqa: E402
 from agent_messaging_plugin.codex_common import _codex_config_overrides  # noqa: E402
 from agent_messaging_plugin.http_routes import register_routes  # noqa: E402
@@ -51,8 +54,8 @@ from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
 )
 from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
     _rearm_report_by,
-    _retiring_lane_worktree,
 )
+from agent_messaging_plugin.session_origin_backfill import backfill_session_origins  # noqa: E402
 
 INSTANCE = "agi-" + "a" * 32
 SESSION = "ases-operator-smoke"
@@ -67,7 +70,7 @@ REQUEST = registration.OperatorCodexRegistration(
     parent_pid=701,
     watcher_declared=True,
 )
-METADATA = {"model": "gpt-5.6-sol", "effort": "low", "lane_repo_root": "/tmp"}
+METADATA = {"model": "gpt-5.6-sol", "effort": "low", "workspace": "/tmp"}
 CLAUDE_REQUEST = registration.OperatorClaudeRegistration(
     host_ref=CLAUDE_HOST,
     agent_id="claude_code",
@@ -187,10 +190,11 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual(result.json()["operator_codex_host"]["host_ref"], HOST)
             row = read_managed_session(cast("StateManagementInterface", state), INSTANCE)
             self.assertEqual((row["host"], row["agent_runtime"]), ("tmux", "codex"))
+            self.assertEqual(row["session_origin"], "registered")
+            self.assertEqual(row["workspace"], METADATA["workspace"])
             self.assertIsNone(row.get("report_by"))
             self.assertIsNone(row.get("expires_at"))
             self.assertEqual(row["report_by_seconds"], 0)
-            self.assertIsNone(_retiring_lane_worktree(row))
             _rearm_report_by(cast("StateManagementInterface", state), INSTANCE, source="explicit_self_report")
             self.assertIsNone(read_managed_session(cast("StateManagementInterface", state), INSTANCE).get("report_by"))
 
@@ -211,6 +215,7 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(result.status_code, 200, result.text)
             self.assertEqual(result.json()["operator_claude_host"]["host_ref"], CLAUDE_HOST)
             row = read_managed_session(cast("StateManagementInterface", state), INSTANCE)
+            self.assertEqual(row["session_origin"], "registered")
             self.assertEqual(
                 (row["host"], row["host_ref"], row["agent_runtime"]),
                 ("tmux", CLAUDE_HOST, "claude_code"),
@@ -256,24 +261,46 @@ class RegistrationTests(unittest.TestCase):
             with self.assertRaises(registration.SessionNotFoundError):
                 read_managed_session(cast("StateManagementInterface", state), INSTANCE)
 
+    def test_verified_host_creates_registration_without_an_inventory_row(self) -> None:
+        state = cast("StateManagementInterface", RealShapeState())
+        with patch.object(registration, "qualify_operator_codex_host", return_value=METADATA):
+            registration.register_operator_codex_host(state, REQUEST)
+        self.assertEqual(read_managed_session(state, INSTANCE)["session_origin"], "registered")
+
     def test_existing_worker_cannot_be_adopted(self) -> None:
         state = cast("StateManagementInterface", RealShapeState())
         insert_managed_session(
             state,
             ManagedSessionSpec(
                 agent_instance_id=INSTANCE,
-                lane_id="worker",
-                assignment=fixture_assignment(),
-                work_class="analysis_deliverable",
-                budget_line="budget",
                 host="tmux",
                 agent_runtime="codex",
+                session_origin="spawned",
             ),
         )
         before = dict(read_managed_session(state, INSTANCE))
         with patch.object(registration, "qualify_operator_codex_host", return_value=METADATA), self.assertRaises(registration.OperatorHostQualificationError):
             registration.register_operator_codex_host(state, REQUEST)
         self.assertEqual(read_managed_session(state, INSTANCE), before)
+
+    def test_requalification_uses_the_migrated_origin_under_matching_host_and_session(self) -> None:
+        state = cast("StateManagementInterface", RealShapeState())
+        seed_legacy(state, with_default=True)
+        self.assertEqual(backfill_session_origins(state)["updated"], 5)
+        for identity in ("old-spawn", "old-registration", "old-ambiguous"):
+            with self.subTest(identity=identity), patch.object(registration, "qualify_operator_codex_host", return_value=METADATA):
+                row = read_managed_session(state, identity)
+                self.assertEqual((row["host"], row["workspace"], row["spawned_by_instance_id"]), ("tmux", "", ""))
+                self.assertEqual(require_updated(state.update_state(registration.AGENT_ROLE_BINDING_NAMESPACE, {"table": registration.TABLE_MANAGED_SESSION, "filters": {"id": row["id"]}}, {"agent_session_id": SESSION, "host_ref": HOST})), 1)
+                request = replace(REQUEST, agent_instance_id=identity)
+                before = dict(read_managed_session(state, identity))
+                if identity == "old-registration":
+                    registration.register_operator_codex_host(state, request)
+                    self.assertEqual(read_managed_session(state, identity)["workspace"], METADATA["workspace"])
+                else:
+                    with self.assertRaises(registration.OperatorHostQualificationError):
+                        registration.register_operator_codex_host(state, request)
+                    self.assertEqual(read_managed_session(state, identity), before)
 
     def test_identity_and_process_mismatches_are_refused(self) -> None:
         with patch.object(registration, "_output", side_effect=_probe), patch.object(registration.shutil, "which", return_value="/bin/tmux"):
@@ -567,6 +594,46 @@ class LauncherTests(unittest.TestCase):
                 launcher._armed(log, INSTANCE)
             log.write_text(json.dumps({"watch": "armed", "agent_instance_id": INSTANCE}))
             self.assertTrue(launcher._armed(log, INSTANCE))
+
+
+class RepositoryMappingTests(unittest.TestCase):
+    """Operator authority follows Git's registered working trees."""
+
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.workspace = Path(temp.name).resolve()
+        self.support = self.workspace / "support"
+        self.linked = self.workspace / "elsewhere" / "work copy"
+        self.foreign = self.workspace / "other-project"
+        for repo in (self.support, self.foreign):
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(self.support), "-c", "user.name=Fixture", "-c", "user.email=fixture@localhost", "commit", "-qm", "fixture", "--allow-empty"], check=True)
+        subprocess.run(["git", "-C", str(self.support), "worktree", "add", "-q", "--detach", str(self.linked)], check=True)
+        self.enterContext(patch.object(mapping, "_support_checkout", return_value=self.support))
+
+    def test_support_checkout_and_linked_checkout_map_to_support(self) -> None:
+        for cwd in (self.support, self.linked):
+            nested = cwd / "plugins"
+            nested.mkdir()
+            for target in (cwd, nested):
+                binding = mapping.resolve_repository_target(target)
+                self.assertEqual(binding, mapping.OperatorRepositoryTarget("support", self.support / ".venv/bin/solet-bridge", "Git-Controller"))
+
+    def test_unrelated_and_unregistered_directories_are_refused(self) -> None:
+        lookalike = self.workspace / ("support_" + "lane_" + "worktrees") / "review"
+        lookalike.mkdir(parents=True)
+        nested_repo = self.support / "independent"
+        subprocess.run(["git", "init", "-q", str(nested_repo)], check=True)
+        for cwd in (self.foreign, nested_repo, lookalike, self.workspace, self.workspace.parent):
+            with self.subTest(cwd=cwd), self.assertRaises(ValueError):
+                mapping.resolve_repository_target(cwd)
+
+    def test_a_symlink_out_of_the_family_is_refused(self) -> None:
+        link = self.support / "escape"
+        link.symlink_to(self.foreign)
+        with self.assertRaises(ValueError):
+            mapping.resolve_repository_target(link)
 
 
 if __name__ == "__main__":

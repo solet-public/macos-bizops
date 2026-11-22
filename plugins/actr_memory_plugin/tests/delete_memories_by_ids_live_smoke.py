@@ -37,7 +37,8 @@ from typing import Any, LiteralString, cast
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(
-    0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
+    0,
+    str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"),
 )
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "actr_memory_plugin" / "src"))
 
@@ -67,10 +68,7 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-_PROFILE_PG_CONFIG = (
-    REPO_ROOT / "profile" / "config" / "plugins"
-    / "postgres_state_management_plugin.json"
-)
+_PROFILE_PG_CONFIG = REPO_ROOT / "profile" / "config" / "plugins" / "postgres_state_management_plugin.json"
 
 
 def _load_pg_config(schema_name: str) -> PostgresConfig:
@@ -113,6 +111,12 @@ class _InMemVectorService:
     def has(self, external_id: str) -> bool:
         return external_id in self._ids
 
+    def find_missing_external_ids(self, namespace: str, candidate_external_ids: list[str]) -> dict[str, Any]:
+        """The segment lookup a delete runs first: a memory over the embedding budget has ``<id>:<k>`` vectors too."""
+        assert namespace == VECTOR_NAMESPACE
+        missing = [i for i in candidate_external_ids if i not in self._ids]
+        return {"action_status": "completed", "data": {"result": {"missing": missing}}, "error": None}
+
     def delete_by_external_ids(self, namespace: str, external_ids: list[str]) -> dict[str, Any]:
         assert namespace == VECTOR_NAMESPACE
         if self.fail:
@@ -146,8 +150,7 @@ def _seed_memory(provider: PostgresProvider, schema: str, mid: str) -> None:
         cur.execute(
             cast(
                 LiteralString,
-                f'INSERT INTO "{schema}"."{_MEMORY_TABLE}" '
-                "(id, namespace, content, status, is_deleted) VALUES (%s, %s, %s, %s, 0)",
+                f'INSERT INTO "{schema}"."{_MEMORY_TABLE}" (id, namespace, content, status, is_deleted) VALUES (%s, %s, %s, %s, 0)',
             ),
             (mid, "actr_memory_plugin", f"content {mid}", "active"),
         )
@@ -219,9 +222,7 @@ def test_empty_ids_is_noop(provider: PostgresProvider, schema: str) -> None:
     )
 
 
-def test_vector_failure_is_fail_loud_and_records_preserved(
-    provider: PostgresProvider, schema: str
-) -> None:
+def test_vector_failure_is_fail_loud_and_records_preserved(provider: PostgresProvider, schema: str) -> None:
     ids = ["bid_f1", "bid_f2"]
     for mid in ids:
         _seed_memory(provider, schema, mid)
@@ -238,8 +239,7 @@ def test_vector_failure_is_fail_loud_and_records_preserved(
     _check(raised, "an embedding-delete failure RAISES (fail-loud, no swallow)")
     _check(
         _row_exists(provider, schema, "bid_f1") and _row_exists(provider, schema, "bid_f2"),
-        "CASCADE VECTOR-FIRST: the embedding delete failed BEFORE any record delete → "
-        "records PRESERVED (orphan-MEMORY never orphan-VECTOR)",
+        "CASCADE VECTOR-FIRST: the embedding delete failed BEFORE any record delete → records PRESERVED (orphan-MEMORY never orphan-VECTOR)",
     )
 
 

@@ -27,12 +27,12 @@ from .codex_common import (
     _toml_string,
 )
 from .headless_adapter import (
-    _authority_system_prompt,
     _pid_alive,
     _resolve_default_cwd,
     _sigterm_then_kill,
 )
-from .lane_worktrees import LaneWorktreeError, spawn_worktree_cwd, worktree_pythonpath
+from .host_end_notice import notify_on_exit
+from .session_workspace import resolve_workspace
 from .solet_cli import WakeCliResolver
 
 
@@ -53,18 +53,13 @@ def _binary_remedies(codex_bin: str) -> list[str]:
     if codex_bin and os.access(codex_bin, os.X_OK):
         return []
     return [
-        f"no executable 'codex' binary found at {codex_bin!r} — "
-        "install Codex or pass codex_bin explicitly.",
+        f"no executable 'codex' binary found at {codex_bin!r} — install Codex or pass codex_bin explicitly.",
     ]
 
 
 _CODE_MODE_HOST_NAME = "codex-code-mode-host"
 _CODE_MODE_HOST_PROBE_SECONDS = 5.0
-_CODE_MODE_HOST_INDIRECTION = (
-    "re-apply the symlink indirection — "
-    "mv {host} {host}.real && ln -s {host}.real {host} — so the exec resolves "
-    "through a path that carries no deny record."
-)
+_CODE_MODE_HOST_INDIRECTION = "re-apply the symlink indirection — mv {host} {host}.real && ln -s {host}.real {host} — so the exec resolves through a path that carries no deny record."
 
 
 def _code_mode_host_path(codex_bin: str) -> Path | None:
@@ -107,26 +102,22 @@ def _code_mode_host_remedies(
         if not host.is_symlink():
             return []
         return [
-            f"{host} is a dangling symlink, so every code-mode Codex turn will "
-            "fail to spawn its host — restore the helper it points at, or "
-            "reinstall the Codex cask.",
+            f"{host} is a dangling symlink, so every code-mode Codex turn will fail to spawn its host — restore the helper it points at, or reinstall the Codex cask.",
         ]
     try:
         run_fn(
             [str(host), "--help"],
-            capture_output=True, text=True, timeout=probe_seconds,
+            capture_output=True,
+            text=True,
+            timeout=probe_seconds,
         )
     except subprocess.TimeoutExpired:
         return [
-            f"{host} did not return within {probe_seconds:g}s — the platform "
-            "denies exec of that exact path string, which wedges every "
-            "code-mode Codex turn from birth; "
-            + _CODE_MODE_HOST_INDIRECTION.format(host=host),
+            f"{host} did not return within {probe_seconds:g}s — the platform denies exec of that exact path string, which wedges every code-mode Codex turn from birth; " + _CODE_MODE_HOST_INDIRECTION.format(host=host),
         ]
     except OSError as exc:
         return [
-            f"{host} could not be executed ({exc}); "
-            + _CODE_MODE_HOST_INDIRECTION.format(host=host),
+            f"{host} could not be executed ({exc}); " + _CODE_MODE_HOST_INDIRECTION.format(host=host),
         ]
     return []
 
@@ -139,8 +130,7 @@ def _solet_name_remedies(solet_name: str) -> list[str]:
     if _TOML_BARE_KEY_RE.fullmatch(solet_name) is not None:
         return []
     return [
-        f"SOLET_NAME {solet_name!r} is not a TOML bare key — "
-        "managed Codex overrides require only letters, digits, '_' or '-'.",
+        f"SOLET_NAME {solet_name!r} is not a TOML bare key — managed Codex overrides require only letters, digits, '_' or '-'.",
     ]
 
 
@@ -151,24 +141,24 @@ def _transport_remedies(transport: str) -> list[str]:
 
 
 def _installed_config_remedies(
-    *, config: Mapping[str, object], solet_name: str,
-    solet_bin: str, transport: str,
+    *,
+    config: Mapping[str, object],
+    solet_name: str,
+    solet_bin: str,
+    transport: str,
 ) -> list[str]:
     remedies: list[str] = []
     if not _coordination_plugin_enabled(config):
         remedies.append(
-            "coordination-hooks is not installed and enabled in Codex config — install "
-            "coordination-hooks@<solet-marketplace> before managed spawning.",
+            "coordination-hooks is not installed and enabled in Codex config — install coordination-hooks@<solet-marketplace> before managed spawning.",
         )
     if transport == "mcp" and _mcp_server_config(config, solet_name) is None:
         remedies.append(
-            f"Codex config has no mcp_servers.{solet_name} table, required "
-            "for transport='mcp'; add that Codex-native MCP server config or use watch.",
+            f"Codex config has no mcp_servers.{solet_name} table, required for transport='mcp'; add that Codex-native MCP server config or use watch.",
         )
     if transport == "watch" and not (solet_bin and os.access(solet_bin, os.X_OK)):
         remedies.append(
-            "transport='watch' requires an executable solet CLI so the managed "
-            "worker can register without binding a role and arm its watcher.",
+            "transport='watch' requires an executable solet CLI so the managed worker can register without binding a role and arm its watcher.",
         )
     return remedies
 
@@ -190,20 +180,16 @@ class CodexAppServerHostDriver:
         client_factory: Callable[..., _CodexAppServerClient] = _CodexAppServerClient,
         grace_seconds: float = 10.0,
         code_mode_probe_seconds: float = _CODE_MODE_HOST_PROBE_SECONDS,
+        end_notice: bool = False,
     ) -> None:
-        self._codex_bin = (
-            codex_bin if codex_bin is not None
-            else shutil.which("codex") or str(Path.home() / ".local" / "bin" / "codex")
-        )
+        self._codex_bin = codex_bin if codex_bin is not None else shutil.which("codex") or str(Path.home() / ".local" / "bin" / "codex")
         # R11 (2026-08-17): UNRESOLVED override; resolved per read by the
         # `_solet_bin` property. See resolve_solet_bin's own note.
         self._cli_resolver = WakeCliResolver(
-            solet_bin, python_executable=python_executable,
+            solet_bin,
+            python_executable=python_executable,
         )
-        self._solet_name = (
-            solet_name if solet_name is not None
-            else os.environ.get("SOLET_NAME", "")
-        )
+        self._solet_name = solet_name if solet_name is not None else os.environ.get("SOLET_NAME", "")
         self._codex_home = _codex_home(codex_home)
         self._cwd = cwd if cwd is not None else _resolve_default_cwd()
         self._transport = transport if transport is not None else ""
@@ -211,6 +197,7 @@ class CodexAppServerHostDriver:
         self._client_factory = client_factory
         self._grace_seconds = grace_seconds
         self._code_mode_probe_seconds = code_mode_probe_seconds
+        self._end_notice = end_notice
         self._lock = threading.RLock()
         self._processes: dict[str, _TrackedCodexProcess] = {}
 
@@ -240,15 +227,15 @@ class CodexAppServerHostDriver:
         remedies = (
             _binary_remedies(self._codex_bin)
             + _code_mode_host_remedies(
-                self._codex_bin, probe_seconds=self._code_mode_probe_seconds,
+                self._codex_bin,
+                probe_seconds=self._code_mode_probe_seconds,
             )
             + _solet_name_remedies(self._solet_name)
             + _transport_remedies(resolved_transport)
         )
         if not self._config_path.is_file():
             remedies.append(
-                f"Codex config is missing at {self._config_path}; managed Codex spawns "
-                "require an installed/enabled coordination-hooks plugin.",
+                f"Codex config is missing at {self._config_path}; managed Codex spawns require an installed/enabled coordination-hooks plugin.",
             )
             return remedies
         return remedies + _installed_config_remedies(
@@ -272,12 +259,7 @@ class CodexAppServerHostDriver:
         transport = self._resolve_transport(spec)
         self._require_ready(transport)
         identity = self._spawn_identity(spec)
-        try:
-            cwd = spawn_worktree_cwd(spec.get("worktree_path"), self._cwd)
-        except LaneWorktreeError as exc:
-            from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
-
-            raise HostCannotSpawnError(str(exc)) from exc
+        cwd = resolve_workspace(spec.get("workspace"), self._cwd)
         env = self._spawn_env(identity, transport, cwd)
         client = self._build_client(spec, identity, transport, env, cwd)
         self._start_client(client)
@@ -285,7 +267,12 @@ class CodexAppServerHostDriver:
         host_ref = str(client.pid)
         with self._lock:
             self._processes[host_ref] = _TrackedCodexProcess(client=client, watcher=watcher)
+        self._arm_end_notice(client, host_ref)
         return host_ref
+
+    def _arm_end_notice(self, client: _CodexAppServerClient, host_ref: str) -> None:
+        if self._end_notice:
+            notify_on_exit(client.wait_exit, host="headless", host_ref=host_ref, solet_name=self._solet_name, solet_bin=self._solet_bin)
 
     def _require_ready(self, transport: str) -> None:
         from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
@@ -301,21 +288,19 @@ class CodexAppServerHostDriver:
         agent_instance_id = str(spec.get("agent_instance_id") or "")
         if not agent_instance_id:
             raise HostCannotSpawnError(
-                "spawn spec is missing agent_instance_id — the Codex process cannot "
-                "register against the managed-session lineage without it.",
+                "spawn spec is missing agent_instance_id — the Codex process cannot register against the managed-session lineage without it.",
             )
         return _SpawnIdentity(
             agent_instance_id=agent_instance_id,
             agent_session_id=f"ases-{agent_instance_id}",
-            label=(
-                str(spec.get("local_name") or "")
-                or str(spec.get("lane_id") or "")
-                or agent_instance_id
-            ),
+            label=(str(spec.get("local_name") or "") or str(spec.get("label") or "") or agent_instance_id),
         )
 
     def _spawn_env(
-        self, identity: _SpawnIdentity, transport: str, cwd: Path | None = None,
+        self,
+        identity: _SpawnIdentity,
+        transport: str,
+        cwd: Path | None = None,
     ) -> dict[str, str]:
         env = _identity_env(
             agent_instance_id=identity.agent_instance_id,
@@ -325,12 +310,15 @@ class CodexAppServerHostDriver:
             solet_bin=self._solet_bin,
             transport=transport,
         )
-        env["PYTHONPATH"] = worktree_pythonpath(cwd or self._cwd, env.get("PYTHONPATH", ""))
         return env
 
     def _build_client(
-        self, spec: Mapping[str, object], identity: _SpawnIdentity,
-        transport: str, env: Mapping[str, str], cwd: Path,
+        self,
+        spec: Mapping[str, object],
+        identity: _SpawnIdentity,
+        transport: str,
+        env: Mapping[str, str],
+        cwd: Path,
     ) -> _CodexAppServerClient:
         config = _read_codex_config(self._config_path)
         overrides = _codex_config_overrides(
@@ -353,7 +341,7 @@ class CodexAppServerHostDriver:
             argv=argv,
             cwd=cwd,
             env=env,
-            developer_instructions=_authority_system_prompt(spec),
+            developer_instructions="",
             model=str(spec.get("model") or ""),
             popen_fn=self._popen_fn,
         )
@@ -368,7 +356,11 @@ class CodexAppServerHostDriver:
             raise HostCannotSpawnError(f"Codex app-server boot failed: {exc}") from exc
 
     def _watcher_for_transport(
-        self, client: _CodexAppServerClient, env: Mapping[str, str], transport: str, cwd: Path,
+        self,
+        client: _CodexAppServerClient,
+        env: Mapping[str, str],
+        transport: str,
+        cwd: Path,
     ) -> subprocess.Popen[str] | None:
         from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
 
@@ -381,7 +373,10 @@ class CodexAppServerHostDriver:
             raise
 
     def _start_watcher(
-        self, parent_pid: int, env: Mapping[str, str], cwd: Path,
+        self,
+        parent_pid: int,
+        env: Mapping[str, str],
+        cwd: Path,
     ) -> subprocess.Popen[str]:
         from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
 
@@ -401,9 +396,11 @@ class CodexAppServerHostDriver:
                 [
                     self._solet_bin,
                     "watch",
-                    "--agent-id", _CODEX_AGENT_ID,
+                    "--agent-id",
+                    _CODEX_AGENT_ID,
                     "--no-claim",
-                    "--exit-with-parent", str(parent_pid),
+                    "--exit-with-parent",
+                    str(parent_pid),
                 ],
                 cwd=str(cwd),
                 env=dict(env),

@@ -50,7 +50,6 @@ from .gauge_canary_store import (
 )
 from .gauge_canary_store import retire_canary as retire_canary_mark
 from .gauge_notice_record_store import read_gauge_notice_records
-from .schema import WORK_CLASS_READ_ONLY
 from .session_context_status_store import upsert_session_context_status
 from .session_hosts import SYNTHETIC_HOST
 from .session_lifecycle_store import (
@@ -111,7 +110,7 @@ which is the failure worth the most care to avoid.
 
 WHY THIS IS SAFE FOR CONSTRAINT (b) even though the detector reads the same
 table: the gauge legs read ``agent_instance_id``, ``spawned_by_instance_id``,
-``report_by``/``report_by_seconds`` and ``lane_id``, and no leg branches on
+``report_by``/``report_by_seconds`` and ``label``, and no leg branches on
 ``host``. The value is provenance for humans and for the operational surfaces
 that list sessions — a plane the detector never consults — which is exactly
 where constraint (c) wants a synthetic mark to live.
@@ -119,7 +118,7 @@ where constraint (c) wants a synthetic mark to live.
 
 #: Substrings refused in the two identity fields the staleness ALARM echoes.
 #: Constraint (b) can hold perfectly in code and leak in prose: the notice
-#: quotes the subject's ``agent_instance_id`` and its ``lane_id`` verbatim, so a
+#: quotes the subject's ``agent_instance_id`` and its ``label`` verbatim, so a
 #: canary named for what it is announces itself in every alarm it provokes. This
 #: was found by a blindness test failing on its own fixture, and it is checked
 #: here rather than left to the naming convention that already failed once.
@@ -143,7 +142,9 @@ def _parse(value: object) -> datetime | None:
 
 
 def arrest_in_force(
-    windows: list[dict[str, Any]], *, at: datetime,
+    windows: list[dict[str, Any]],
+    *,
+    at: datetime,
 ) -> dict[str, Any] | None:
     """The arrest window covering ``at``, or ``None``.
 
@@ -210,8 +211,7 @@ def canary_tick(
     if not is_active_canary(state, agent_instance_id):
         raise CanaryError(
             "not_a_canary",
-            f"{agent_instance_id!r} is not an active registered canary; "
-            "refusing to write a synthetic gauge reading against it.",
+            f"{agent_instance_id!r} is not an active registered canary; refusing to write a synthetic gauge reading against it.",
         )
     clock = now or datetime.now(UTC)
     report_alive(
@@ -251,7 +251,7 @@ def canary_tick(
     }
 
 
-def _refuse_self_announcing(agent_instance_id: str, lane_id: str) -> None:
+def _refuse_self_announcing(agent_instance_id: str, label: str) -> None:
     """Refuse an identity that would announce the canary in its own alarm.
 
     Only the two fields the staleness notice ECHOES are checked, and that
@@ -259,17 +259,13 @@ def _refuse_self_announcing(agent_instance_id: str, lane_id: str) -> None:
     aesthetic. ``host`` is deliberately excluded — :data:`SYNTHETIC_HOST` says
     exactly what the row is, and no notice quotes it.
     """
-    for field, value in (("agent_instance_id", agent_instance_id), ("lane_id", lane_id)):
+    for field, value in (("agent_instance_id", agent_instance_id), ("label", label)):
         lowered = value.lower()
         for token in SELF_ANNOUNCING_TOKENS:
             if token in lowered:
                 raise CanaryError(
                     "self_announcing_identity",
-                    f"{field}={value!r} contains {token!r}; the staleness notice "
-                    f"quotes {field} verbatim, so this canary would announce "
-                    "itself in every alarm it provokes and the detector's "
-                    "blindness would hold in code while leaking in prose. Use an "
-                    "ordinary-looking identity.",
+                    f"{field}={value!r} contains {token!r}; the staleness notice quotes {field} verbatim, so this canary would announce itself in every alarm it provokes and the detector's blindness would hold in code while leaking in prose. Use an ordinary-looking identity.",
                 )
 
 
@@ -277,13 +273,11 @@ def register_synthetic_session(
     state: StateManagementInterface,
     *,
     agent_instance_id: str,
-    lane_id: str,
+    label: str,
     spawned_by_instance_id: str,
     directed_by: str,
     report_by_seconds: int,
-    budget_line: str = "",
     model: str = "",
-    work_class: str = WORK_CLASS_READ_ONLY,
 ) -> dict[str, Any]:
     """Give an already-registered canary the lifecycle row the detector needs —
     and dispatch no process at all.
@@ -330,28 +324,18 @@ def register_synthetic_session(
     if not is_active_canary(state, agent_instance_id):
         raise CanaryError(
             "not_a_canary",
-            f"{agent_instance_id!r} is not an active registered canary; a "
-            "lifecycle row may be minted here for a canary and nothing else. "
-            "Register the canary first — a verb that mints live sessions for "
-            "arbitrary identities would be the tamper path this canary exists "
-            "to detect.",
+            f"{agent_instance_id!r} is not an active registered canary; a lifecycle row may be minted here for a canary and nothing else. Register the canary first — a verb that mints live sessions for arbitrary identities would be the tamper path this canary exists to detect.",
         )
-    _refuse_self_announcing(agent_instance_id, lane_id)
+    _refuse_self_announcing(agent_instance_id, label)
     if not spawned_by_instance_id.strip():
         raise CanaryError(
             "missing_steward",
-            "spawned_by_instance_id is required: the staleness leg skips every "
-            "row without a spawner, so this canary would be invisible to the "
-            "detector it exists to exercise and its silence would be "
-            "misreadable as the detector failing.",
+            "spawned_by_instance_id is required: the staleness leg skips every row without a spawner, so this canary would be invisible to the detector it exists to exercise and its silence would be misreadable as the detector failing.",
         )
     if report_by_seconds <= 0:
         raise CanaryError(
             "missing_report_window",
-            "report_by_seconds must be positive: with no window, the derived "
-            "last report_alive is None — which means NO EVIDENCE, not 'not "
-            "advancing' — and the staleness leg skips the row instead of "
-            "judging it.",
+            "report_by_seconds must be positive: with no window, the derived last report_alive is None — which means NO EVIDENCE, not 'not advancing' — and the staleness leg skips the row instead of judging it.",
         )
     try:
         existing = read_managed_session(state, agent_instance_id)
@@ -360,26 +344,20 @@ def register_synthetic_session(
     if existing is not None:
         raise CanaryError(
             "session_exists",
-            f"{agent_instance_id!r} already has a managed_session row "
-            f"(lifecycle_state={existing.get('lifecycle_state')!r}); refusing "
-            "rather than minting a second identity for one canary.",
+            f"{agent_instance_id!r} already has a managed_session row (lifecycle_state={existing.get('lifecycle_state')!r}); refusing rather than minting a second identity for one canary.",
         )
     if not directed_by.strip():
         raise CanaryError(
             "missing_directed_by",
-            "a synthetic session must record WHO directed it; an unattributable "
-            "synthetic identity in the fleet ledger is the thing this verb must "
-            "never create.",
+            "a synthetic session must record WHO directed it; an unattributable synthetic identity in the fleet ledger is the thing this verb must never create.",
         )
     row = insert_managed_session(
         state,
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id,
-            lane_id=lane_id,
-            assignment=None,
-            provisioning_mode="synthetic_no_process",
-            work_class=work_class,
-            budget_line=budget_line,
+            label=label,
+            local_name=label,
+            session_origin="synthetic",
             host=SYNTHETIC_HOST,
             spawned_by_instance_id=spawned_by_instance_id,
             model=model,
@@ -389,16 +367,13 @@ def register_synthetic_session(
     )
     return {
         "agent_instance_id": agent_instance_id,
-        "lane_id": lane_id,
+        "label": label,
         "host": SYNTHETIC_HOST,
         "lifecycle_state": str(row.get("lifecycle_state") or ""),
         "spawned_by_instance_id": spawned_by_instance_id,
         "report_by_seconds": row.get("report_by_seconds"),
         "report_by": row.get("report_by"),
-        "promoted_by": (
-            "the first canary_tick's report_alive — production's own "
-            "spawning -> live transition, not a second rule minted here."
-        ),
+        "promoted_by": ("the first canary_tick's report_alive — production's own spawning -> live transition, not a second rule minted here."),
     }
 
 
@@ -445,7 +420,8 @@ def retire_gauge_canary(
     """
     if read_canary(state, agent_instance_id) is None:
         raise CanaryError(
-            "not_a_canary", f"{agent_instance_id!r} is not a registered canary.",
+            "not_a_canary",
+            f"{agent_instance_id!r} is not a registered canary.",
         )
     try:
         existing_session = read_managed_session(state, agent_instance_id)
@@ -454,7 +430,9 @@ def retire_gauge_canary(
     session_result: dict[str, Any] | None = None
     if existing_session is not None:
         session_result = retire_managed_session(
-            state, agent_instance_id=agent_instance_id, directed_by=directed_by,
+            state,
+            agent_instance_id=agent_instance_id,
+            directed_by=directed_by,
         )
     retire_canary_mark(state, agent_instance_id=agent_instance_id)
     return {
@@ -491,34 +469,28 @@ def direct_canary_arrest(
     if not is_active_canary(state, agent_instance_id):
         raise CanaryError(
             "not_a_canary",
-            f"{agent_instance_id!r} is not an active registered canary; a "
-            "tamper may only ever target a canary, never a real session.",
+            f"{agent_instance_id!r} is not an active registered canary; a tamper may only ever target a canary, never a real session.",
         )
     if expected_notice_type not in EXPECTABLE_NOTICE_TYPES:
         raise CanaryError(
             "invalid_expected_notice",
-            f"expected_notice_type must be one of {list(EXPECTABLE_NOTICE_TYPES)}, "
-            f"got {expected_notice_type!r}.",
+            f"expected_notice_type must be one of {list(EXPECTABLE_NOTICE_TYPES)}, got {expected_notice_type!r}.",
         )
     start, end = _parse(arrest_from), _parse(arrest_until)
     if start is None or end is None:
         raise CanaryError(
             "invalid_window",
-            "arrest_from and arrest_until must both be readable timestamps; an "
-            "unreadable bound would be skipped at attribution time, silently "
-            "turning a scheduled alarm into an unattributed one.",
+            "arrest_from and arrest_until must both be readable timestamps; an unreadable bound would be skipped at attribution time, silently turning a scheduled alarm into an unattributed one.",
         )
     if end <= start:
         raise CanaryError(
             "invalid_window",
-            f"the arrest window must be non-empty and forward-going: "
-            f"{arrest_from!r} -> {arrest_until!r}.",
+            f"the arrest window must be non-empty and forward-going: {arrest_from!r} -> {arrest_until!r}.",
         )
     if not directed_by.strip():
         raise CanaryError(
             "missing_directed_by",
-            "a tamper must record WHO directed it; an unattributable tamper is "
-            "the failure this audit log exists to make impossible.",
+            "a tamper must record WHO directed it; an unattributable tamper is the failure this audit log exists to make impossible.",
         )
     return record_tamper(
         state,
@@ -532,7 +504,8 @@ def direct_canary_arrest(
 
 
 def _classify_alarms(
-    alarms: list[dict[str, Any]], windows: list[dict[str, Any]],
+    alarms: list[dict[str, Any]],
+    windows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """``(scheduled, unattributed)`` — the mechanical attribution rule.
 
@@ -557,7 +530,9 @@ def _classify_alarms(
 
 
 def _closed_windows(
-    windows: list[dict[str, Any]], *, now: datetime,
+    windows: list[dict[str, Any]],
+    *,
+    now: datetime,
 ) -> list[dict[str, Any]]:
     """Windows that have ENDED — the only ones whose alarm can be judged.
 
@@ -573,7 +548,8 @@ def _closed_windows(
 
 
 def _window_was_answered(
-    window: dict[str, Any], alarms: list[dict[str, Any]],
+    window: dict[str, Any],
+    alarms: list[dict[str, Any]],
 ) -> bool:
     """Whether any alarm fell inside this window AND matched its expected type.
 
@@ -613,25 +589,11 @@ def _decide_verdict(
     """
     if detector_deployed is not True:
         measured = "measured as ABSENT" if detector_deployed is False else "not established"
-        return VERDICT_ABSTAINED, (
-            "the staleness detector's presence in the RUNNING release was "
-            f"{measured}, so no alarm was expectable and neither edge can be "
-            "judged. A verdict here would be a claim about an instrument that "
-            "is not running."
-        )
+        return VERDICT_ABSTAINED, (f"the staleness detector's presence in the RUNNING release was {measured}, so no alarm was expectable and neither edge can be judged. A verdict here would be a claim about an instrument that is not running.")
     if silent_windows:
-        return VERDICT_FAIL, (
-            f"{len(silent_windows)} closed arrest window(s) produced no matching "
-            "alarm: the detector was deployed, the gauge was arrested on the "
-            "real write path, and nothing fired. That is the armed edge failing."
-        )
+        return VERDICT_FAIL, (f"{len(silent_windows)} closed arrest window(s) produced no matching alarm: the detector was deployed, the gauge was arrested on the real write path, and nothing fired. That is the armed edge failing.")
     if unattributed:
-        return VERDICT_FAIL, (
-            f"{len(unattributed)} alarm(s) fell outside every logged arrest "
-            "window. The quiet edge failed — and note these are NOT canary "
-            "noise to dismiss: an unattributed alarm on a canary is either a "
-            "real fault or a gap in the audit log, and both need a reader."
-        )
+        return VERDICT_FAIL, (f"{len(unattributed)} alarm(s) fell outside every logged arrest window. The quiet edge failed — and note these are NOT canary noise to dismiss: an unattributed alarm on a canary is either a real fault or a gap in the audit log, and both need a reader.")
     if not matched_windows:
         return VERDICT_NO_EVIDENCE, (
             "no closed arrest window produced its expected alarm, because "
@@ -641,11 +603,7 @@ def _decide_verdict(
             "from here, and reading the silence as a pass is the vacuous green "
             "this verifier exists to refuse."
         )
-    return VERDICT_PASS, (
-        f"both edges hold: {len(matched_windows)} closed arrest window(s) each "
-        f"produced their expected alarm, and {unscheduled_count} alarms arrived "
-        "outside a window."
-    )
+    return VERDICT_PASS, (f"both edges hold: {len(matched_windows)} closed arrest window(s) each produced their expected alarm, and {unscheduled_count} alarms arrived outside a window.")
 
 
 def verify_canary(
@@ -680,10 +638,14 @@ def verify_canary(
     """
     clock = now or datetime.now(UTC)
     windows, windows_truncated = read_tamper_windows(
-        state, agent_instance_id=agent_instance_id, since=since,
+        state,
+        agent_instance_id=agent_instance_id,
+        since=since,
     )
     alarms, alarms_truncated = read_gauge_notice_records(
-        state, agent_instance_id=agent_instance_id, since=since,
+        state,
+        agent_instance_id=agent_instance_id,
+        since=since,
     )
     scheduled, unattributed = _classify_alarms(alarms, windows)
     closed = _closed_windows(windows, now=clock)

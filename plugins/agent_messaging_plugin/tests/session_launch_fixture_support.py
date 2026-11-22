@@ -9,29 +9,23 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
-from _register_unit_double import FIXTURE_UNIT_ID, RegisterUnitDouble
 from ananta.core.actions.action_processor import ActionProcessor
 from ananta.core.actions.action_queue_poller import ActionQueuePoller, QueuedAction
 from ananta.core.plugins.plugin_manager import PluginManager
 from ananta.core.state.async_job_manager import AsyncJobManager
 from ananta.core.state.flow_runtime_graph import FlowRuntimeGraph
 from ananta.interfaces.state_service_protocol import StateServiceProtocol
-from ananta.llm.agent_messaging.role_binding import role_binding_external_id
 
 # The caller inserts this core fixture directory before importing this module.
 from async_job_fixture_support import JobState
 
-import agent_messaging_plugin.managed_dispatch as dispatch_module
 import agent_messaging_plugin.plugin as plugin_module
-from agent_messaging_plugin.managed_dispatch import DispatchActor
 from agent_messaging_plugin.plugin import AgentMessagingPlugin
-
-_FIXTURE_NOW = datetime.now(UTC)
 
 
 @dataclass
@@ -52,35 +46,20 @@ def action(verb: str) -> FixtureAction:
 
 
 def parameters(verb: str) -> dict[str, Any]:
+    """The generic arguments of one launch verb: qualify_fleet takes none."""
+    if verb == "qualify_fleet":
+        return {}
     return {
-        "role_class": "ephemeral" if verb == "spawn_session" else "project",
-        "lane_id": "fixture-lane",
-        "unit_id": FIXTURE_UNIT_ID,
-        "repository_root": str(__import__("pathlib").Path(__file__).resolve().parents[3]),
-        "dispatch_kind": "infrastructure",
-        "work_class": "analysis_deliverable",
-        "budget_line": "fixture only",
+        "agent_runtime": "codex",
         "model": "fixture-model",
         "effort": "medium",
-        "agent_runtime": "codex",
-        "spawned_by_role": "Fixture-Coordinator",
+        "workspace": str(Path(__file__).resolve().parents[3]),
+        "first_message": "fixture first message",
         "host": "qualification",
-        "role_name": "" if verb == "spawn_session" else "Fixture-Worker",
-        "expected_path": "fixture-result.md",
-        "completion_contract": {"evidence_obligations": [{"id": "fixture", "allowed_statuses": ["pass"]}], "allowed_verdicts": ["READY"]},
-        "allowed_hosts": ["qualification"],
         "visibility": "headless",
         "local_name": "fixture-worker",
         "permission_mode": "fixture",
         "transport": "mcp",
-        "uptake_due_at": (_FIXTURE_NOW + timedelta(hours=1)).isoformat(),
-        "report_by": (_FIXTURE_NOW + timedelta(hours=1)).isoformat(),
-        "watchdog_due_at": (_FIXTURE_NOW + timedelta(hours=1)).isoformat(),
-        "dispatch_id": "mdp-fixture",
-        "event_id": "fixture-retry",
-        "action": "request_retry",
-        "prior_version": 2,
-        "payload": {},
     }
 
 
@@ -88,36 +67,6 @@ def plugin_fixture(state: JobState) -> Any:
     plugin: Any = AgentMessagingPlugin()
     plugin._get_state_service = lambda: state
     plugin._try_acquire_async_job_manager = lambda: AsyncJobManager(cast(Any, state), FlowRuntimeGraph(cast(Any, state)))
-    plugin._dispatch_actor_from_state = lambda _state: DispatchActor("agi-fixture", "ases-fixture", "live_peer_binding")
-    register = RegisterUnitDouble()
-    register.add_unit()
-    plugin._register_unit_client = lambda: register
-    state.rows.setdefault(
-        "role_binding",
-        [
-            {
-                "external_id": role_binding_external_id("Fixture-Coordinator"),
-                "role": "Fixture-Coordinator",
-                "agent_instance_id": "agi-fixture",
-                "agent_session_id": "ases-fixture",
-                "holder_kind": "session",
-                "holder_identity": {"agent_id": "codex"},
-                "claim_epoch": 1,
-                "is_deleted": 0,
-            }
-        ],
-    )
-    if not getattr(state, "_native_launch_defaults", False):
-        write = state.write_state
-
-        def native_write(namespace: str, data: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-            prepared = deepcopy(data)
-            if prepared.get("table") == "managed_dispatch":
-                prepared["record"].setdefault("is_deleted", 0)
-            return write(namespace, prepared, **kwargs)
-
-        state.write_state = native_write
-        state._native_launch_defaults = True
     state.rows.setdefault("flows", [{"id": "flow-fixture", "trigger_type": "bridge_process_call", "status": "active"}])
     return plugin
 
@@ -287,13 +236,7 @@ def dispatch(verb: str, plugin: Any, params: dict[str, Any] | None = None) -> di
 def effect_patch(verb: str, plugin: Any, operation: Callable[..., dict[str, Any]]) -> Any:
     if verb == "qualify_fleet":
         return patch.object(plugin, "qualify_fleet", lambda *args, **kwargs: plugin_module._success_result(data=operation(*args, **kwargs)))
-    if verb == "provision_role_session":
-        return patch.object(plugin, "_provision_role_session_data", operation)
-    target = {
-        "spawn_session": "lifecycle_spawn_session",
-        "dispatch_managed_work": "lifecycle_dispatch_managed_work",
-        "resolve_managed_dispatch": "lifecycle_resolve_managed_dispatch",
-    }[verb]
+    target = {"spawn_session": "lifecycle_spawn_session"}[verb]
     return patch.object(plugin_module, target, operation)
 
 
@@ -327,19 +270,4 @@ def authority_patches() -> Any:
 
     stack = ExitStack()
     stack.enter_context(patch.object(plugin_module, "holds_role", return_value=True))
-    stack.enter_context(patch.object(dispatch_module, "holds_role", return_value=True))
     return stack
-
-
-def seed_retry_dispatch(plugin: Any, state: JobState) -> None:
-    from agent_messaging_plugin.managed_dispatch import prepare_managed_dispatch
-
-    raw = parameters("dispatch_managed_work")
-    req = plugin_module._spawn_session_request_from_params(raw, "fixture:coordinator")
-    req = plugin_module._apply_spawn_session_policy(req, plugin._build_session_lifecycle_policy_config())
-    from dataclasses import replace
-
-    req = replace(req, spawned_by_instance_id="agi-fixture")
-    spec = plugin_module._dispatch_spec_from_params(raw, req, "fixture:coordinator")
-    prepare_managed_dispatch(cast(Any, state), spec, register=plugin._register_unit_client(), actor=plugin._dispatch_actor_from_state({}))
-    state.rows["managed_dispatch"][0].update(state="failed_start", version=2)

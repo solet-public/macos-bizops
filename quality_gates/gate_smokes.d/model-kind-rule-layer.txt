@@ -1,0 +1,1 @@
+plugins/agent_messaging_plugin/tests/model_kind_rule_layer_smoke.py

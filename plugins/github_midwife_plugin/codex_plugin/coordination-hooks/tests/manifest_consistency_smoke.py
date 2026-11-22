@@ -16,13 +16,13 @@ sys.dont_write_bytecode = True
 from _harness import HOOKS_DIR, PLUGIN_ROOT, Results, preflight  # noqa: E402
 
 # Cadence ruling (2026-08-11, cadence-only): step_zero and check_messages
-# moved from UserPromptSubmit to SessionStart(startup|resume|clear) so they
+# moved from UserPromptSubmit to SessionStart(startup|resume|clear|compact) so they
 # stop re-firing every prompt turn. The 2026-08-01 always-armed ruling for
 # step_zero_reminder.js is untouched by this move (no environment gate was
 # added or removed) and stays pinned by reminder_hooks_smoke.py's
 # check_step_zero_fires_everywhere. RED MUTATION for this Counter: re-adding
 # either reminder to any UserPromptSubmit entry, or dropping either from the
-# SessionStart(startup|resume|clear) group.
+# SessionStart(startup|resume|clear|compact) group.
 #
 # The current official hook contract defines background command hooks. Live
 # stock-process execution remains a separate acceptance leg. The context
@@ -35,12 +35,24 @@ from _harness import HOOKS_DIR, PLUGIN_ROOT, Results, preflight  # noqa: E402
 # gate/continue a turn. The finite observer has an eight-second manifest
 # deadline around its two-second wake and report children; unknown wake results
 # deliberately do not report a completed observation.
+# Working-tree recovery (git-safety Change 4, unit U4) adds recovery_codex.py on five
+# events. It is the only entry point that imports the shared engine: the 23 modules
+# listed in working_tree_recovery.MODULES sit beside it in hooks/, materialized
+# byte-identical from coordination_hooks_common, and are not handlers. Their own
+# source contract is below; the adapter's behaviour, timeouts and async flag are
+# pinned by recovery_codex_adapter_smoke.py. RED MUTATION for the Stop entry here:
+# dropping its "async": true.
 EXPECTED = Counter(
     {
-        ("SessionStart", "startup|resume|clear", "step_zero_reminder.js"): 1,
-        ("SessionStart", "startup|resume|clear", "session_start_context.py"): 1,
+        ("SessionStart", "startup|resume|clear|compact", "step_zero_reminder.js"): 1,
+        ("SessionStart", "startup|resume|clear|compact", "session_start_context.py"): 1,
+        ("SessionStart", "startup|resume|clear", "recovery_codex.py"): 1,
+        ("PreToolUse", "^Bash$", "recovery_codex.py"): 1,
+        ("PostToolUse", "^(Bash|apply_patch)$", "recovery_codex.py"): 1,
         ("Stop", "", "context_status_reporter.py"): 1,
         ("Stop", "", "inbox_consumer.py"): 1,
+        ("Stop", "", "recovery_codex.py"): 1,
+        ("SessionEnd", "", "recovery_codex.py"): 1,
     }
 )
 COMMAND_RE = re.compile(r"^(node|python3) \$\{PLUGIN_ROOT\}/hooks/([A-Za-z0-9_]+\.(?:js|py))$")
@@ -49,7 +61,10 @@ HOOK_KEYWORDS = {
     "session_start_context.py": ("live session context",),
     "context_status_reporter.py": ("context-status", "context status"),
     "inbox_consumer.py": ("inbox-consumer", "peer inbox"),
+    "recovery_codex.py": ("working-tree recovery", "recovery"),
 }
+# Files allowed to import subprocess. recovery_git.py is the engine's one git spawn boundary.
+SUBPROCESS_FILES = frozenset({"context_status_reporter.py", "inbox_consumer.py", "session_start_context.py", "recovery_git.py"})
 DOCUMENTS = (
     "hooks/hooks.json",
     "README.md",
@@ -72,8 +87,22 @@ NODE_WRITE_TOKENS = (
 NODE_PROCESS_TOKENS = ("child_process", "execFile", "execSync", "spawn(", "spawnSync")
 
 
+def _engine_modules() -> frozenset[str]:
+    """The shared engine's literal MODULES inventory, read without importing it."""
+    try:
+        tree = ast.parse((HOOKS_DIR / "working_tree_recovery.py").read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return frozenset()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "MODULES" for target in node.targets):
+            return frozenset(ast.literal_eval(node.value))
+    return frozenset()
+
+
 def _entry_points() -> set[str]:
-    return {path.name for path in HOOKS_DIR.iterdir() if path.is_file() and path.suffix in {".js", ".py"} and not path.name.startswith("_")}
+    """Every script on disk that is a handler candidate: the engine modules beside the adapter are libraries, not handlers."""
+    scripts = {path.name for path in HOOKS_DIR.iterdir() if path.is_file() and path.suffix in {".js", ".py"} and not path.name.startswith("_")}
+    return scripts - _engine_modules()
 
 
 def _python_imports(tree: ast.AST) -> set[str]:
@@ -119,7 +148,7 @@ def _check_python_source(res: Results, path: Path, source: str) -> None:
         f"{path.name} imports no network module",
     )
     process_imports = imports.intersection(PROCESS_MODULES)
-    if path.name in {"context_status_reporter.py", "inbox_consumer.py", "session_start_context.py"}:
+    if path.name in SUBPROCESS_FILES:
         res.check(
             process_imports == {"subprocess"},
             f"{path.name} imports only its declared process module",
@@ -131,6 +160,8 @@ def _check_python_source(res: Results, path: Path, source: str) -> None:
             f"{path.name} imports no process module",
             repr(sorted(process_imports)),
         )
+    if path.name in _engine_modules():
+        return  # the engine writes its local store by design; checklist 8 item 7 reviews exactly that, and it is byte-identical to coordination_hooks_common
     call_names = {node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, (ast.Attribute, ast.Name))}
     write_calls = call_names.intersection(PYTHON_WRITE_CALLS)
     res.check(
@@ -149,6 +180,21 @@ def _check_source_contract(res: Results) -> None:
             _check_javascript_source(res, path, source)
             continue
         _check_python_source(res, path, source)
+
+
+def _check_pinned_timeout(res: Results, script: str, entry: dict[str, object]) -> None:
+    if script == "inbox_consumer.py":
+        res.check(
+            entry.get("timeout") == 8,
+            "inbox consumer has the paired 8-second Stop timeout",
+            repr(entry.get("timeout")),
+        )
+    if script == "session_start_context.py":
+        res.check(
+            entry.get("timeout") == 30,
+            "live session context has the 30-second SessionStart timeout, above its worst path (the 3.5 s inbox cap plus the 3.5 s bridge fallback when no statement file is found)",
+            repr(entry.get("timeout")),
+        )
 
 
 def _record_entry(
@@ -183,14 +229,11 @@ def _record_entry(
     script = match.group(2)
     if script == "context_status_reporter.py":
         res.check(entry.get("async") is True, "context reporter is explicitly async")
+    elif script == "recovery_codex.py" and event == "Stop":
+        res.check(entry.get("async") is True, "recovery_codex.py Stop entry is explicitly async")
     else:
-        res.check("async" not in entry, f"{script} has no undeclared async mode")
-    if script == "inbox_consumer.py":
-        res.check(
-            entry.get("timeout") == 8,
-            "inbox consumer has the paired 8-second Stop timeout",
-            repr(entry.get("timeout")),
-        )
+        res.check("async" not in entry, f"{script} has no undeclared async mode on {event}")
+    _check_pinned_timeout(res, script, entry)
     referenced.add(script)
     actual[(event, matcher, script)] += 1
 
@@ -255,6 +298,21 @@ def _check_stop_binding(res: Results, hooks: dict[object, object]) -> None:
     res.check(len(stop_groups) == 1, "manifest carries one Stop group", repr(stop_groups))
 
 
+SESSION_START_SOURCES = ("startup", "resume", "clear", "compact")
+
+
+def _check_session_start_sources(res: Results, hooks: dict[object, object]) -> None:
+    """The principle-block hook is sent every source a session starts from, a compaction included."""
+    groups = hooks.get("SessionStart")
+    holders = [group for group in groups if "session_start_context.py" in json.dumps(group)] if isinstance(groups, list) else []
+    if not res.check(len(holders) == 1, "session_start_context.py is bound once under SessionStart", f"found {len(holders)}"):
+        return
+    matcher = holders[0].get("matcher", "") if isinstance(holders[0], dict) else ""
+    for source in SESSION_START_SOURCES:
+        res.check(re.fullmatch(str(matcher), source) is not None, f"the session_start_context.py group matches source {source}")
+    res.check(re.fullmatch(str(matcher), "unknown") is None, "the session_start_context.py group does not match an unnamed source")
+
+
 def main() -> int:
     preflight()
     res = Results("Codex plugin-manifest consistency")
@@ -272,6 +330,7 @@ def main() -> int:
 
     res.check(actual == EXPECTED, "registered event/matcher/script inventory is exact", repr(actual))
     _check_stop_binding(res, hooks)
+    _check_session_start_sources(res, hooks)
     _check_documentation(res, referenced)
     _check_source_contract(res)
     return res.finish()

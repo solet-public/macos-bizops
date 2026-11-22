@@ -322,7 +322,7 @@ plugins/agent_messaging_plugin/tests/sender_session_reply_fallback_smoke.py
 # parks the caller's opaque launcher session key, PlatformSurface derives the
 # identity from the peer REGISTRY (never from the request) under a key family
 # separate from inference_vertex_*, the real ActionProcessor lift carries it,
-# and both send verbs stamp it — send_peer_message previously hardcoded the
+# and both send verbs stamp it — peer_send previously hardcoded the
 # sentinel on EVERY transport, MCP included. Carries the negative control that
 # keeps the rejected design out: attribution must never register a peer
 # identity, because PeerRegistry.register sweeps by session_label and
@@ -425,15 +425,6 @@ plugins/agent_messaging_plugin/tests/role_model_v4_slice_a_smoke.py
 # + a faithful write_state + in-memory store).
 plugins/agent_messaging_plugin/tests/role_model_v4_slice_b_smoke.py
 
-# Fleet session-management Phase B, D1 §3.1 — the role_class one-shot backfill.
-# Stamps ROLE_CLASS_DEFAULT onto pre-Phase-B role rows (marker-gated, leaves
-# already-set rows untouched, self-healing on an unset marker); separately
-# detects (never silently fixes) a pre-existing agent_instance_id holding more
-# than one named role, excluding sys:* slots from the count — re-checked every
-# run, NOT itself marker-gated, since new violations can appear after the
-# one-shot stamp completes. Offline (fake state over real ActionResult shapes).
-plugins/agent_messaging_plugin/tests/role_class_backfill_smoke.py
-
 # Fleet session-management Phase B, D1 §2/AMEND-4b — the session_role_claim
 # cardinality gate, unit-level. Fresh claim wins; a same-session re-claim of
 # the SAME role is a no-op refresh (branch i); a second NAMED role while the
@@ -455,9 +446,10 @@ plugins/agent_messaging_plugin/tests/session_role_claim_store_smoke.py
 # claim self-repairs via branch (iii); (b) a clean displacement -> the
 # loser's row is gone immediately (the delete fired, branch iii never ran).
 # Plus Dawn's two landing conditions: (c) REL-07(1) fill-when-empty measured
-# through the new gate; (d) the §3.1 reserved-mint guard (refuses a fresh
-# <solet>-Main mint, passes an already-legislated one). TRUST-MODEL
-# HONEST throughout — see module docstring.
+# through the new gate; (d) a <solet>-Main name is an ordinary claim: a fresh
+# mint lands and a second session displaces it, as for any role, and a name
+# whose role row already exists claims normally. (e) The sys: keyspace is still
+# refused. TRUST-MODEL HONEST throughout — see module docstring.
 plugins/agent_messaging_plugin/tests/role_claim_cardinality_gate_smoke.py
 
 # Fleet session-management Phase B, D1 §3.2/§3.3 (AMEND 2a/2b) — the
@@ -524,7 +516,7 @@ plugins/agent_messaging_plugin/tests/accepted_authorization_smoke.py
 # The same contract on private PostgreSQL: declarative install then no-op
 # planning, typed-transaction CAS and event rollback, one winner for
 # concurrent terminal changes. Exits 77 (disclosed SKIP) without
-# PROJECT_SOLET_DESK_TEST_DSN; runs under provision_test_pg.
+# the private database fixture; runs under provision_test_pg.
 plugins/agent_messaging_plugin/tests/accepted_authorization_pg_smoke.py
 
 # T1 S3 (2026-08-05, seat's design ruling) — budget_report.py, the new
@@ -540,29 +532,18 @@ plugins/agent_messaging_plugin/tests/accepted_authorization_pg_smoke.py
 # mapping row, mapping resolves to no ledger session, ledger session with
 # no usage-bearing events) count as sessions_uncovered per the seat's
 # no-silent-caps coverage-disclosure rail; usage sums across every
-# claude_session_id a worker has ever rotated through; lane_id/budget_line
+# claude_session_id a worker has ever rotated through; label
 # filters; by_model breakdown including the empty-string bucket; a
 # boolean/string field in usage_json is never summed (bool is an int
 # subclass in Python); and the real AgentMessagingPlugin.budget_report verb
 # handler genuinely extracts params and calls through.
 plugins/agent_messaging_plugin/tests/budget_report_smoke.py
 
-# T2 (fleet-token-efficiency lane, 2026-08-05, seat's approved text arm-b79d2549…)
-# — authority_contract.py, the fleet delegation contract rendered into every
-# spawn's --append-system-prompt so a worker's authority to act is anchored in
-# a TRUSTED spawn surface (the adapter's own process launch) rather than
-# peer-channel prose. Proves: every named placeholder resolves; the template's
-# own literal {"op": "is_null"} JSON example survives rendering byte-for-byte
-# (confirms plain str.replace is used, never str.format, which would misparse
-# it); the seat's two approved text edits hold (opening sentence reads "a
-# worker of class", never "claiming role"; FIRST ACTIONS defers the role NAME
-# to dispatch prose, never claims the role_class string itself); a spec
-# missing role_class/unit_id/spawned_by_role renders blank slots rather than
-# raising (authority-at-first-contact stays ON by default even for a caller
-# that predates T2); and the RED-FIRST render-time guard the seat's approval
-# explicitly required — an unresolved {placeholder} must raise
-# UnresolvedPlaceholderError, never ship into a live system prompt.
-plugins/agent_messaging_plugin/tests/authority_contract_smoke.py
+# Candidate relay documentation, checkout only. The Git-Controller skill names
+# the native landing run and its dry run, both delivery and readiness relays,
+# and states that a peer message never authorizes a landing; the Main seat
+# contract points to that skill; the retired authority delegation template is
+# absent.
 
 # Fleet session-management Phase B, D1 §3.2/§5 — the registration-hook fix
 # (Dawn ruling arm-11511b07: managed_session declared agent_session_id/
@@ -602,7 +583,7 @@ plugins/agent_messaging_plugin/tests/session_hosts_smoke.py
 # depends on — verified against mcp_bridge/__main__.py's real
 # AGENT_INSTANCE_ID-honoring contract, not assumed); the exact env/argv wiring
 # (AGENT_SESSION_ID minted exactly once, label falls back to agent_instance_id
-# when no lane_id) via a records-only fake popen_fn; alive()/terminate()/
+# when no label is given) via a records-only fake popen_fn; alive()/terminate()/
 # shutdown() against REAL short-lived subprocesses (real kill -0 + SIGTERM/
 # SIGKILL + reap, never the real claude binary); driver_channel() returns None
 # for any host_ref this adapter's in-memory map doesn't recognize (the exact
@@ -652,26 +633,6 @@ plugins/agent_messaging_plugin/tests/headless_adapter_stdout_drain_smoke.py
 # in this lane.
 plugins/agent_messaging_plugin/tests/headless_adapter_init_event_capture_smoke.py
 
-# Fleet session-management Phase B, §6 L3 rule 1 — the per-work_class
-# spawn-default config substrate (plugin.yaml's work_class_defaults block,
-# NOT a new state table: "cheapest capable model per work_class" is an
-# operator/governance policy call this plugin does not invent, so the
-# substrate ships with an empty default and a pure lookup/apply pair).
-# _as_work_class_defaults tolerates a malformed entry (skips it, logs,
-# keeps well-formed siblings) rather than failing the whole config build;
-# _apply_work_class_defaults never overrides an explicit caller model/effort
-# and is a true no-op (same object identity) for an unconfigured work_class
-# or an empty config block — the shipped-default case is provably inert, not
-# just "untested."
-plugins/agent_messaging_plugin/tests/work_class_defaults_smoke.py
-# restart_session's spawn-leg policy resolution (2026-08-10 fix): the
-# choreography's rebuilt spawn request must inherit the SAME
-# _apply_spawn_session_policy pipeline spawn_session() itself runs, not a
-# private copy that silently drops permission_mode/allowed_tools/transport
-# (managed_session has no columns for any of the three). Mutation-proved:
-# commenting out _resolve_permission_mode's call site reds exactly this
-# smoke's one targeted assertion, nothing else.
-plugins/agent_messaging_plugin/tests/restart_spawn_policy_smoke.py
 # rotate_session's verify-window false-negative fix (2026-08-10): a real
 # production rotation was measurably healthy but reported verify_timeout
 # because the new claude_session_id landed ~6.7s after the old 60s
@@ -741,12 +702,11 @@ plugins/agent_messaging_plugin/tests/tmux_driver_channel_smoke.py
 # Fleet session-management Phase B, D1 §4 — the L1 verb bodies
 # (spawn_session, list_sessions, session_status, terminate_session,
 # retire_session, report_alive, and the D2-window drive_session), pure-
-# function level: every declared error token exercised (unknown_role_class,
-# unknown_work_class, budget_line_required, role_not_legislated,
-# role_class_conflict, reserved_role_name, host_not_declared/
-# host_mechanism_missing/host_cannot_spawn, session_not_found,
-# illegal_lifecycle_transition, lifecycle_state_conflict, unknown_status,
-# empty_text, unsupported_on_host); terminate/retire idempotency
+# function level: its error tokens exercised (generic_spawn_field_required,
+# local_name_already_held, visibility_host_mismatch, host_mechanism_missing/
+# host_cannot_spawn, session_not_found, lifecycle_state_conflict,
+# unknown_status, empty_text, unsupported_on_host/unsupported_on_driver);
+# terminate/retire idempotency
 # (already_terminal/already_retired, re-drivable by construction);
 # report_alive's overdue-recovery + parked-conflict + unconditional
 # report_by re-arm (even on a same-status no-op transition); drive_session's
@@ -755,44 +715,25 @@ plugins/agent_messaging_plugin/tests/tmux_driver_channel_smoke.py
 # exactly their own assertions, 2026-08-04).
 plugins/agent_messaging_plugin/tests/session_lifecycle_verbs_smoke.py
 plugins/agent_messaging_plugin/tests/workbench_brief_snapshot_smoke.py
-plugins/agent_messaging_plugin/tests/managed_dispatch_smoke.py
-plugins/agent_messaging_plugin/tests/managed_dispatch_first_turn_smoke.py
-plugins/agent_messaging_plugin/tests/managed_dispatch_cli_actor_smoke.py
-plugins/agent_messaging_plugin/tests/managed_dispatch_persisted_utc_smoke.py
-plugins/agent_messaging_plugin/tests/managed_dispatch_unit_mint_smoke.py
-plugins/agent_messaging_plugin/tests/role_provisioning_smoke.py
+plugins/agent_messaging_plugin/tests/caller_identity_actor_smoke.py
 
-# Declarative model-dispatch policy — fail-closed loading and profile
-# validation. The smoke first proves missing/malformed policy refusal, then
-# deletes the required fix row as a red mutation and proves dispatch refusal.
-plugins/agent_messaging_plugin/tests/model_dispatch_policy_smoke.py
-
-# iss_48ea8171 / unt_4a6526fd: cost-aware (model, effort) tier selection — the
-# pure decision core behind select_dispatch_tier. Proves, on the operator's
+# iss_48ea8171 / unt_4a6526fd: capability-only cost-aware tier selection —
+# the pure decision core behind select_dispatch_tier. Proves, on the operator's
 # 2026-09-19 AA index + cost-per-task table, that the exact cost argmin
 # reproduces every hand-computed dominance verdict, exposes the per-model
-# diminishing-returns ladder, and refuses stale / un-cross-checked / unpriced
-# / impossible asks with distinct codes. PURE UNIT, offline: inline fixture,
-# no database, network, or model turn.
+# diminishing-returns ladder, and distinguishes stale / un-cross-checked /
+# unpriced / impossible asks. PURE UNIT, offline: inline fixture, no database,
+# network, or model turn.
 plugins/agent_messaging_plugin/tests/dispatch_tier_selection_smoke.py
-
-# Dispatch runtime constraint: select_dispatch_tier(runtime=...) filters the
-# catalog to one runtime before domination, so a Codex cell cannot dominate a
-# chosen Claude cell out. Proves the unconstrained selection is unchanged, the
-# receipt carries runtime_constraint and verify replays it, a stripped, changed
-# or missing constraint is refused, and no-clearing / unknown runtime refuse
-# loudly. PURE UNIT, offline: real-shape state fake, no database, network, or
-# model turn.
-plugins/agent_messaging_plugin/tests/dispatch_runtime_constraint_smoke.py
 
 # iss_c6fbf9ae / iss_3ff06701: allowance-pool readings are optional. Against the
 # unmodified shipped usage profile, proves a claude_code cell is selectable with
-# no reading recorded (an unknown quota never excludes) and its receipt
-# verifies; a current reading showing a pool exhausted excludes the cells it
-# covers, even beside an unknown pool; an expired, retracted or never-recorded
-# pool excludes nothing and is never inferred from another pool; invalid records
-# are refused and write nothing. PURE UNIT, offline: real-shape state fake, no
-# database, network, or model turn.
+# no reading recorded (an unknown quota never excludes); a current reading
+# showing a pool exhausted excludes the cells it covers, even beside an unknown
+# pool; an expired, retracted or never-recorded pool excludes nothing and is
+# never inferred from another pool; invalid records are refused and write
+# nothing. PURE UNIT, offline: real-shape state fake, no database, network, or
+# model turn.
 plugins/agent_messaging_plugin/tests/allowance_pool_reading_smoke.py
 
 # iss_eef0812b: the allowance-weighted dispatch objective. Against the SHIPPED
@@ -801,19 +742,18 @@ plugins/agent_messaging_plugin/tests/allowance_pool_reading_smoke.py
 # fails loud on every malformed field and never reads as a conversion; Codex,
 # unconstrained and explicitly-requested selections are byte-identical with and
 # without the table; a plan with no table keeps today's ranking and warns; the
-# receipt keeps its keys, pins the ranking and refuses a stripped constraint or
-# an edited weight; an exhausted pool still excludes a weighted cell. PURE UNIT,
+# plan-selected objective remains consistent and an edited weight changes the
+# ordered choice; an exhausted pool still excludes a weighted cell. PURE UNIT,
 # offline: real-shape state fake, no database, network, or model turn.
 plugins/agent_messaging_plugin/tests/allowance_weighted_dispatch_smoke.py
 
 # iss_48ea8171 / unt_4a6526fd: the model capability catalog store + verbs
 # (schema 1.11.0). Proves a seed writes pending_crosscheck cells and never
-# accepts; select_dispatch_tier refuses catalog_stale until cells are
-# accepted and fresh, then serves the operator's verdict under the dispatch
-# policy allowlist; a re-seed never downgrades an accepted cell; seeded
-# records name only declared columns; a state fault raises, never a partial
-# seed. PURE UNIT, offline: real-shape state fake, no database, network, or
-# model turn.
+# accepts; select_dispatch_tier refuses catalog_stale until cells are accepted
+# and fresh, then serves only an accepted catalog cell; a re-seed never
+# downgrades an accepted cell; seeded records name only declared columns; a
+# state fault raises, never a partial seed. PURE UNIT, offline: real-shape state
+# fake, no database, network, or model turn.
 # Atomic Operator cell policy lifecycle, persistence, selection and quota separation. Offline.
 plugins/agent_messaging_plugin/tests/model_cell_enablement_smoke.py
 plugins/agent_messaging_plugin/tests/model_catalog_policy_smoke.py
@@ -893,11 +833,7 @@ plugins/agent_messaging_plugin/tests/session_lifecycle_transport_smoke.py
 # guard proven re-run-safe; delivery resolves the waiter's live binding and
 # is best-effort — an unresolvable waiter or a lane-scoped edge with no
 # waiter_instance_id still fires the edge as state, logged, never a crash);
-# sweep_lane_closed_dependencies (Dawn ruling 2026-08-03, 'lane_closed'
-# replacing the unbuildable 'lane_landed' spec kind) fires+delivers once
-# every managed_session row carrying the lane_id is terminal — proven NOT
-# vacuously true on a lane with zero spawned sessions, and NOT closed while
-# even one row remains non-terminal. SessionRoleClaimPruner (Architect
+# SessionRoleClaimPruner (Architect
 # ratification #3) proves all three
 # predicate branches — a terminal managed_session prunes immediately, a
 # live managed_session OR a live registry binding is NEVER pruned regardless
@@ -908,8 +844,6 @@ plugins/agent_messaging_plugin/tests/session_lifecycle_transport_smoke.py
 # session_terminal dependency (simulating a crash between retire_session's
 # steps) is driven all the way to 'retired' by a single re-invocation.
 plugins/agent_messaging_plugin/tests/session_sweep_smoke.py
-plugins/agent_messaging_plugin/tests/main_notice_waiter_suppression_smoke.py
-plugins/agent_messaging_plugin/tests/session_sweep_unusable_name_smoke.py
 
 # R3-U1 operator presence reconciliation: a live binding survives even after
 # three idle days; a closed binding is dry-run proposed then terminated; a
@@ -1863,7 +1797,7 @@ plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/memory_pass
 # the frozen candidate identity, and refuses a master conflict or non-ancestor
 # base. Release batches need the PASS/CLEAR composite review and every member
 # ready. Unreadable or inconsistent register answers fail closed. Hermetic:
-# recording psolet stand-in, throwaway Git repositories.
+# recording register CLI stand-in, throwaway Git repositories.
 
 # Fleet session-management Phase B, §6 permission-mode design (2026-08-03) —
 # .claude/hooks/headless_tool_allowlist_gate.py, a PreToolUse mechanism for a
@@ -1881,7 +1815,7 @@ plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/memory_pass
 # _spawn_env only sets that env var when an allowlist is actually configured
 # non-empty, so every headless spawn today runs UNARMED/ungated by default —
 # this smoke still covers the mechanism itself (which stays landed as shelf
-# capability, armed per-work_class whenever usage data argues for it), not a
+# capability, armed whenever usage data argues for it), not a
 # currently-enforced restriction.
 
 # T1 usage-capture lane (2026-08-05) — .claude/hooks/capture_session_mapping.py,
@@ -1895,29 +1829,6 @@ plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/memory_pass
 # named spool file per firing), the capture_source composite token
 # (hook:<source>, falling back to hook:unknown when source is absent), and
 # every non-fatal failure leg.
-
-# T2 (fleet-token-efficiency lane, 2026-08-05) — .claude/hooks/heartbeat_report_alive.py,
-# the PostToolUse heartbeat that replaced a REJECTED detached-shell-loop design
-# (seat's redesign ruling, after pid-32482 was measured live surviving a fleet
-# /clear and stamping an effectively-dead session's row for ~10 hours). This
-# hook has NO persistent process of its own -- it only runs synchronously as
-# part of an actual tool-call lifecycle, so it dies with the context it
-# vouches for BY CONSTRUCTION. Throttled to at most once per _THROTTLE_SECONDS
-# via a per-worker local marker file's mtime. Covers: missing env vars are
-# non-fatal; a fresh marker throttles the very next firing; a stale marker
-# allows another call; a FAILED report_alive call never touches the marker,
-# and any recorded failure (a failed report_alive or a worktree attestation
-# fault) backs off for one _FAILURE_BACKOFF_SECONDS window keyed on the
-# failure file's mtime, so the first firing after the window retries and
-# carries the kept record (never silently suppressed); many rapid firings
-# under one identity still throttle correctly throughout (e.g. across a
-# /clear -- the worker is genuinely still alive, continued heartbeating is
-# correct there); and the RED-FIRST structural false-liveness guard --
-# inspects the hook's own source for ANY backgrounding primitive (Popen,
-# os.fork, nohup, disown, start_new_session) and asserts none exist.
-
-
-
 
 # WS-4b.2 — stock-Codex fixed coordination reminders and repo marketplace.
 # Hermetic checks pin the conservative 0.141 manifest inventory, fixed generic
@@ -2813,17 +2724,15 @@ plugins/actr_memory_plugin/tests/actr_memory_read_discipline_smoke.py
 # seat goal-file mechanism (~/.ananta/seat_goals/<label>.md), rendered from
 # agent_goal:seat:<label>:item:<id> tagged memory_service documents instead
 # of hand-journaled prose. Proves all four binding acceptance criteria from
-# the fix brief: capability detection/branching (case 1 project-solet
+# the fix brief: capability detection/branching (case 1 register
 # reachable vs. cases 2/3 not), no silent ticket_ref: null (rejected at both
 # the goal_item_open write boundary and goal_render.py's own validation
 # gate), fail-loud in case 1 on a live/stored disagreement or a failed/
 # missing live lookup (never a silent fallback to the stale stored value),
 # and goal_item_open/goal_item_close as the sole seat-facing write path with
 # goal_render.py owning the target file exclusively (atomic write, no
-# leftover tmp file). Hermetic: stubs both solet-bridge and psolet by path,
-# no real platform, no real project-solet. goal_keeper.py itself is unchanged —
-# this smoke also checks its own open-item parser still recognizes the
-# rendered file's open lines.
+# leftover tmp file). Hermetic: stubs both solet-bridge and the register CLI by path,
+# no real platform, no live register.
 
 # Frontier-first B5 (2026-07-17) — the SINGLE ActionFactory result/error-processor
 # merge that assembles a local-inference (process_results / process_error) prompt
@@ -3507,24 +3416,18 @@ plugins/agent_messaging_plugin/tests/peer_mark_role_covered_smoke.py
 # state, mock bridge transport.
 plugins/agent_messaging_plugin/tests/role_covered_floor_intake_smoke.py
 
-# Fleet session-management D4 Part B item 1 (§3.1 Q1) — the legislate_role
-# governance-act verb: the ONE sanctioned path that stamps an
-# authority-carrying role_class ('primary'/'principal') onto a role row at
-# birth. (a) a fresh legislation creates the row; a same-class re-run is an
-# idempotent no-op; a DIFFERENT-class re-run is refused loud
-# (RoleClassConflictError), never silently reassigned. Verb-layer guards
-# (role_class_not_legislatable, reserved_primary_name_required,
-# missing_argument) driven directly. (b) the ordinary claim path's
-# reserved-mint refusal is exercised against a name THIS SMOKE NEVER
-# LEGISLATES (Zzz-Main, not Coordinator-Main) so the guard is genuinely tested, not
-# vacuous — and the failure message is asserted to confirm WHICH of the two
-# reserved_role_name-emitting guards fired. Plus condition 2: claim-time
-# fleet-uniqueness (displaces, never coexists) and class-consistency
-# (cardinality_conflict against a session already holding a different named
-# role) asserted AGAINST THE ROW THIS ACT ACTUALLY LEGISLATES, reusing the
-# landed D1 claim gate rather than rebuilding it. Real RealShapeState, no
-# bridge/DB.
-plugins/agent_messaging_plugin/tests/legislate_role_smoke.py
+# A role has no class and no legislation act. (a) Absence: no legislate_role
+# process, method, policy row or KB document; no authorize/revoke retirement
+# process in its place; no process input, contract constant or role table
+# class column. (b) Ordinary behaviour on RealShapeState: a
+# <solet>-Main name claims and is displaced like any role, one role per
+# session, sys: refused, rebind, release, and append-only retirement that
+# refuses a live holder. (c) On private PostgreSQL, the real schema manager
+# upgrades a predecessor role table holding a classed row and its binding:
+# information_schema.columns shows no class column afterwards and the
+# row and binding survive. Exits 77 (disclosed SKIP) after (a) and (b) pass
+# when the private database fixture is absent; runs under provision_test_pg.
+plugins/agent_messaging_plugin/tests/role_authority_smoke.py
 
 # schema-debt-external-id lane, 2a (2026-08-06): session_ledger's schema
 # smoke, extended to gate the standardizer's external_id unique=False
@@ -3588,41 +3491,14 @@ plugins/agent_messaging_plugin/tests/seat_rotation_helper_smoke.py
 # fallback for any unmatched model, and the 50%-threshold boundary comparison.
 plugins/agent_messaging_plugin/tests/rotation_thresholds_smoke.py
 
-# L4c self-notice leg (2026-08-17) -- the rotation surface's third leg, which
-# reaches the MEASURED SESSION ITSELF rather than its steward. Pins: the
-# 300K-500K blind spot (band-keyed, not `rotation_due`-keyed -- the two
-# instruments provably disagree there); band-EDGE latching so an escalation is
-# never suppressed by the milder notice that preceded it; the 20-minute floor
-# as a repeat bound rather than a period; the coverage gap counted as a number
-# rather than swallowed; the capacity band firing early on an unrecognised
-# model (fail-safe, never fail-open); tier-invariance of the break-even; the
-# overage TTL moving the threshold DOWN; one horizon per notice, not two; and
-# -- with drive_on_delivery replaced by a landmine -- that nothing on this
-# path can inject a turn into the session it is notifying.
-plugins/agent_messaging_plugin/tests/rotation_self_notice_smoke.py
-
-# L4c ROUTING JOIN (2026-08-18) -- the `agent_session_id` column that makes a
-# watcher-held worker reachable from its own gauge row. A SEPARATE file from the
-# suite above on purpose: that one passes green and UNCHANGED against a build in
-# which this join is dead code, because it tests the leg's decisions against a
-# fake registry that resolves by instance id alone. The join is a WIRING fact,
-# so everything here drives a REAL PeerRegistry over a real peer_binding store
-# and a REAL BridgeSessionManager, and asserts on an event that really landed on
-# a bridge. Pins: delivery to a session whose gauge row and live binding are
-# keyed on DIFFERENT ids; the paired control (same scenario, join NULL ->
-# unroutable, nothing delivered) without which every delivery is equally
-# explained by "the instance lookup happened to work"; that a session id is
-# RESOLVED through the registry and never rebuilt from the ledger id, proven by
-# a decoy binding registered under exactly the value a reconstructor would build
-# -- so a deriving build MISROUTES rather than merely failing; that the join is
-# never mandatory, so a bridge-held seat still resolves on its own key; NULL
-# preserved as NOT REPORTED at every boundary; a duplicate session-id binding
-# failing loud rather than being counted as a coverage gap; the reporting hook
+# `agent_session_id` routing-join column on session_context_status (2026-08-18);
+# the self-notice sweep that first read it is gone. Pins: the column declared and
+# nullable; the store and the report_context_status / session_context_status verbs
+# round-tripping it and preserving NULL as NOT REPORTED; the reporting hook
 # actually SENDING the field, in BOTH repo copies, at an AGREEING generation
-# (compared, never hardcoded, so an honest future bump does not red); and the
-# rotation_due_notice.py checkout and vendored copies remain byte-identical;
-# plugin.py raw.get mapping not silently dropping it -- the joint at which the
-# whole landing can be declared, stored, resolved and still write NULL forever.
+# (compared, never hardcoded, so an honest future bump does not red); and
+# plugin.py's raw.get mapping not silently dropping it -- the joint at which
+# the whole landing can be declared, stored, resolved and still write NULL forever.
 plugins/agent_messaging_plugin/tests/rotation_self_notice_join_smoke.py
 
 # rotation-systematization P2 slice B (ruling 2, ratified 2026-08-07) -- the
@@ -3653,44 +3529,13 @@ plugins/agent_messaging_plugin/tests/rotation_self_notice_join_smoke.py
 # coordination_receipt and the real hooks, a real published receipt, and stub claude/tmux/
 # solet-bridge. Proves the exec'd environment passes verify for all three capabilities and
 # the real heartbeat hook reports under the minted id, the shell function's flags and env
-# are kept, a lane worktree gets the checkout's hooks via --settings, a refusal is printed
+# are kept, a linked worktree gets the checkout's hooks via --settings, a refusal is printed
 # before the session starts, and a pre-guard user-scope hooks install blocks the launch.
 # Round 2 (uev_8fb3ee89): an inherited parent instance/session id, role, Codex thread
 # id or session label (round 3, uev_6f2cdcab) is never reused, and the checkout's
 # wake_waiter.py is wired on Stop. Then thirteen mutants, each killed by a named failing check (identity mutants by verify's own
 # refusal text, never by a crash). Offline; no bridge.
 
-# L4b (2026-08-17, lane-l4b-rotation-surface) -- rotation_due_notice.py, the
-# UserPromptSubmit DELIVERY half for a session the sweep cannot reach. The sweep
-# notice lands on a STEWARD's bridge and drive_on_delivery no-ops for an
-# operator-launched session, so the one session whose rotation decision is the
-# expensive one was reached by nothing; this hook surfaces the self-notify marker
-# rotation_due_watch.py was already writing and nobody was reading.
-#
-# Pins: the EMPTY path (fired on every prompt) emits absolutely nothing; a marker
-# is surfaced once and then stamped, so it can never repeat; a marker keyed to
-# another session generation is not ours; the writer's temp-dir fallback root is
-# searched too; several markers still produce exactly ONE json object (two are not
-# two notices, they are unparseable stdout); an unstampable marker is still
-# DELIVERED; and -- the security leg -- a marker owned by another uid or
-# group/world-writable is REFUSED, because this hook's output enters a prompt and
-# its input lives where on a shared host anyone can write.
-#
-# Same .claude/hooks/ scope-regex trap as the sibling above: GC must hand-run the
-# static gates on .claude/hooks/rotation_due_notice.py and this test directly;
-# this line registers only the behavioural gate, which IS scope-independent.
-
-# rotation-systematization P4(b) (P4(a) ratification 2026-08-07, six bound
-# conditions) -- the idle-boundary seat watcher: poke/rotate precedence
-# (mutation-proven -- pending mail defers rotate even past its threshold, and
-# poke wins over rotate whenever both conditions could apply), poke-cooldown
-# boundaries, the idle-file/transcript-mtime cross-check's fail-open vs
-# fail-closed split, the ACT-time gate (condition 5, mutation-proven --
-# run_rotation is NEVER invoked when the gate refuses), and the hard privacy
-# rule (condition 2, mutation-proven -- the injected poke text is EXACTLY the
-# fixed constant, never built from inbox content). Offline, stub iterm2-shaped
-# fixtures + a stubbed solet call, no real API/fleet connection.
-plugins/agent_messaging_plugin/tests/seat_idle_watcher_smoke.py
 # Deaf-wake fix (2026-08-08) -- black-box smoke for the four project-
 # vendored Python ports of coordination-hooks@<solet>'s JS hooks under
 # .claude/hooks/ (wake_waiter.py, check_messages_reminder.py,
@@ -3937,21 +3782,19 @@ ananta/tests/services/state_service/unbounded_scan_repair_behaviour_smoke.py
 # _run_startup_backfills runs them before the FastAPI surface comes up, so a
 # refused read there does not degrade a feature, it stops the bridge starting:
 # that is exactly what happened when the default read bound dropped to 100 and
-# role_class_backfill's 133-row role_binding read was refused, taking agent
+# class backfill's 133-row role_binding read was refused, taking agent
 # messaging and the action queue down with it.
 #
 # All three reads are paginated now (bounded_read.iter_table_rows). Each smoke
 # carries a fixture that STRADDLES THREE PAGES, because the property under test
 # is completeness across a page boundary and a fixture below the boundary cannot
-# test it — the pre-repair role_class smoke was green on five rows throughout the
+# test it — the pre-repair class backfill smoke was green on five rows throughout the
 # outage. Each also wraps RealShapeState in CapEnforcingState, which refuses an
 # over-bound unbounded read the way the provider does; without it these smokes
 # stay green against code that cannot boot at all.
 #
-# role_class_backfill_smoke plants its cardinality violation on page THREE (a
-# single-page read reports a clean fleet) and is red-first proven against the
-# pre-fix source: reverting the read reproduces the live
-# query.unbounded_read_over_cap refusal.
+# The class backfill and its smoke were later deleted with the role class; the
+# two backfills registered below remain.
 #
 # message_important_backfill_smoke EXISTED BUT WAS NEVER REGISTERED HERE, so it
 # had never run. role_message_consumed_backfill_smoke is new — that module's
@@ -4347,7 +4190,6 @@ plugins/agent_messaging_plugin/tests/gauge_notice_record_live_smoke.py
 #
 # PURE UNIT, offline: real-shape state fake plus a real in-memory bridge. No
 # database, network, or model turn.
-plugins/agent_messaging_plugin/tests/gauge_canary_smoke.py
 
 # lane-w3-smallfix (2026-08-20), Wave-1 defect burn-down.
 #
@@ -4815,22 +4657,18 @@ plugins/github_midwife_plugin/tests/installation_hook_ownership_smoke.py
 plugins/github_midwife_plugin/tests/flow_precondition_wiring_smoke.py
 plugins/github_midwife_plugin/tests/model_discovery_adapter_loopback_smoke.py
 
-# Per-lane worktree isolation (2026-08-27): hermetic scratch repositories only.
+# Per-worktree isolation (2026-08-27): hermetic scratch repositories only.
 # Proves the mandatory shared-dirt red/green pair, exact-path teardown that preserves
 # lane branches, orphan sweep bounds, shared-venv symlinking, and root-anchored imports.
-plugins/agent_messaging_plugin/tests/lane_worktrees_smoke.py
 
 # Cross-repository lane roots (iss_ea1ae2d4): an explicit foreign checkout
 # provisions under that checkout and its persisted resolved root drives
 # retirement; absent/relative overrides fail loud. Hermetic state/worktree seams.
-plugins/agent_messaging_plugin/tests/lane_worktree_repository_root_smoke.py
 
 # D3 lane retirement (2026-08-29): disposability is adjudicated before host
 # termination, and a post-termination teardown error records retained_error
 # while the ledger still reaches retired. Hermetic StateManagementInterface and
 # worktree/host seams only.
-plugins/agent_messaging_plugin/tests/retire_worktree_disposition_smoke.py
-plugins/agent_messaging_plugin/tests/preserve_evidence_retirement_workflow_smoke.py
 
 # Fleet identity qualification (2026-08-27): hermetic bridge/lifecycle doubles
 # require real ordered success facts and fail closed on non-watcher delivery;
@@ -4847,14 +4685,11 @@ plugins/codex_filesystem_session_source_plugin/tests/codex_filesystem_session_so
 plugins/github_midwife_plugin/tests/stage_boundary_probe_inputs_smoke.py
 
 # caller provenance (2026-08-28; client-plugin pairing retired 2026-09-02):
-# originally landed alongside the project_solet_client_plugin smoke, whose
+# originally landed alongside the external register client plugin smoke, whose
 # plugin was retired by operator ruling (per-project plugins are the wrong
 # shape — workbench/2026-09-01_architect_plugin_gap_resume_verb_record.md);
 # the provenance smoke tests agent_messaging_plugin itself and stays.
 plugins/agent_messaging_plugin/tests/caller_provenance_smoke.py
-
-# U-2c external application client: fixed argv, keychain child environment,
-# typed pre-argv refusals, stderr redaction, and cross-instance isolation.
 
 # keychain_user_interaction_gate_smoke (5 SC-* subsmokes, 2026-09-01): credential
 # READS run with macOS Keychain prompts forbidden, so an ACL-refused read fails
@@ -5109,7 +4944,7 @@ solet_cli/tests/managed_tree_smoke.py
 
 # iss_5f238159 / iss_83164d08 / iss_46668bc8 (2026-09-20) -- scheduled stale
 # lane-worktree and dead-session scratchpad sweep. Hermetic: builds a throwaway
-# main checkout with real lane worktrees under a temporary root and a fake
+# main checkout with real linked worktrees under a temporary root and a fake
 # roster, then proves live/dirty/unmerged/recent/locked/unregistered are all
 # held, only dead+clean+merged past grace is pruned (branch preserved), the
 # sweep's own reads never re-arm the grace period, and --apply on the worktree
@@ -5117,7 +4952,7 @@ solet_cli/tests/managed_tree_smoke.py
 
 # wgr_e56b42796d2f46259bfc516ede2dd80e (2026-10-16) -- lane evidence retention.
 # Hermetic: a fixture Git repository with a stash and a linked worktree, an
-# evidence root beside it and a fake psolet carrying the real unit/landing row
+# evidence root beside it and a fake register CLI carrying the real unit/landing row
 # shapes prove only register-proven, merged, past-grace directories are removed
 # and every other entry is an advisory (dry run default; symlink, ambiguous
 # prefix, mixed tokens, linked worktree and unreadable register never remove).
@@ -5205,14 +5040,6 @@ ananta/tests/session_ledger_service/backfill_first_last_event_at_repair_smoke.py
 # platform_health registry sweep: dry-run default and explicit external scope
 # confirmation are exercised only with recording fakes; no live sweep call.
 plugins/platform_health_plugin/tests/sweep_smoke.py
-
-# platform_health host-disk guard (iss_a5adbc1c): the cron's real fire path
-# (process scanner + KB overlay + ActionExecutor + ActionFactory, with an EDGE
-# control), whole-tree gate C5.1 on the literal cron target with a retargeted
-# control, and the plugin lifecycle on the real EventOrchestrator startup order
-# (ready before scheduling_service exists). Injected disk reader and recording
-# fakes only; no live scheduler call and no disk fill.
-plugins/platform_health_plugin/tests/host_disk_guard_smoke.py
 
 # platform_health model-capability guard (wgr_96cceb7f; iss_4bfe859f, iss_ec0f23d0,
 # iss_63146325): the REAL catalog refresh body over a MockTransport and the
@@ -5457,9 +5284,6 @@ solet_cli/tests/lm_studio_diagnostics_smoke.py
 # Operator Codex launch registration and failure boundaries (iss_4aa69cb2).
 plugins/agent_messaging_plugin/tests/operator_codex_launcher_smoke.py
 
-# Main-seat goal keeper Stop hook (iss_273bffe3, rul_367d8bd6): refuses a turn end
-# once on an Operator hand-off or an unreported open seat goal; inert elsewhere.
-
 # Landing-wave.v1 read-only composition, global staged equality, and one-sweep receipt.
 quality_gates/tests/landing_wave_smoke.py
 
@@ -5626,7 +5450,7 @@ quality_gates/tests/bare_python_interpreter_gate_smoke.py
 quality_gates/tests/schema_init_gate_smoke.py
 
 # Fleet maintenance duty registry (iss_c1ebde6c): the registry
-# and dispatcher over an in-memory register fake, the psolet-backed register
+# and dispatcher over an in-memory register fake, the CLI-backed register
 # client against a recording fake CLI (exact command lines, loud failures,
 # the disclosed pre-landing duty-marker mode), the two shipped duties against
 # fixture catalog/sweep-script data (no network), and the plugin's lifecycle
@@ -5819,11 +5643,10 @@ solet_cli/tests/contract_reconciliation_lm_studio_not_recommended_smoke.py
 # option, pick no inference default, and accept an explicit lm_studio choice. RED against the
 # released 19350a8d bytes (--contracts), GREEN after. Offline, no host command runs.
 solet_cli/tests/lm_studio_inference_not_recommended_wizard_smoke.py
-# iss_e8e9b83a (r64): four tracked smokes were neither registered nor excluded, so the registration census
+# iss_e8e9b83a (r64): tracked smokes were neither registered nor excluded, so the registration census
 # failed on base. Each passes offline under the gate environment (SOLET_NAME set, no live solet, model or
-# Postgres): F1 bridge dispatch contract; the model-capability reconcile and refresh selectors (fixture
-# readings only); and the schema-diff classification of an exact NOT NULL relaxation as additive.
-plugins/agent_messaging_plugin/tests/managed_dispatch_f1_bridge_smoke.py
+# Postgres): the model-capability reconcile and refresh selectors (fixture readings only); and the
+# schema-diff classification of an exact NOT NULL relaxation as additive.
 plugins/agent_messaging_plugin/tests/model_capability_reconcile_smoke.py
 plugins/agent_messaging_plugin/tests/model_capability_refresh_smoke.py
 plugins/agent_messaging_plugin/tests/model_capability_harness_smoke.py
@@ -5970,9 +5793,6 @@ ananta/tests/core/actions/async_job_atomic_completion_smoke.py
 plugins/agent_messaging_plugin/tests/session_launch_failure_smoke.py
 # Codex eventual pickup: deterministic offline smoke; passes at base (runner verdict ok).
 plugins/agent_messaging_plugin/tests/codex_eventual_pickup_smoke.py
-# Native spawn owner: exits 77 (disclosed SKIP) without PROJECT_SOLET_DESK_TEST_DSN; runs under provision_test_pg.
-plugins/agent_messaging_plugin/tests/native_spawn_owner_postgres_smoke.py
-plugins/agent_messaging_plugin/tests/spawn_first_go_smoke.py
 
 # Restart safety partial repair: real reserved worker and iTerm entrypoint,
 # in-memory state/fake host only; refusal precedes every destructive leg.
@@ -6084,5 +5904,3 @@ ananta/tests/file_locations/containment_smoke.py
 
 # Credential output boundaries: public resolver retirement and sealed helper reads
 ananta/tests/secrets_output_boundaries_smoke.py
-
-plugins/platform_health_plugin/tests/main_seat_heartbeat_smoke.py

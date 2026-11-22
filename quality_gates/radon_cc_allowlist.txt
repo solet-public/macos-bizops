@@ -74,7 +74,7 @@ solet_cli/tests/discovered_decision_scenarios.py::_future_model_carrier_scenario
 # guard clauses (unique-registry-owner check, transaction-identity-match
 # check, per-phase precondition checks) -- mechanically refactorable via
 # extract-method, deferred per the same Task #74 burn-down pattern as every
-# other entry here rather than forced into an assembly-only lane's charter.
+# other entry here rather than forced into an assembly-only change's scope.
 # Recorded as an open decision on iss_d2f03248, disclosed to the Operator,
 # reversible if overruled. Remediation contract: extract per-guard-clause
 # helpers; removal is the burn-down unit.

@@ -39,7 +39,10 @@ class StateServiceProtocol(Protocol):
         ...
 
     def prepare_record(
-        self, namespace: str, table_name: str, record: dict[str, object],
+        self,
+        namespace: str,
+        table_name: str,
+        record: dict[str, object],
     ) -> dict[str, object]:
         """Copy and populate standard fields before a transactional record insert."""
         ...
@@ -62,9 +65,7 @@ class StateServiceProtocol(Protocol):
         """Write state to namespace."""
         ...
 
-    def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object]
-    ) -> ActionResult:
+    def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> ActionResult:
         """Update state in namespace."""
         ...
 
@@ -158,20 +159,18 @@ class StateServiceProtocol(Protocol):
         scope: str = "GLOBAL",
         ttl: int | None = None,
     ) -> ActionResult:
-        """Set key-value pair."""
+        """Set key-value pair: any JSON-serializable value; a value that is not serializable is refused and writes nothing."""
         ...
 
     def get_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> ActionResult:
-        """Get key-value pair."""
+        """Get key-value pair: the value as written; ``found`` separates an absent key from a stored None; stored text that is not valid JSON is returned as that string."""
         ...
 
     def delete_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> ActionResult:
         """Delete key-value pair."""
         ...
 
-    def clear_key_values(
-        self, namespace: str | None = None, scope: str | None = None
-    ) -> ActionResult:
+    def clear_key_values(self, namespace: str | None = None, scope: str | None = None) -> ActionResult:
         """Clear key-value pairs."""
         ...
 
@@ -181,7 +180,7 @@ class StateServiceProtocol(Protocol):
         scope: str | None = None,
         pattern: str | None = None,
     ) -> ActionResult:
-        """List key-value pairs."""
+        """List key-value pairs: each row's ``value`` is decoded exactly as ``get_key_value`` returns it."""
         ...
 
     # Async job operations

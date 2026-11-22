@@ -9,7 +9,9 @@ import re
 from datetime import UTC, datetime
 from typing import TypedDict
 
-from ananta.core.domain.types import ActionResult
+from ananta.core.domain.enums import ActionStatus, ErrorSeverity
+from ananta.core.domain.types import ActionResult, ErrorDetail
+from ananta.services.key_value_operations.value_codec import decode_value, encode_value
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +21,7 @@ class StoredValue(TypedDict):
 
     namespace: str
     key: str
-    value: str | int | float | bool | dict[str, object] | list[object] | None
+    value: str  # the value_codec text, as the real store keeps it
     scope: str
     ttl: int | None
     created_at: str
@@ -38,9 +40,7 @@ class BootstrapKeyValueStorage:
         Args:
             runtime_values: Existing runtime values dict to use (created if None)
         """
-        self._runtime_values: dict[str, StoredValue] = (
-            runtime_values if runtime_values is not None else {}
-        )
+        self._runtime_values: dict[str, StoredValue] = runtime_values if runtime_values is not None else {}
         logger.debug("BootstrapKeyValueStorage initialized with in-memory operations")
 
     def set_key_value(
@@ -64,12 +64,26 @@ class BootstrapKeyValueStorage:
             ActionResult with set success status
         """
 
+        try:
+            encoded = encode_value(value)
+        except (TypeError, ValueError) as error:
+            stamp = datetime.now(UTC).isoformat()
+            refusal: ErrorDetail = {
+                "type": "plugin_error",
+                "code": "kv.set_failed",
+                "message": str(error),
+                "details": {"namespace": namespace, "key": key},
+                "severity": ErrorSeverity.ERROR.value,
+                "timestamp": stamp,
+            }
+            return {"action_status": ActionStatus.ERROR.value, "data": {}, "actions": [], "error": refusal, "timestamp": stamp}
+
         # Create runtime key using the same pattern as StateService
         runtime_key = f"{namespace}.{key}.{scope}"
         self._runtime_values[runtime_key] = {
             "namespace": namespace,
             "key": key,
-            "value": value,
+            "value": encoded,
             "scope": scope,
             "ttl": ttl,
             "created_at": datetime.now(UTC).isoformat(),
@@ -104,7 +118,8 @@ class BootstrapKeyValueStorage:
                 "action_status": "completed",
                 "data": {
                     "key": runtime_value["key"],
-                    "value": runtime_value["value"],
+                    "value": decode_value(runtime_value["value"]),
+                    "found": True,
                     "namespace": runtime_value["namespace"],
                     "scope": runtime_value["scope"],
                     "ttl": runtime_value.get("ttl"),
@@ -117,7 +132,7 @@ class BootstrapKeyValueStorage:
         else:
             return {
                 "action_status": "completed",
-                "data": {"key_found": False},
+                "data": {"namespace": namespace, "key": key, "scope": scope, "value": None, "found": False},
                 "actions": [],
                 "error": None,
                 "timestamp": datetime.now(UTC).isoformat(),
@@ -152,9 +167,7 @@ class BootstrapKeyValueStorage:
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
-    def clear_key_values(
-        self, namespace: str | None = None, scope: str | None = None
-    ) -> ActionResult:
+    def clear_key_values(self, namespace: str | None = None, scope: str | None = None) -> ActionResult:
         """Clear key-value pairs by namespace and/or scope.
 
         Args:
@@ -235,7 +248,7 @@ class BootstrapKeyValueStorage:
                         {
                             "namespace": runtime_value["namespace"],
                             "key": runtime_value["key"],
-                            "value": runtime_value["value"],
+                            "value": decode_value(runtime_value["value"]),
                             "scope": runtime_value["scope"],
                             "ttl": runtime_value.get("ttl"),
                             "created_at": runtime_value.get("created_at"),

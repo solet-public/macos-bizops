@@ -102,7 +102,7 @@ Volatile architecture descriptions, inventories, quality-gate internals, deploym
 |---|---|---|
 | AGENTS.md/CLAUDE.md relationship, knowledge-access profiles, failure and empty-result semantics | This article; the paired hydration templates are the complete rendered samples | Every seed |
 | Hydration, managed-block merge, launchers, shell hooks, and later seed updates | `github_midwife_plugin` — `01_hydration_runbook.md` and `05_seed_update_runbook.md` | Every seed |
-| Charter, agent stance, decision briefs, collaboration craft, and session orientation | `ananta_platform/01_platform_overview/` and `24_operator_communication/` | The operator-communication subset ships in every seed; broader platform material is development-checkout-only |
+| Governance Statement, agent stance, decision briefs, collaboration craft, and session orientation | `ananta_platform/01_platform_overview/` and `24_operator_communication/` | The operator-communication subset ships in every seed; broader platform material is development-checkout-only |
 | Python 3.13, fast-fail, typing, and craftsmanship rules | `Critical Development Guidelines v2` | Full platform development checkout |
 | State-interface-only database access and filter grammar | `State Interface Filter Grammar`; SQL-access gate for executable enforcement | Full platform development checkout |
 | Quality-gate commands, scope, and tracked-debt rules | `Peer Pre-Completion Gate Procedure`, `Gate Allowlist Conventions`, and `quality_gates/` | Full platform development checkout; selected executable gates ship in seeds |

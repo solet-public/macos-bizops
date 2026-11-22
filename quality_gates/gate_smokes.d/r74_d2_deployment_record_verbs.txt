@@ -1,0 +1,2 @@
+# r74-d2-a2: deployment record verbs smoke; offline, exits 0 when run once under the gate environment.
+ananta/tests/lifecycle_management_service/deployment_record_verbs_smoke.py

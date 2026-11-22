@@ -55,6 +55,7 @@ from .client import (
     DEFAULT_POLL_TIMEOUT_S,
     BridgeCallError,
     BridgeClient,
+    BridgeRefusedError,
     BridgeResultTimeoutError,
     RoleClaimRejectedError,
     SoletIdentityError,
@@ -327,6 +328,12 @@ def _call_and_emit(client: BridgeClient, process_key: str, arguments: dict[str, 
     """Keep the originating bridge open through polling, output and any release."""
     try:
         result = client.call_and_wait(process_key, arguments, reason=reason, poll_timeout_s=timeout_s, bridge_wait_attached=should_wait)
+    except BridgeRefusedError:
+        # A definite answer: the bridge refused the dispatch and queued nothing.
+        # `_run` prints the refusal and exits non-zero; saying the release is
+        # uncertain here would tell the sender a call that never left may have
+        # been accepted.
+        raise
     except (BridgeResultTimeoutError, KeyboardInterrupt, SystemExit, OSError, BridgeCallError, httpx.HTTPError):
         if should_wait:
             click.echo("Waiter release is uncertain: dispatch returned no job id. Any accepted job remains durable; reconcile before resubmitting.", err=True)
@@ -352,7 +359,7 @@ def _stored_no_wake_process_result(process_key: str, result: Mapping[str, Any]) 
     """Recognize stored send receipts without a recipient wake."""
     if process_key not in {
         "plugin::agent_messaging_plugin::peer_send_by_name",
-        "plugin::agent_messaging_plugin::send_peer_message",
+        "plugin::agent_messaging_plugin::peer_send",
     }:
         return False
     action_result = result.get("result")
@@ -1645,11 +1652,12 @@ def _codex_parent_busy_reason(parent_pid: int) -> str | None:
             timeout=2.0,
         ).stdout
 
-    panes = tmux("list-panes", "-a", "-F", "#{pane_id} #{pane_pid}")
-    matches = [line.split()[0] for line in panes.splitlines() if line.split()[1:] == [str(parent_pid)]]
-    if len(matches) != 1:
-        raise ValueError(f"parent {parent_pid} matches {len(matches)} tmux panes")
-    pane = matches[0]
+    pane = os.environ.get("TMUX_PANE", "")
+    if not (pane.startswith("%") and pane[1:].isdigit()):
+        raise ValueError("watch is not running inside a tmux pane: TMUX_PANE is not set")
+    pane_pid = tmux("display-message", "-p", "-t", pane, "#{pane_pid}").strip()
+    if pane_pid != str(parent_pid):
+        raise ValueError(f"parent {parent_pid} is not the process of tmux pane {pane}")
     visible = tmux("capture-pane", "-p", "-t", pane)
     # A respawn between discovery and capture must not authorize another PID.
     if tmux("display-message", "-p", "-t", pane, "#{pane_pid}").strip() != str(parent_pid):

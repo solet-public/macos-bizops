@@ -74,9 +74,9 @@ class QualityOperations:
         self._repo_root = repo_root
         self._solet_name = solet_name
         _bind_proof_source(repo_root)
-        from platform_dev_surface_plugin.quality.full_battery import FullBatteryProducer
+        from platform_dev_surface_plugin.quality.full_battery import FullBatteryProducer, bridge_notifier
 
-        self.full_battery = FullBatteryProducer(repo_root, solet_name)
+        self.full_battery = FullBatteryProducer(repo_root, solet_name, notifier=bridge_notifier(repo_root, solet_name))
         self._venv_python = repo_root / ".venv" / "bin" / "python3"
         if not self._venv_python.exists():
             raise FileNotFoundError(f"platform_dev_surface_plugin: repo venv interpreter not found at {self._venv_python}")
@@ -123,7 +123,7 @@ class QualityOperations:
             "smokes": smokes,
             "smoke_count": len(smokes),
             "proof_schema": "platform-smoke-proof/v1",
-            "proof_lifecycle": ["select_smokes", "run_selected_smokes", "get_smoke_proof", "list_smoke_proofs", "get_smoke_proof_history", "correct_smoke_proof", "clear_smoke_proof", "retire_smoke_proof", "reinstate_smoke_proof", "ensure_full_smoke_schedule", "trigger_full_smoke_battery"],
+            "proof_lifecycle": ["select_smokes", "run_selected_smokes", "get_smoke_proof", "list_smoke_proofs", "get_smoke_proof_history", "correct_smoke_proof", "clear_smoke_proof", "retire_smoke_proof", "reinstate_smoke_proof", "trigger_full_smoke_battery", "list_full_smoke_campaigns"],
         }
 
     def run_gate(self, gate: str) -> dict[str, Any]:
@@ -221,13 +221,11 @@ class QualityOperations:
 
     def verify_hash_manifest(
         self,
-        unit_id: str,
         root_path: str,
         manifest: dict[str, str],
     ) -> dict[str, Any]:
         """Rehash a landing manifest and disclose editable-install shadowing."""
         return verify_hash_manifest(
-            unit_id=unit_id,
             root_path=root_path,
             manifest=manifest,
         )
@@ -235,14 +233,14 @@ class QualityOperations:
     def predict_gate_smokes_merge(
         self,
         base_ref: str,
-        lane_root_path: str,
+        candidate_root_path: str,
         current_master: str,
         register_path: str = "quality_gates/gate_smokes.txt",
     ) -> dict[str, Any]:
         """Predict a tracked-debt-register merge without changing any Git state."""
         return predict_append_only_register_merge(
             base_ref=base_ref,
-            lane_root_path=lane_root_path,
+            candidate_root_path=candidate_root_path,
             current_master=current_master,
             register_path=register_path,
         )

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::disconnect_org",
+  "display_name": "Salesforce: Disconnect Org",
+  "description": "Disconnect one bound org (org required): log the sf CLI out of it (best effort; a failure is reported as logout_status, never a reason to keep the binding), remove its binding from the vault index, and delete the vault secrets its login used that no other bound org still uses (a scratch org or sandbox created from a JWT-bound org uses that org's key, so the key stays while either is bound). If the org was the default, the first remaining bound org becomes the default. When the org came from the salesforce_org address-book entry that predates multi-org support, that entry is deleted too. Other bound orgs are untouched. The org itself is not deleted: use org_lifecycle delete_scratch or delete_sandbox for that. Returns job_id/status queued.",
+  "embedding_description": "Remove one Salesforce org from this solet: log it out, forget its binding and delete the login secrets only it used, leaving every other connected org in place. Use when an org is retired, replaced or no longer needed; the org itself is not deleted.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce org disconnection queued",
+    "result_type": "salesforce_disconnect_org_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: org (the alias), org_id, logout_status (logged_out, or logout_failed_<code>), binding_removed true, secrets_deleted (names), legacy_entry_deleted, and default_org (the default after the change, or empty).",
+    "presentation_guidance": "Say which org was disconnected, whether the CLI logout succeeded, which secrets were deleted and which org is now the default."
+  },
+  "error_processor_customizations": {
+    "action_context": "Disconnect one bound Salesforce org from the solet.",
+    "error_interpretation": "sf.invalid_params: org is missing. sf.unknown_org: org matches no bound org (the message lists them). sf.org_registry_failed: the vault index could not be read or written.",
+    "recovery_guidance": "Pick an org from list_orgs. A failed CLI logout still removes the binding; run sf org logout --target-org <username> later if the CLI should forget it too."
+  }
+}

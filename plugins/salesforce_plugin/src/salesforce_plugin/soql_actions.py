@@ -2,9 +2,11 @@
 
 This module is S2-exempt (whole-file): SOQL strings like
 ``SELECT Id, Name FROM Account`` match the gate's S2 verb+FROM heuristic even
-though they target the FOREIGN Salesforce org (containment invariant #1 — no
-org/domain parameter on any verb; the client is built solely from the
-"salesforce_org" address-book entry). See
+though they target a FOREIGN Salesforce org (containment invariant #1 — every
+call goes to a bound org whose CLI target is verified against its pinned
+instance host; an ``org`` that names no binding is refused). It also holds the
+SOQL the binding and sandbox status code needs (``org_facts``, ``is_dev_hub``,
+``sandbox_process_soql``), so this stays the one module composing SOQL text. See
 knowledge_base/01_salesforce_overview.md §3 for the full gate-treatment note.
 
 The query is written to a tempfile and run via `sf data query --file`
@@ -37,6 +39,7 @@ import csv
 import io
 import json
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from typing import Any
@@ -50,11 +53,14 @@ from .constants import (
     SOQL_EXPORT_ROW_CAP,
     SOQL_MAX_RECORDS_CAP,
 )
+from .errors import SalesforceCliCallError
 
 # path_gate(output_tsv_path) -> realpath-resolved path to write, or raises
 # PathRefusedError. Injected by the plugin, which binds the operator's
 # registered path addresses config (ananta.file_locations.containment.assert_path_allowed).
 PathGate = Callable[[str], str]
+
+_SANDBOX_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]{0,9}")
 
 
 def fetch_org_id(executor: SalesforceCliExecutor) -> str:
@@ -69,6 +75,45 @@ def fetch_org_id(executor: SalesforceCliExecutor) -> str:
     if isinstance(records, list) and records and isinstance(records[0], dict):
         return str(records[0].get("Id") or "")
     return ""
+
+
+def org_facts(executor: SalesforceCliExecutor) -> dict[str, Any]:
+    """Id, IsSandbox and OrganizationType of the bound org, from its one Organization row."""
+    result = _run_soql(executor, "SELECT Id, IsSandbox, OrganizationType FROM Organization LIMIT 1", max_records=1)
+    records = result.get("records") if isinstance(result, dict) else None
+    record = records[0] if isinstance(records, list) and records and isinstance(records[0], dict) else {}
+    organization_type = record.get("OrganizationType")
+    return {
+        "org_id": str(record.get("Id") or ""),
+        "is_sandbox": record.get("IsSandbox") is True,
+        "organization_type": organization_type if isinstance(organization_type, str) else "",
+    }
+
+
+def is_dev_hub(executor: SalesforceCliExecutor) -> bool:
+    """The CLI's own Dev Hub test: an org is a Dev Hub when its user can query ScratchOrgInfo.
+
+    ``@salesforce/core`` ``Org.determineIfDevHubOrg`` runs this same query; a
+    vendor refusal (the object is not available to the user) means no.
+    """
+    try:
+        _run_soql(executor, "SELECT Id FROM ScratchOrgInfo LIMIT 1", max_records=1)
+    except SalesforceCliCallError:
+        return False
+    return True
+
+
+def sandbox_process_soql(sandbox_name: object) -> str:
+    """Tooling SOQL for one sandbox's SandboxProcess rows, newest first.
+
+    The fields are the ones ``sf org resume sandbox`` reads
+    (``@salesforce/core`` ``org.js`` ``sandboxProcessFields``). A sandbox
+    name is a letter followed by up to nine letters or digits (the vendor's
+    SandboxInfo.SandboxName rule), so it is checked before it is quoted.
+    """
+    if not isinstance(sandbox_name, str) or _SANDBOX_NAME.fullmatch(sandbox_name) is None:
+        raise ValueError("sandbox_name must be a sandbox name: a letter followed by up to 9 letters or digits")
+    return f"SELECT Id, Status, SandboxName, SandboxInfoId, LicenseType, CreatedDate, CopyProgress, SandboxOrganization, SourceId, Description, EndDate, Features FROM SandboxProcess WHERE SandboxName = '{sandbox_name}' ORDER BY CreatedDate DESC"
 
 
 def soql_query(

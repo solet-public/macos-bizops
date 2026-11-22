@@ -8,9 +8,6 @@ ancestors of owned roots; host file reads and directory listings stay denied.
 Those checks run without PostgreSQL and never open a real credential store.
 First-call configuration and explicit MIME resolution run under the real
 setup audit before any other fixture; the MIME database must stay uninitialized.
-The external-app executable is an owned fail-closed sentinel used only for
-path admission; the real caller reaches the guarded keychain subprocess
-before its content could execute. External CLI results remain unmeasured.
 S3 multipart upload retains a static scheduling remainder: its SDK transfer
 future would wait for parked executor threads. No generic executor is admitted.
 
@@ -54,7 +51,6 @@ COUNTS = {
     "salesforce_plugin": 5,
     "seed_factory_plugin": 6,
     "aws_self_deployment_plugin": 6,
-    "external_app_client_plugin": 4,
     "fleet_maintenance_plugin": 3,
     "jira_plugin": 21,
     "aws_undertaker_plugin": 3,
@@ -228,10 +224,10 @@ def _check_population() -> Any:
     module = next(item for item in modules if item.PREPARER_NAME == "connectors-v1")
     assert module.PLUGINS == frozenset(COUNTS)
     assert {name: len(verbs) for name, verbs in module.VERBS.items()} == COUNTS
-    assert sum(COUNTS.values()) == 136
+    assert sum(COUNTS.values()) == 132
     assert len(module.MARKETO_EXPORT_VERBS) == 29
     _check_safety_declarations(module)
-    print("PASS connector fixture ownership: 26 plugins, 136 verbs, 29 exports")
+    print("PASS connector fixture ownership: 25 plugins, 132 verbs, 29 exports")
     return module
 
 
@@ -379,7 +375,6 @@ def _check_new_measurements(report: dict[str, Any]) -> None:
         "codex_filesystem_session_source_plugin": {"qualify"},
         "claude_code_cloud_session_source_plugin": {"backfill_status"},
         "codex_cloud_session_source_plugin": {"backfill_status"},
-        "external_app_client_plugin": {"issue_list", "issue_show", "repository_list", "unit_who_has_work"},
         "s3_blob_storage_plugin": {"delete_blob", "get_blob", "get_blob_metadata", "update_blob_metadata", "store_blob_from_file"},
         "seed_factory_plugin": {"release_run_status", "reproduce_release"},
     }

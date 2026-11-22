@@ -1,12 +1,15 @@
-"""Step7 cache publication and serialization with registered lifecycle ownership.
+"""Step7 cache publication and serialization, inside the folder of the run that uses it.
 
-Cache keys are regenerable work folders bound to their full commit and builder
-digest. The native register owns retirement; access never deletes other keys
-or legacy scratch based on timestamps.
+The cache is made inside the run's folder and ends with that run. In a smoke
+battery that folder is the battery's registered temp folder, which the runner
+removes at close. In a smoke run by hand the process makes one ``step7-run-``
+folder in the system temp folder and removes it at exit. Nothing is kept
+between runs, nothing is written under ``~/.ananta`` and nothing is registered.
 """
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import errno
 import hashlib
@@ -75,20 +78,32 @@ def _builder_digest() -> str:
     return digest.hexdigest()[:8]
 
 
+_RUN: dict[str, Path] = {}
+
+
+def _run_folder() -> Path:
+    """The folder of this run: the battery's temp folder, else one ``step7-run-`` folder the process removes at exit."""
+    temporary = Path(tempfile.gettempdir()).resolve()
+    if (temporary / ".owner.json").is_file():
+        return temporary
+    if "path" not in _RUN:
+        _RUN["path"] = Path(tempfile.mkdtemp(prefix="step7-run-", dir=temporary))
+        atexit.register(_end_process_run, _RUN["path"])
+    return _RUN["path"]
+
+
+def _end_process_run(path: Path) -> None:
+    """Remove this process's run folder at exit; a failure is reported and the folder is left to the system's temp cleaning."""
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        print(f"step7 cache advisory: run folder {path} retained ({error})", file=sys.stderr)
+
+
 def _cache_root() -> Path:
-    """Register the stable commit/builder cache before any build or reuse.
-
-    Registration outages are advisory and retain a pending sidecar through the
-    WF7 client. No predecessor, legacy or inactivity prune runs on access.
-    """
-    from ananta.work_folders import register_work_folder  # noqa: PLC0415
-
-    parent = (Path.home() / ".ananta" / "runtime" / "step7").resolve()
-    commit = _head_commit()
-    digest = _builder_digest()
-    root = parent / f"step7-cache-{commit[:12]}-{digest}"
+    """The cache folder for this commit and builder, inside the run's folder, which ends it."""
+    root = _run_folder() / f"step7-cache-{_head_commit()[:12]}-{_builder_digest()}"
     root.mkdir(parents=True, exist_ok=True)
-    register_work_folder(root, purpose="step7_cache", bound=f"cache_key:{commit}:{digest}", harvest="regenerable")
     return root
 
 

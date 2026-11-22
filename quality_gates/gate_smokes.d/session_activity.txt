@@ -1,0 +1,2 @@
+# frq_7e5093dc (chg_b7e78c8f): the per-session activity measurement rules, its command line and its born-async verb. Synthetic transcripts in a temporary directory, offline.
+plugins/claude_code_filesystem_session_source_plugin/tests/session_activity_smoke.py

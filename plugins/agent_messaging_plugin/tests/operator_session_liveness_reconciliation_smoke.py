@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.services.store import Store, open_store  # noqa: E402
 
@@ -109,10 +108,8 @@ def _operator_row(
         state,
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id,
-            lane_id="r3-u1-fixture",
-            assignment=fixture_assignment(),
-            work_class="production_mutation",
-            budget_line="r3-u1",
+            label="operator-liveness",
+            session_origin="registered",
             host="operator",
         ),
     )
@@ -186,7 +183,7 @@ def test_public_verb_false_acts() -> None:
 
 
 def test_public_verb_false_string_acts() -> None:
-    state, plugin = _dead_public_verb_fixture()
+    _state, plugin = _dead_public_verb_fixture()
     false_string_result = plugin.reconcile_operator_session_liveness({"dry_run": "false"}, {})
     false_string_data = cast(dict[str, object], false_string_result["data"])
     assert false_string_data["dry_run"] is False
@@ -248,10 +245,7 @@ def test_dry_run_then_apply_preserves_live_and_idle_operator_rows() -> None:
 
 
 def _assert_dry_run(state: StateManagementInterface, dry_run: dict[str, object]) -> None:
-    classifications = {
-        str(row["agent_instance_id"]): row
-        for row in cast(list[dict[str, object]], dry_run["classifications"])
-    }
+    classifications = {str(row["agent_instance_id"]): row for row in cast(list[dict[str, object]], dry_run["classifications"])}
     assert dry_run["applied"] == []
     assert classifications["agi-live"]["classification"] == "live"
     assert classifications["agi-idle-live"]["classification"] == "live"

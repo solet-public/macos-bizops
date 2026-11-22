@@ -144,10 +144,14 @@ def _result_template_with_context() -> dict[str, object]:
     poller = ActionQueuePoller.__new__(ActionQueuePoller)
     template = _template("process_results", _RESULTS_KEY)
     poller._inject_context_field_into_template(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        template, "session_id", "ses-result",
+        template,
+        "session_id",
+        "ses-result",
     )
     poller._inject_context_field_into_template(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        template, "flow_id", "flow-result",
+        template,
+        "flow_id",
+        "flow-result",
     )
     return template
 
@@ -215,7 +219,7 @@ def test_error_processor_model_override_stays_inside_params() -> None:
 
 
 def test_retired_session_arguments_have_a_scoped_stable_error() -> None:
-    for verb in ("spawn_session", "dispatch_managed_work", "provision_role_session"):
+    for verb in ("spawn_session",):
         process = "plugin::agent_messaging_plugin::" + verb
         for field in ("ttl_seconds", "expires_at"):
             for value in (None, 0, "", 3600):

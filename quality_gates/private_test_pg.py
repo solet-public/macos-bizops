@@ -105,7 +105,7 @@ def pg_binary(name: str) -> Path:
 
 
 def without_libpq(environment: Mapping[str, str]) -> dict[str, str]:
-    """Preserve caller values including PROJECT_SOLET_*, exclude libpq inputs."""
+    """Preserve caller values, exclude libpq inputs."""
     return {key: value for key, value in environment.items() if not key.startswith("PG")} | {
         "PGPASSFILE": os.devnull,
         "PGSERVICEFILE": os.devnull,

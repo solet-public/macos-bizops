@@ -1,0 +1,2 @@
+# r74-d2-a4: work folder record and sweep smoke; offline, exits 0 when run once under the gate environment.
+ananta/tests/lifecycle_management_service/work_folder_records_smoke.py

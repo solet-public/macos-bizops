@@ -1,8 +1,8 @@
 {
   "process_key": "service_interface::quality_service::detect_scope_regex_gaps",
   "display_name": "Detect Static-Gate Scope Gaps",
-  "description": "Classify a list of repo-relative changed paths using the exact per-file static-gate predicate owned by quality_gates/code_quality_check.py. Returns the paths covered by the regular per-file quality surface and paths outside it, with manual_static_analysis_needed=true whenever an out-of-scope path needs a Git-Controller ruff, pyright, or radon supplement. This is a read-only classification and never runs or changes Git.",
-  "embedding_description": "Check whether changed paths are covered by the platform code_quality_check per-file static analysis surface. Identify out-of-scope files such as .claude hooks or other unlisted paths before a landing relies only on the whole-tree quality gate, so Git-Controller knows when to run manual ruff, pyright, and radon checks.",
+  "description": "Classify a list of repo-relative changed paths using the exact per-file static-gate predicate owned by quality_gates/code_quality_check.py. Returns the paths covered by the regular per-file quality surface and paths outside it, with manual_static_analysis_needed=true whenever an out-of-scope path needs a manual ruff, pyright, or radon supplement (in the platform's own development checkout, Git-Controller runs it). This is a read-only classification and never runs or changes Git.",
+  "embedding_description": "Check whether changed paths are covered by the platform code_quality_check per-file static analysis surface. Identify out-of-scope files such as .claude hooks or other unlisted paths before a landing relies only on the whole-tree quality gate, so the session that lands the change knows when to run manual ruff, pyright, and radon checks (in the platform's own development checkout, Git-Controller).",
   "result_processor_customizations": {
     "action_label": "Static-gate scope gaps detected",
     "result_type": "gc_scope_regex_gap_result",

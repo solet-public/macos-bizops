@@ -185,7 +185,7 @@ print("\nCase B: service forwards canonical action definitions unchanged")
 capturing_plugin = _CapturingSchedulingPlugin()
 service = SchedulingService.__new__(SchedulingService)
 service._plugin = capturing_plugin  # type: ignore[assignment]  # noqa: SLF001
-service_result: dict[str, Any] | None = None
+service_result: Any = None
 service_error: BaseException | None = None
 try:
     service_result = service.create_cron_schedule(
@@ -217,7 +217,7 @@ _check(
     "service preserves normal state normalization",
 )
 
-delayed_service_result: dict[str, Any] | None = None
+delayed_service_result: Any = None
 delayed_service_error: BaseException | None = None
 try:
     delayed_service_result = service.execute_in_seconds(
@@ -788,8 +788,8 @@ for card_name, card_doc in card_docs:
 
 reference = (REPO_ROOT / "plugins" / "default_scheduling_plugin" / "knowledge_base" / "scheduling_reference.md").read_text()
 _check(
-    "plugin::agent_messaging_plugin::peer_send_by_name" in reference,
-    "reference includes the scheduled peer_send_by_name fixture",
+    "plugin::agent_messaging_plugin::peer_send" not in reference.split("## Seat heartbeat code schedule", 1)[0],
+    "reference text teaches no scheduled peer message",
 )
 _check(
     '"action_definitions"' in reference,

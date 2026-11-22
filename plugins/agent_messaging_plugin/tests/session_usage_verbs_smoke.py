@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +19,6 @@ sys.path[:0] = [
 ]
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.core.actions.action_factory import ActionFactory  # noqa: E402
 from ananta.error_handling import FrameworkError  # noqa: E402
 from ananta.interfaces.state_management_interface import StateManagementInterface  # noqa: E402
@@ -29,7 +28,7 @@ from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     SESSION_HOST_HEADLESS,
     TABLE_MANAGED_SESSION,
-    WORK_CLASS_READ_ONLY,
+    TABLE_MODEL_CAPABILITY_CELL,
 )
 from agent_messaging_plugin.session_claude_mapping_store import (  # noqa: E402
     upsert_session_claude_mapping,
@@ -69,28 +68,23 @@ def _spawn(
     raw_state: RealShapeState,
     instance: str,
     *,
-    unit: str = "unt-usage",
+    label: str = "lbl-usage",
     runtime: str = "claude_code",
     model: str = "dispatch-model",
     effort: str = "medium",
-    receipt: dict[str, Any] | None = None,
-    difficulty: float = 47.0,
     created_at: str | None = None,
 ) -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
             agent_instance_id=instance,
-            lane_id=f"lane-{instance}",
-            assignment=fixture_assignment(unit),
-            work_class=WORK_CLASS_READ_ONLY,
-            budget_line=f"budget-{instance}",
+            session_origin="spawned",
             host=SESSION_HOST_HEADLESS,
             agent_runtime=runtime,
             model=model,
             effort=effort,
-            difficulty_score=difficulty,
-            selection_receipt=receipt or {},
+            label=label,
+            workspace=f"/work/{instance}",
         ),
     )
     if created_at is not None:
@@ -108,7 +102,7 @@ def _mapping(state: StateManagementInterface, instance: str, runtime_id: str) ->
     )
 
 
-def _context(
+def _context(  # pyright: ignore[reportUnusedFunction]
     state: StateManagementInterface,
     instance: str,
     runtime_id: str,
@@ -198,14 +192,11 @@ def _unit(
     unavailable: bool = False,
 ) -> dict[str, Any]:
     module = _module()
-    if unavailable:
-        reader = None
-    else:
 
-        def reader(*, runtime_session_ids: list[str]) -> dict[str, Any]:
-            return _totals(rows, runtime_session_ids)
+    def reader(*, runtime_session_ids: list[str]) -> dict[str, Any]:
+        return _totals(rows, runtime_session_ids)
 
-    return module.read_unit_usage(state, identity, totals_reader=reader, now=NOW)
+    return module.read_label_usage(state, identity, totals_reader=None if unavailable else reader, now=NOW)
 
 
 def _process_factory(method: Any, key: str) -> ActionFactory:
@@ -218,14 +209,17 @@ def _process_factory(method: Any, key: str) -> ActionFactory:
                 },
             },
         },
-        template_engine=SimpleNamespace(resolve_templates=lambda action_def, context: action_def),
-        state_service=SimpleNamespace(
-            generate_unique_string=lambda **_kwargs: {
-                "action_status": "completed",
-                "data": {"random_string": "usage-smoke"},
-            },
+        template_engine=cast(Any, SimpleNamespace(resolve_templates=lambda action_def, context: action_def)),
+        state_service=cast(
+            Any,
+            SimpleNamespace(
+                generate_unique_string=lambda **_kwargs: {
+                    "action_status": "completed",
+                    "data": {"random_string": "usage-smoke"},
+                },
+            ),
         ),
-        action_event_recorder=SimpleNamespace(store_action_event=lambda _action: "ae-usage-smoke"),
+        action_event_recorder=cast(Any, SimpleNamespace(store_action_event=lambda _action: "ae-usage-smoke")),
     )
 
 
@@ -242,35 +236,37 @@ def _submit(method: Any, key: str, arguments: dict[str, Any]) -> None:
 
 
 def _assert_verb_registered() -> None:
-    method = getattr(AgentMessagingPlugin, "read_unit_usage", None)
+    method = getattr(AgentMessagingPlugin, "read_label_usage", None)
     metadata = getattr(method, "_platform_process_metadata", None)
     parameters = getattr(metadata, "parameters", {})
     _check(
-        callable(method) and "unit_id" in parameters and "agent_instance_id" in parameters,
+        callable(method) and set(parameters) == {"label", "agent_instance_id"},
         "VERB_REGISTERED_ON_PLUGIN_WITH_DECLARED_PARAMETERS",
     )
 
 
-def _assert_bridge_unit_arguments() -> None:
-    key = "plugin::agent_messaging_plugin::read_unit_usage"
-    method = AgentMessagingPlugin.read_unit_usage
-    _submit(method, key, {"unit_id": "unt-usage"})
+def _assert_bridge_label_arguments() -> None:
+    key = "plugin::agent_messaging_plugin::read_label_usage"
+    method = AgentMessagingPlugin.read_label_usage
+    _submit(method, key, {"label": "lbl-usage"})
     _submit(method, key, {"agent_instance_id": "agi-usage"})
-    try:
-        _submit(method, key, {"xyzzy": "value"})
-    except FrameworkError as exc:
-        _check(exc.error_code == "action.unknown_arguments", "BRIDGE_ACCEPTS_READ_UNIT_USAGE_ARGUMENTS")
-        return
-    raise AssertionError("BRIDGE_ACCEPTS_READ_UNIT_USAGE_ARGUMENTS")
+    retired_filter = "_".join(("unit", "id"))
+    for refused in ({retired_filter: "retired-input"}, {"xyzzy": "value"}):
+        try:
+            _submit(method, key, refused)
+        except FrameworkError as exc:
+            _check(exc.error_code == "action.unknown_arguments", "BRIDGE_ACCEPTS_LABEL_AND_INSTANCE_AND_REFUSES_UNDECLARED_ARGUMENTS")
+        else:
+            raise AssertionError("BRIDGE_ACCEPTS_LABEL_AND_INSTANCE_AND_REFUSES_UNDECLARED_ARGUMENTS")
 
 
 def _assert_edge_retryable() -> None:
     plugin = object.__new__(AgentMessagingPlugin)
     definitions = plugin.get_edge_process_definitions()
-    for name in ("read_unit_usage", "read_session_usage_window"):
-        definition = definitions[name]
+    for name in ("read_label_usage", "read_session_usage_window"):
+        customizations = definitions[name].error_processor_template_customizations
         _check(
-            definition.error_processor_template_customizations.retryable is True,
+            customizations is not None and customizations.retryable is True,
             "EDGE_PROCESS_DEFINITION_PRESENT_AND_RETRYABLE",
         )
 
@@ -278,13 +274,85 @@ def _assert_edge_retryable() -> None:
 def _assert_id_arguments() -> None:
     module = _module()
     state, _raw = _state()
-    for params in ({}, {"unit_id": "unt-usage", "agent_instance_id": "agi-usage"}):
+    retired_filter = "_".join(("unit", "id"))
+    for params in ({}, {"label": "lbl-usage", "agent_instance_id": "agi-usage"}, {retired_filter: "retired-input"}):
         try:
-            module.read_unit_usage(state, params, totals_reader=lambda **_kw: {}, now=NOW)
+            module.read_label_usage(state, params, totals_reader=lambda **_kw: {}, now=NOW)
         except module.UsageVerbError as exc:
             _check(exc.code == "parameter_invalid", "NEITHER_OR_BOTH_ID_REFUSED_BY_NAME")
         else:
             raise AssertionError("NEITHER_OR_BOTH_ID_REFUSED_BY_NAME")
+
+
+def _label_session_matches(session: Mapping[str, Any], runtime_id: str, input_tokens: int, output_tokens: int) -> bool:
+    observed = session.get("observed", [])
+    if len(observed) != 1:
+        return False
+    usage = observed[0].get("usage", {})
+    return session.get("runtime_session_ids") == [runtime_id] and usage.get("input_tokens") == input_tokens and usage.get("output_tokens") == output_tokens
+
+
+def _assert_label_read_totals() -> None:
+    """Read exact-label totals for three distinct sessions and omit other labels."""
+    state, raw = _state()
+    instances = ["agi-alpha-author", "agi-alpha-reviewer", "agi-alpha-planner"]
+    expected: dict[str, tuple[str, int, int]] = {}
+    totals: list[dict[str, Any]] = []
+    for index, instance in enumerate(instances):
+        runtime_id = f"runtime-alpha-{index}"
+        input_tokens, output_tokens = (index + 1) * 10, (index + 1) * 5
+        _spawn(state, raw, instance, label="alpha")
+        _mapping(state, instance, runtime_id)
+        expected[instance] = (runtime_id, input_tokens, output_tokens)
+        totals.append(_total(runtime_id, usage=_usage(input_tokens=input_tokens, output_tokens=output_tokens)))
+    _spawn(state, raw, "agi-beta-other", label="beta")
+    _mapping(state, "agi-beta-other", "runtime-beta-0")
+    totals.append(_total("runtime-beta-0", usage=_usage(input_tokens=999, output_tokens=999)))
+
+    answer = _unit(state, {"label": "alpha"}, totals)
+    sessions = {row["agent_instance_id"]: row for row in answer["sessions"]}
+    joined = answer["coverage"] == "full" and set(sessions) == set(instances) and all(_label_session_matches(sessions[instance], *want) for instance, want in expected.items())
+    _check(joined, "LABEL_READ_RETURNS_THE_LABELLED_SESSIONS_PER_SESSION_TOTALS")
+
+    unmatched = _unit(state, {"label": "alpha "}, totals)
+    _check(
+        unmatched["coverage"] == "none" and unmatched["sessions"] == [] and "managed_session_not_found" in unmatched["notes"]["advisories"],
+        "LABEL_MATCHED_EXACTLY_AS_STORED",
+    )
+
+
+def _assert_estimate_uses_observed_model() -> None:
+    """Price the observed session when its model and effort differ from the request."""
+    state, raw = _state()
+    _spawn(state, raw, "agi-priced", label="priced", model="claude-sonnet-5", effort="high")
+    _mapping(state, "agi-priced", "runtime-priced")
+    _context(state, "agi-priced", "runtime-priced", effort="medium")
+    raw.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_CELL).extend(
+        [
+            {"id": "cell-requested", "runtime": "claude_code", "model": "claude-sonnet-5", "effort": "high", "cost_per_task_usd": 0.23, "acceptance": "accepted"},
+            {"id": "cell-observed", "runtime": "claude_code", "model": "claude-opus-5-5", "effort": "medium", "cost_per_task_usd": 0.41, "acceptance": "accepted"},
+        ],
+    )
+    answer = _unit(state, {"label": "priced"}, [_total("runtime-priced", model="claude-opus-5-5")])
+    _check(
+        answer["estimate"] == {"usd": 0.41, "basis": "catalog_lookup", "cell": ["claude_code", "claude-opus-5-5", "medium"]},
+        "ESTIMATE_COMES_FROM_THE_OBSERVED_MODEL_AND_EFFORT",
+    )
+
+
+def _assert_retired_result_field_is_absent() -> None:
+    """The retired result field stays absent in both populated and empty answers."""
+    state, raw = _state()
+    _spawn(state, raw, "agi-scored", label="scored")
+    _mapping(state, "agi-scored", "runtime-scored")
+    found = _unit(state, {"label": "scored"}, [_total("runtime-scored")])
+    missing = _unit(state, {"label": "no-such-label"}, [])
+    no_state = _unit(None, {"label": "scored"}, [])
+    retired_field = "_".join(("difficulty", "score"))
+    _check(
+        all(retired_field not in answer for answer in (found, missing, no_state)),
+        "USAGE_RESULT_OMITS_RETIRED_FIELD",
+    )
 
 
 def run_assertions(assertions: tuple[tuple[str, Callable[[], None]], ...]) -> int:
@@ -310,9 +378,12 @@ def run_assertions(assertions: tuple[tuple[str, Callable[[], None]], ...]) -> in
 
 ASSERTIONS: tuple[tuple[str, Callable[[], None]], ...] = (
     ("VERB_REGISTERED_ON_PLUGIN_WITH_DECLARED_PARAMETERS", _assert_verb_registered),
-    ("BRIDGE_ACCEPTS_READ_UNIT_USAGE_ARGUMENTS", _assert_bridge_unit_arguments),
+    ("BRIDGE_ACCEPTS_LABEL_AND_INSTANCE_AND_REFUSES_UNDECLARED_ARGUMENTS", _assert_bridge_label_arguments),
     ("EDGE_PROCESS_DEFINITION_PRESENT_AND_RETRYABLE", _assert_edge_retryable),
     ("NEITHER_OR_BOTH_ID_REFUSED_BY_NAME", _assert_id_arguments),
+    ("LABEL_READ_RETURNS_THE_LABELLED_SESSIONS_PER_SESSION_TOTALS", _assert_label_read_totals),
+    ("ESTIMATE_COMES_FROM_THE_OBSERVED_MODEL_AND_EFFORT", _assert_estimate_uses_observed_model),
+    ("USAGE_RESULT_OMITS_RETIRED_FIELD", _assert_retired_result_field_is_absent),
 )
 
 

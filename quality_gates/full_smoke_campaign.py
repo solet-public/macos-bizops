@@ -1,4 +1,4 @@
-"""Durable full-battery requests, linked attempts and filing outbox history.
+"""Durable full-battery requests and linked attempt history.
 
 This store shares the proof journal's owner/CAS/locking implementation, in a
 distinct namespace. A running record is never a PASS. Only a worker holding
@@ -29,7 +29,7 @@ def utc_now() -> str:
 
 
 class CampaignStore:
-    """Append queued/running/closed plus pending/submitted/confirmed outbox."""
+    """Append queued, running and closed campaign states."""
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or default_store_root().parent / "full-campaigns-v1"
@@ -51,7 +51,7 @@ class CampaignStore:
         existing = self.get(key)
         if existing:
             return existing
-        return self.write(key, {"campaign_id": key, "request": dict(request), "state": "queued", "queued_at": utc_now(), "next_due_at": utc_now(), "attempts": [], "filing": {"status": "not_needed"}}, expected_version=0, reason="accepted full battery request")
+        return self.write(key, {"campaign_id": key, "request": dict(request), "state": "queued", "queued_at": utc_now(), "attempts": []}, expected_version=0, reason="accepted full battery request")
 
     @contextmanager
     def exclusion(self) -> Generator[bool]:
@@ -68,18 +68,6 @@ class CampaignStore:
                     yield True
                 finally:
                     fcntl.flock(handle, fcntl.LOCK_UN)
-
-
-def battery_busy(directory: Path) -> bool:
-    """A held canonical receipt lock is positive running-battery evidence."""
-    for path in directory.glob("*.lock"):
-        with path.open("a+") as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-            fcntl.flock(handle, fcntl.LOCK_UN)
-    return False
 
 
 def campaign_budget(directory: Path, *, registered_count: int, per_smoke_seconds: int = 120, entries: Sequence[str] = ()) -> dict[str, Any]:

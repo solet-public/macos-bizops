@@ -1,0 +1,17 @@
+{
+  "process_key": "service_interface::quality_service::list_full_smoke_campaigns",
+  "display_name": "List Full Smoke Campaigns",
+  "description": "Registered dispatch returns data.job_id and data.status=queued before operation preflight. Read service_interface::job_service::get_job by that exact id until terminal: job.result is the complete original operation response and job.error retains a failure. Direct internal Python calls keep their complete synchronous results. Admission persists a bounded descriptor; loss of its owner-memory body requires reconciliation without automatic replay. Read the closed full-battery campaign records on this machine, oldest first by finish time, one page at a time. Use it to learn which scheduled full smoke runs finished, whether each was clean, failed or superseded, and what failure filing its record last noted. Arguments: finished_after (optional ISO-8601 timestamp with a timezone, exclusive) and limit (integer 1 to 100, default 50). The read is journal-only: it writes nothing, queues nothing and calls no other service.",
+  "embedding_description": "List the finished full-battery smoke campaigns recorded on this machine, oldest first, with each one's commit, outcome, clean or superseded flag, results digest, previous clean finish time and failure-filing status. Page with a finished-after timestamp and a limit. Nothing is changed.",
+  "result_processor_customizations": {
+    "action_label": "Read closed full-battery campaign records, oldest first, without changing them.",
+    "result_type": "list_full_smoke_campaigns_result",
+    "result_description": "Submission: data.job_id and data.status. Terminal job.result: campaigns (rows ordered by finished_at, each with campaign_id, marker, request {commit, tree, trigger, window}, finished_at, outcome, clean, superseded, summary, results_sha256, previous_clean_finished_at and filing_status), truncated (true when more closed campaigns follow) and next_finished_after (the cursor for the next page, set only when truncated). A queued or running campaign has no finish and is not listed. outcome, summary, results_sha256 and filing_status are null where the record holds none.",
+    "output_action_guidance": "Keep the exact job id. Retrieve job_service.get_job until terminal before consuming the campaign rows. When truncated is true, call again with finished_after set to next_finished_after to read the rest. A row with clean false and superseded false is a failed or incomplete campaign; its marker is the text a failure filing for that campaign carries."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read closed full-battery campaign records, oldest first, without changing them.",
+    "error_interpretation": "A ValueError names a rejected argument: limit must be an integer from 1 to 100 (a boolean or text is refused), and finished_after must be an ISO-8601 timestamp that carries a timezone. Nothing was read or changed. An unreadable campaign journal is a local storage fault, not a bad request.",
+    "recovery_guidance": "Correct the named argument and call again; the read is safe to repeat because it changes nothing. For a storage fault, check that the campaign journal folder under the runtime receipts directory is readable by the running solet process."
+  }
+}

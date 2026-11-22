@@ -3,16 +3,27 @@
 # durable no-MCP receive path armed.
 #
 # Usage: codex-{{SOLET_NAME}} [role] [codex arguments ...]
-#   role   durable coordination role and human-facing label (default: Operator)
+#   role   durable coordination role and human-facing label (default: the
+#          launch folder's name; no role is claimed)
 #
 # CODEX_BIN may name an explicit stock Codex executable. It defaults to the
 # `codex` found on PATH. The launcher never enables MCP or bypasses approvals.
 
 set -u
 
-role="${1:-Operator}"
+# An unnamed launch is named for the folder it was started from (characters
+# outside A-Za-z0-9._- become "-", "session" at the filesystem root) and
+# claims no role; a name the person gives is also their own role claim.
+role="${1:-}"
 if (( $# > 0 )); then
   shift
+fi
+role_defaulted=0
+if [[ -z "$role" ]]; then
+  role="${PWD:t}"
+  role="${role//[^A-Za-z0-9._-]/-}"
+  [[ -z "$role" ]] && role="session"
+  role_defaulted=1
 fi
 
 # Capture the user's folder before entering the clone for project settings.
@@ -39,7 +50,16 @@ export SOLET_NAME="{{SOLET_NAME}}"
 # routing keys diverge silently.
 export AGENT_IDENTITY="codex"
 export AGENT_SESSION_LABEL="$role"
-export AGENT_ROLE="$role"
+typeset -a claim_args
+if (( role_defaulted )); then
+  # The label is display metadata only: no role is exported or claimed, and an
+  # inherited one is dropped.
+  unset AGENT_ROLE
+  claim_args=(--no-claim)
+else
+  export AGENT_ROLE="$role"
+  claim_args=(--role "$AGENT_ROLE")
+fi
 export AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}"
 export AGENT_WAKE_CLI="{{SOLET_NAME}}"
 export FLEET_TRANSPORT="${{{SOLET_NAME}}_FLEET_TRANSPORT:-watch}"
@@ -69,7 +89,7 @@ if [[ "$FLEET_TRANSPORT" == "watch" ]]; then
     # independent of the spool tee.
     "$AGENT_WAKE_CLI" watch \
       --agent-id codex \
-      --role "$AGENT_ROLE" \
+      "${claim_args[@]}" \
       --exit-with-parent "$$" \
       >>"$watch_log" 2>&1 &
     watcher_pid=$!

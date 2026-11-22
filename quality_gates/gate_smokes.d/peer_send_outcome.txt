@@ -1,0 +1,2 @@
+# The read-only peer_send_outcome verb: busy Codex and Claude panes, a restart, an unmanaged recipient and the verb envelope, on the shared pickup fixture.
+plugins/agent_messaging_plugin/tests/peer_send_outcome_smoke.py

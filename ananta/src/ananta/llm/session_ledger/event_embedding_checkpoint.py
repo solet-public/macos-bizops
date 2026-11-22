@@ -8,7 +8,6 @@ Transition logs provide append-only operational history without event content.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Literal
@@ -49,8 +48,6 @@ def decode_checkpoint(raw: object) -> SweepCheckpoint | None:
     if raw is None:
         return None
     try:
-        if isinstance(raw, str):
-            raw = json.loads(raw)
         if not isinstance(raw, dict):
             raise ValueError("expected object")
         return SweepCheckpoint(

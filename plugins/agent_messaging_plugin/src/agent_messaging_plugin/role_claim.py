@@ -52,13 +52,9 @@ from ananta.llm.agent_messaging.role_binding import (
     COL_ROLE,
     HOLDER_KIND_INFERENCE_PROVIDER,
     HOLDER_KIND_SESSION,
-    TABLE_ROLE,
     TABLE_ROLE_BINDING,
-    is_reserved_primary_name,
     is_system_role,
-    role_binding_external_id,
 )
-from ananta.llm.agent_messaging.state_results import require_records
 from ananta.services.state_service.bounded_read import iter_table_rows
 
 from .bridge_sessions import BridgeNotFoundError, BridgeQueueFullError
@@ -166,12 +162,7 @@ RoleClaimResult = RoleClaimSuccess | RoleClaimFailure
 
 def displaced_prose(name: str, new_agent_instance_id: str) -> str:
     """REL-04 displaced-holder notice. ``name`` is an opaque operator-defined role."""
-    return (
-        f"IMPORTANT: You have been displaced from role {name!r} by instance "
-        f"{new_agent_instance_id}. You no longer hold this role — a role-addressed "
-        f"message to {name!r} now reaches the new holder. Re-claim the role "
-        f"(/rename) if this displacement was not intended."
-    )
+    return f"IMPORTANT: You have been displaced from role {name!r} by instance {new_agent_instance_id}. You no longer hold this role — a role-addressed message to {name!r} now reaches the new holder. Re-claim the role (/rename) if this displacement was not intended."
 
 
 def new_holder_prose(name: str) -> str:
@@ -256,7 +247,8 @@ def send_handover_notice(
     if bridge_manager is None or peer_registry is None or agent_messaging_service is None:
         logger.warning(
             "REL-04 %s notice skipped (bridge not started): agi=%s",
-            kind, peer_agent_instance_id,
+            kind,
+            peer_agent_instance_id,
         )
         return False
     try:
@@ -284,14 +276,18 @@ def send_handover_notice(
     ) as exc:
         logger.warning(
             "REL-04 %s notice undelivered (agi=%s): %s — role claim proceeds",
-            kind, peer_agent_instance_id, exc,
+            kind,
+            peer_agent_instance_id,
+            exc,
         )
         return False
     return True
 
 
 def is_genuine_displacement(
-    prior: Any, new_agent_instance_id: str, new_agent_session_id: str,
+    prior: Any,
+    new_agent_instance_id: str,
+    new_agent_session_id: str,
 ) -> bool:
     """True iff ``prior`` is a DIFFERENT session than the new holder (REL-07(2)).
 
@@ -306,13 +302,12 @@ def is_genuine_displacement(
     prior_sid = str(getattr(prior, "agent_session_id", "") or "")
     if prior_sid and new_agent_session_id:
         return prior_sid != new_agent_session_id
-    return bool(prior.agent_instance_id) and (
-        prior.agent_instance_id != new_agent_instance_id
-    )
+    return bool(prior.agent_instance_id) and (prior.agent_instance_id != new_agent_instance_id)
 
 
 def displaced_target(
-    prior: Any, peer_registry: PeerRegistry | None,
+    prior: Any,
+    peer_registry: PeerRegistry | None,
 ) -> tuple[str, str]:
     """Route the displaced-holder notice to the prior holder's CURRENT bridge.
 
@@ -328,8 +323,9 @@ def displaced_target(
             live = peer_registry.resolve_by_agent_session_id(prior_sid)
         except PeerSessionAmbiguousError as exc:
             logger.warning(
-                "REL-04 displaced-notice: ambiguous session id %r — "
-                "falling back to recorded instance: %s", prior_sid, exc,
+                "REL-04 displaced-notice: ambiguous session id %r — falling back to recorded instance: %s",
+                prior_sid,
+                exc,
             )
             live = None
         if live is not None:
@@ -364,14 +360,12 @@ def notify_role_handover(
     instead of an undeliverable notice. The displaced-notice fires ONLY when
     the displaced holder is a session.
     """
-    if prior is not None and (
-        str(getattr(prior, "holder_kind", "") or "") == HOLDER_KIND_INFERENCE_PROVIDER
-    ):
+    if prior is not None and (str(getattr(prior, "holder_kind", "") or "") == HOLDER_KIND_INFERENCE_PROVIDER):
         logger.warning(
-            "role %r handover: displaced holder was an inference_provider "
-            "(identity=%s) — no wake target, logging the transition for audit "
-            "(new holder %s/%s).",
-            name, getattr(prior, "holder_identity", {}), new_agent_id,
+            "role %r handover: displaced holder was an inference_provider (identity=%s) — no wake target, logging the transition for audit (new holder %s/%s).",
+            name,
+            getattr(prior, "holder_identity", {}),
+            new_agent_id,
             new_agent_instance_id,
         )
     elif is_genuine_displacement(prior, new_agent_instance_id, new_agent_session_id):
@@ -461,7 +455,6 @@ def settle_role_handover(
         agent_instance_id=resolved_instance,
         agent_session_id=agent_session_id,
     )
-
 
 
 def _current_holder(state_service: Any, name: str) -> ResolvedRole | None:
@@ -558,24 +551,15 @@ def _live_holder_refusal(
     where = "ambiguous (>1 live binding)" if ambiguous else "live"
     return RoleClaimFailure(
         code="role_held_live",
-        message=(
-            f"role {name!r} is held by a {where} session: label "
-            f"{holder.session_label!r}, instance {holder.agent_instance_id}, "
-            f"session {holder.agent_session_id}. Claiming would take its "
-            f"deliveries. Re-run with an explicit takeover after confirming "
-            f"with the operator, or wait for the holder to release it."
-        ),
+        message=(f"role {name!r} is held by a {where} session: label {holder.session_label!r}, instance {holder.agent_instance_id}, session {holder.agent_session_id}. Claiming would take its deliveries. Re-run with an explicit takeover after confirming with the operator, or wait for the holder to release it."),
     )
 
 
-# Same ceiling and reason as the role_class backfill's walk of this table: one
+# Ceiling for the binding walk of this table: one
 # row per role ever bound (133 measured 2026-08-15), growing with the fleet's
 # role vocabulary rather than its traffic.
 _BINDING_WALK_CEILING = 10_000
-_BINDING_WALK_REASON = (
-    "one row per role ever bound (133 measured 2026-08-15); grows with the "
-    "fleet's role vocabulary, not its traffic."
-)
+_BINDING_WALK_REASON = "one row per role ever bound (133 measured 2026-08-15); grows with the fleet's role vocabulary, not its traffic."
 
 
 def live_holder_of(
@@ -661,10 +645,7 @@ def _claim_preflight_refusal(
     if not name or not agent_id or not agent_instance_id:
         return RoleClaimFailure(
             code="missing_argument",
-            message=(
-                "peer_claim_role requires non-empty 'name', "
-                "'agent_id', and 'agent_instance_id'."
-            ),
+            message=("peer_claim_role requires non-empty 'name', 'agent_id', and 'agent_instance_id'."),
         )
     # §6.1 reserved-keyspace gate: a general claim never assigns a SESSION-FILLED
     # system slot (that is the §D.9 auto-assignment lane), and a PLUGIN-OWNED slot
@@ -680,56 +661,19 @@ def _claim_preflight_refusal(
     return None
 
 
-def _role_entity_exists(state_service: Any, name: str) -> bool:
-    """Does the first-class ``role`` entity row for ``name`` already exist?
-
-    Distinguishes a FRESH MINT (no row yet) from a claim against an
-    already-legislated name — the reserved-mint guard below only fires on the
-    former (§3.1 / Dawn ruling Q1: peer_claim_role is enforce-by-class, never
-    class-assignment; only a fresh mint of a reserved-pattern name is refused).
-    """
-    result = state_service.query_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {"table": TABLE_ROLE, "filters": {"external_id": role_binding_external_id(name)}},
-    )
-    return bool(require_records(result))
-
-
-def _reserved_mint_refusal(state_service: Any, name: str) -> RoleClaimFailure | None:
-    """Refuse a FRESH MINT of a reserved primary-seat name (``<solet>-Main``
-    shape) — the ONE D1-scoped claim-path guard from §3.1 (Dawn ruling Q1).
-    ``sys:*`` names are already keyspace-rejected upstream by
-    ``evaluate_system_slot_claim``; this guards the DIFFERENT ``-Main`` pattern,
-    and only when no role row exists yet. A name already legislated (via this
-    plugin's ``legislate_role`` governance-act verb, outside D1) claims
-    normally regardless of this check.
-    """
-    if not is_reserved_primary_name(name) or is_system_role(name):
-        return None
-    if _role_entity_exists(state_service, name):
-        return None
-    return RoleClaimFailure(
-        code="reserved_role_name",
-        message=(
-            f"role {name!r} matches the reserved primary-seat pattern "
-            "(<solet>-Main) and has no legislated role row yet — minting "
-            "it via an ordinary claim is refused. Primary-seat legislation is "
-            "a governance act (this plugin's legislate_role verb), not a "
-            "session claim."
-        ),
-    )
-
-
 def _mint_and_cardinality_gate_refusal(
-    state_service: Any, *, name: str, agent_session_id: str, agent_instance_id: str,
+    state_service: Any,
+    *,
+    name: str,
+    agent_session_id: str,
+    agent_instance_id: str,
 ) -> RoleClaimFailure | None:
-    """Fleet session-management Phase B, D1 (§3.1 reserved-mint guard + §2
-    AMEND-4b cardinality gate, Dawn ruling gap 2). Evaluated BEFORE the
-    binding CAS so a refusal mutates nothing beyond a harmless role-entity
-    upsert (§5.5 — a lost CAS then leaves at most an orphan entity, never
-    read on resolve). ``sys:*`` slots are slot machinery, exempt from the
-    cardinality count (§2) — they keep the existing §6.1 gate untouched, no
-    ``session_role_claim`` row.
+    """Fleet session-management Phase B, D1 (§2 AMEND-4b cardinality gate,
+    Dawn ruling gap 2). Evaluated BEFORE the binding CAS so a refusal mutates
+    nothing beyond a harmless role-entity upsert (§5.5 — a lost CAS then
+    leaves at most an orphan entity, never read on resolve). ``sys:*`` slots
+    are slot machinery, exempt from the cardinality count (§2) — they keep the
+    existing §6.1 gate untouched, no ``session_role_claim`` row.
 
     TRUST MODEL (``session_role_claim_store`` module docstring, Q2): keyed on
     ``agent_session_id`` at the SAME trust level the existing binding CAS
@@ -740,9 +684,6 @@ def _mint_and_cardinality_gate_refusal(
     Returns the refusal, or ``None`` to let the claim proceed (a system role
     always returns ``None`` here — its gate is untouched).
     """
-    reserved = _reserved_mint_refusal(state_service, name)
-    if reserved is not None:
-        return reserved
     # §5.5 entity-first: upsert the role entity BEFORE the binding CAS.
     upsert_role_entity(state_service, name=name)
     if is_system_role(name):
@@ -764,7 +705,10 @@ def _mint_and_cardinality_gate_refusal(
 
 
 def _prune_displaced_session_role_claim(
-    state_service: Any, *, name: str, outcome: dict[str, Any],
+    state_service: Any,
+    *,
+    name: str,
+    outcome: dict[str, Any],
 ) -> None:
     """Displacer cleanup (Dawn ruling gap 1): prune the LOSER's own
     ``session_role_claim`` row so it does not linger as a stale orphan
@@ -779,7 +723,9 @@ def _prune_displaced_session_role_claim(
     prior_session_id = str(getattr(prior, "agent_session_id", "") or "")
     if prior_session_id:
         delete_session_role_claim_if_still_holds(
-            state_service, agent_session_id=prior_session_id, expected_held_role=name,
+            state_service,
+            agent_session_id=prior_session_id,
+            expected_held_role=name,
         )
 
 
@@ -797,8 +743,7 @@ def _log_operator_takeover(
         return
     prior = outcome.get("prior")
     logger.warning(
-        "operator-confirmed role takeover: name=%r claimer=%s/%s "
-        "session=%s displaced=%s/%s session=%s",
+        "operator-confirmed role takeover: name=%r claimer=%s/%s session=%s displaced=%s/%s session=%s",
         name,
         agent_id,
         agent_instance_id,
@@ -872,11 +817,7 @@ def claim_role_for_session(
     if session_claim_requires_session_id(HOLDER_KIND_SESSION, agent_session_id):
         return RoleClaimFailure(
             code="missing_session_id",
-            message=(
-                "peer_claim_role requires a non-empty agent_session_id for a "
-                "session holder; the claimant's peer_binding carried none "
-                "(launch with the session-id carrier exported, or pass it)."
-            ),
+            message=("peer_claim_role requires a non-empty agent_session_id for a session holder; the claimant's peer_binding carried none (launch with the session-id carrier exported, or pass it)."),
         )
     # WS-2e §4.3.2 claim decision table, evaluated BEFORE the CAS so a refusal
     # mutates nothing. Only ONE row of the table refuses: a DIFFERENT session
@@ -898,7 +839,9 @@ def claim_role_for_session(
     if held is not None:
         return held
     gate_refusal = _mint_and_cardinality_gate_refusal(
-        state_service, name=name, agent_session_id=agent_session_id,
+        state_service,
+        name=name,
+        agent_session_id=agent_session_id,
         agent_instance_id=agent_instance_id,
     )
     if gate_refusal is not None:
@@ -938,7 +881,10 @@ def claim_role_for_session(
     )
     logger.debug(
         "role claim settled: name=%r action=%s origin=%s agi=%s",
-        name, settled.action, origin.value, agent_instance_id,
+        name,
+        settled.action,
+        origin.value,
+        agent_instance_id,
     )
     return settled
 

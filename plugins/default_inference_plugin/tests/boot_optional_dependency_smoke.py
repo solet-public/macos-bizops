@@ -85,6 +85,10 @@ class _FakeOrchestrator:
 class _EventuallyAvailableProvider:
     availability_checks = 0
 
+    @classmethod
+    def reset(cls) -> None:
+        cls.availability_checks = 0
+
     def __init__(self, base_url: str, model: str, timeout: int) -> None:
         self.base_url = base_url
         self.model = model
@@ -92,11 +96,7 @@ class _EventuallyAvailableProvider:
 
     def validate_availability(self) -> dict[str, object]:
         type(self).availability_checks += 1
-        status = (
-            ActionStatus.COMPLETED.value
-            if type(self).availability_checks >= 3
-            else ActionStatus.ERROR.value
-        )
+        status = ActionStatus.COMPLETED.value if type(self).availability_checks >= 3 else ActionStatus.ERROR.value
         return {"action_status": status, "data": {}, "error": "unavailable"}
 
     def generate_completion(self, request: InferenceRequest) -> dict[str, object]:
@@ -132,10 +132,7 @@ class _QwenOneTokenProvider:
     def generate_completion(self, request: InferenceRequest) -> dict[str, object]:
         self.requests.append(request)
         if request.max_tokens == 1:
-            raise InferenceValidationError(
-                "Response truncated: model hit token limit (1 output tokens). "
-                "The response is incomplete and cannot be parsed."
-            )
+            raise InferenceValidationError("Response truncated: model hit token limit (1 output tokens). The response is incomplete and cannot be parsed.")
         return {"action_status": ActionStatus.COMPLETED.value, "data": {}, "error": None}
 
 
@@ -164,10 +161,15 @@ def test_unavailable_boot_degrades_then_recovers() -> None:
     capture = _MessageCapture()
     test_logger = logging.getLogger("boot_optional_dependency_smoke")
     test_logger.addHandler(capture)
-    _EventuallyAvailableProvider.availability_checks = 0
+    _EventuallyAvailableProvider.reset()
     prewarm_calls: list[bool] = []
     retry_started = threading.Event()
     release_retry = threading.Event()
+    prewarm_done = threading.Event()
+
+    def _record_prewarm() -> None:
+        prewarm_calls.append(True)
+        prewarm_done.set()
 
     def _blocked_retry_sleep(_seconds: float) -> None:
         retry_started.set()
@@ -179,7 +181,7 @@ def test_unavailable_boot_degrades_then_recovers() -> None:
     try:
         plugin = Plugin()
         plugin.orchestrator_ref = _FakeOrchestrator()  # type: ignore[assignment]
-        plugin._prewarm_canonical_grammars = lambda: prewarm_calls.append(True)  # type: ignore[method-assign]
+        plugin._prewarm_canonical_grammars = _record_prewarm  # type: ignore[method-assign]
 
         raised: Exception | None = None
         try:
@@ -196,8 +198,7 @@ def test_unavailable_boot_degrades_then_recovers() -> None:
         _check(retry_started.wait(timeout=0.1), "background retry starts after the boot-time miss")
         _check(not plugin.is_ready(), "plugin is explicitly unready during the retry window")
         _check(
-            plugin.get_readiness_error()
-            == "Inference server not available at http://localhost:1234/v1 after router registration",
+            plugin.get_readiness_error() == "Inference server not available at http://localhost:1234/v1 after router registration",
             "readiness error names the unavailable endpoint",
         )
         release_retry.set()
@@ -209,6 +210,8 @@ def test_unavailable_boot_degrades_then_recovers() -> None:
             _EventuallyAvailableProvider.availability_checks == 3,
             "retry rechecks availability until the first successful response",
         )
+        # The pre-warm runs on its own worker after readiness, so wait for it.
+        prewarm_done.wait(timeout=2.0)
         _check(prewarm_calls == [True], "prewarm runs once after availability succeeds")
         wait_lines = [line for line in capture.messages if "Inference server not available" in line]
         _check(len(wait_lines) == 1, "one actionable waiting line is logged, not one per retry")
@@ -231,9 +234,7 @@ def test_cold_prewarm_does_not_delay_startup_readiness() -> None:
         release_prewarm.wait(timeout=1.0)
 
     plugin_module.LMStudioProvider = _AvailableProvider  # type: ignore[assignment]
-    plugin_module.configure_plugin_logging = lambda *_args: logging.getLogger(
-        "boot_optional_dependency_cold_prewarm"
-    )
+    plugin_module.configure_plugin_logging = lambda *_args: logging.getLogger("boot_optional_dependency_cold_prewarm")
     try:
         plugin = Plugin()
         plugin.orchestrator_ref = _FakeOrchestrator()  # type: ignore[assignment]
@@ -255,6 +256,59 @@ def test_cold_prewarm_does_not_delay_startup_readiness() -> None:
         release_prewarm.set()
         plugin_module.LMStudioProvider = original_provider
         plugin_module.configure_plugin_logging = original_logging
+
+
+def test_ready_does_not_wait_for_a_blocked_prewarm_after_availability_retry() -> None:
+    """The retry path must set ready first, like the direct path, then pre-warm."""
+    original_provider = plugin_module.LMStudioProvider
+    original_logging = plugin_module.configure_plugin_logging
+    original_sleep = plugin_module.time.sleep
+    _EventuallyAvailableProvider.reset()
+    entered = threading.Event()
+    release = threading.Event()
+    prewarm_threads: list[str] = []
+
+    def _blocked_prewarm() -> None:
+        prewarm_threads.append(threading.current_thread().name)
+        entered.set()
+        release.wait(timeout=5.0)
+
+    setattr(plugin_module, "LMStudioProvider", _EventuallyAvailableProvider)  # noqa: B010
+    plugin_module.configure_plugin_logging = lambda *_args: logging.getLogger("boot_optional_dependency_retry_prewarm")
+    plugin_module.time.sleep = lambda _seconds: None
+    try:
+        plugin = Plugin()
+        setattr(plugin, "orchestrator_ref", _FakeOrchestrator())  # noqa: B010
+        plugin._prewarm_canonical_grammars = _blocked_prewarm  # type: ignore[method-assign]
+
+        plugin.prepare_for_readiness()
+        plugin.start_post_registration_work()
+
+        _check(
+            _wait_until_ready(plugin, 2.0),
+            "availability retry marks the plugin ready while the grammar prewarm is blocked",
+        )
+        _check(
+            not release.is_set() and plugin.get_readiness_error() is None,
+            "the stale router-registration error is cleared before the prewarm finishes",
+        )
+        _check(
+            entered.wait(timeout=2.0) and prewarm_threads == ["default_inference_plugin-grammar-prewarm"],
+            "the grammar prewarm starts after readiness in its own background worker",
+        )
+        release.set()
+        worker = plugin._prewarm_retry_thread
+        if worker is not None:
+            worker.join(timeout=2.0)
+        _check(
+            worker is not None and not worker.is_alive() and len(prewarm_threads) == 1,
+            "the background prewarm worker runs the prewarm exactly once and finishes",
+        )
+    finally:
+        release.set()
+        plugin_module.LMStudioProvider = original_provider
+        plugin_module.configure_plugin_logging = original_logging
+        plugin_module.time.sleep = original_sleep
 
 
 def test_inference_is_refused_while_unready() -> None:
@@ -287,9 +341,7 @@ def test_text_completion_is_refused_while_unready() -> None:
     plugin.set_error("Inference server not available at http://localhost:1234/v1")
     raised: Exception | None = None
     try:
-        plugin.generate_text_completion(
-            "summarize this context", max_tokens=1, temperature=0.0, load_context=False
-        )
+        plugin.generate_text_completion("summarize this context", max_tokens=1, temperature=0.0, load_context=False)
     except Exception as exc:  # RED: an unready path currently reaches later setup.
         raised = exc
     _check(
@@ -297,8 +349,7 @@ def test_text_completion_is_refused_while_unready() -> None:
         "text completion is refused cleanly while the plugin is unready",
     )
     _check(
-        isinstance(raised, InferenceServiceUnavailableError)
-        and "Inference server not available" in str(raised),
+        isinstance(raised, InferenceServiceUnavailableError) and "Inference server not available" in str(raised),
         "text completion preserves the actionable readiness detail",
     )
 
@@ -346,8 +397,7 @@ def test_prewarm_budget_avoids_qwen_one_token_truncation() -> None:
         old_failure = exc
 
     _check(
-        old_failure is not None
-        and "Response truncated: model hit token limit (1 output tokens)" in str(old_failure),
+        old_failure is not None and "Response truncated: model hit token limit (1 output tokens)" in str(old_failure),
         "one-token Qwen probe reproduces the observed truncation signature",
     )
 
@@ -367,8 +417,7 @@ def test_prewarm_budget_avoids_qwen_one_token_truncation() -> None:
         "prewarm uses the bounded schema-completion budget",
     )
     _check(
-        fixed_request.messages
-        == [{"role": "user", "content": plugin_module._GRAMMAR_PREWARM_PROMPT}],
+        fixed_request.messages == [{"role": "user", "content": plugin_module._GRAMMAR_PREWARM_PROMPT}],
         "prewarm explicitly asks for the shortest schema-valid response",
     )
 
@@ -377,6 +426,7 @@ def main() -> int:
     print("=== boot_optional_dependency_smoke ===")
     test_unavailable_boot_degrades_then_recovers()
     test_cold_prewarm_does_not_delay_startup_readiness()
+    test_ready_does_not_wait_for_a_blocked_prewarm_after_availability_retry()
     test_inference_is_refused_while_unready()
     test_text_completion_is_refused_while_unready()
     test_prewarm_failure_is_not_reported_as_compiled()

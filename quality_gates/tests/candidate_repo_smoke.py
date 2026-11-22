@@ -122,6 +122,25 @@ def _check_sanitizer_lifecycle() -> int:
     return 6
 
 
+def _check_fixture_git_starts_no_background_maintenance() -> int:
+    with TemporaryDirectory() as temporary:
+        workspace = Path(temporary).resolve()
+        (workspace / "w").mkdir()
+        trace_path = workspace / "git-trace.txt"
+        original = _fixture_env
+
+        def traced() -> dict[str, str]:
+            return original() | {"GIT_TRACE": str(trace_path)}
+
+        with patch.dict(globals(), {"_fixture_env": traced}):
+            _foreign_repo(workspace / "w")
+        trace_text = trace_path.read_text(encoding="utf-8")
+        assert "commit" in trace_text, "TRACE_PROBE_SAW_THE_SETUP_COMMANDS"
+        maintenance_lines = [line for line in trace_text.splitlines() if "maintenance run" in line]
+        assert not maintenance_lines, ("FIXTURE_SETUP_STARTS_NO_MAINTENANCE_RUN", maintenance_lines)
+    return 2
+
+
 def _check_private_git_environment() -> int:
     """An inherited index must never survive operation-owned Git routing."""
     with TemporaryDirectory() as temporary:
@@ -169,8 +188,11 @@ def _assert_private_git_identity(root: Path, base: str) -> None:
 
 
 def _git(root: Path, *arguments: str) -> str:
+    # `git commit` starts a detached `git maintenance run --auto` that creates and removes
+    # .git/objects/maintenance.lock after the command returns. The fixtures are snapshotted byte
+    # for byte right after setup, so no background writer may start; a -c writes nothing into the repository.
     result = subprocess.run(
-        ("git", *arguments),
+        ("git", "-c", "maintenance.auto=false", *arguments),
         cwd=root,
         env=_fixture_env(),
         check=True,
@@ -512,7 +534,7 @@ def _check_candidate_venv_rehomes_from_a_worktree() -> int:
     """A candidate built from a LINKED WORKTREE must import its OWN source.
 
     This is the failure the explicit ``PYTHONPATH`` prefix existed to work
-    around.  A lane worktree reaches the shared virtualenv through a ``.venv``
+    around.  A linked worktree reaches the shared virtualenv through a ``.venv``
     symlink, so every editable pointer inside it carries an absolute path into
     the checkout that OWNS that venv — the main one — and never names the
     worktree.  Re-homing keyed on ``repo_root`` therefore matched nothing, the
@@ -549,7 +571,7 @@ def _check_candidate_venv_rehomes_from_a_worktree() -> int:
         (linked / ".venv").symlink_to(repo / ".venv")
 
         # The lane's own edit, which is what the candidate must end up running.
-        _write(linked, "src/fixture_pkg.py", "MARKER = 'lane-worktree'\n")
+        _write(linked, "src/fixture_pkg.py", "MARKER = 'linked-worktree'\n")
 
         candidate, _ = candidate_repo.build(
             linked,
@@ -579,7 +601,7 @@ def _check_candidate_venv_rehomes_from_a_worktree() -> int:
             text=True,
         )
         marker, resolved = probe.stdout.split()
-        assert marker == "lane-worktree", f"the candidate imported the WRONG tree: marker={marker!r} from {resolved}"
+        assert marker == "linked-worktree", f"the candidate imported the WRONG tree: marker={marker!r} from {resolved}"
         assert Path(resolved).resolve() == (candidate.root / "src" / "fixture_pkg.py").resolve(), f"import resolved outside the candidate: {resolved}"
     return 4
 
@@ -587,9 +609,9 @@ def _check_candidate_venv_rehomes_from_a_worktree() -> int:
 def _check_rehoming_respects_path_boundaries() -> int:
     """Re-homing must not rewrite a SIBLING whose name merely shares a prefix.
 
-    A lane worktree lives beside the checkout that owns the venv and its
+    A linked worktree lives beside the checkout that owns the venv and its
     directory name begins with the same characters, so ``/w/base`` is a prefix
-    substring of ``/w/base_lane_worktrees/l`` without being a parent of it.  A
+    substring of ``/w/base_linked_worktrees/l`` without being a parent of it.  A
     bare ``str.replace`` corrupts that sibling silently, and every containment
     guard in the module still passes on the corrupted value — so the naive fix
     for under-homing introduces a second, quieter defect.
@@ -598,7 +620,7 @@ def _check_rehoming_respects_path_boundaries() -> int:
     source_root = Path("/w/base")
     candidate_root = Path("/w/candidate")
 
-    sibling = "/w/base_lane_worktrees/l/src\n"
+    sibling = "/w/base_linked_worktrees/l/src\n"
     assert _rehome_under_test(sibling, source_root, candidate_root) == sibling, "a sibling path sharing a name prefix was rewritten"
 
     contained = "/w/base/ananta/src\n"
@@ -649,7 +671,7 @@ def _check_pointer_guard_can_still_fail() -> int:
 def _check_pointer_guard_accepts_rehomed_prefix_sibling() -> int:
     """A correctly re-homed pointer may live under a base-prefixed sibling.
 
-    Fleet worktrees commonly live under ``<owner>_lane_worktrees``.  That path
+    Fleet worktrees commonly live under ``<owner>_linked_worktrees``.  That path
     has the owner checkout as a string prefix but is not contained by it, so a
     string-substring guard falsely rejects a correctly re-homed pointer.  The
     boundary-aware re-homing plus resolution guard must accept it.
@@ -658,7 +680,7 @@ def _check_pointer_guard_accepts_rehomed_prefix_sibling() -> int:
     with TemporaryDirectory() as temporary:
         workspace = Path(temporary).resolve()
         source_root = workspace / "base"
-        candidate_root = workspace / "base_lane_worktrees" / "lane"
+        candidate_root = workspace / "base_linked_worktrees" / "candidate"
         shared = workspace / "shared_site"
         candidate_site = workspace / "candidate_site"
         for directory in (source_root, candidate_root, shared, candidate_site):
@@ -980,6 +1002,7 @@ def main() -> int:
     check_count = _check_source_git_environment()
     check_count += _check_private_git_environment()
     check_count += _check_sanitizer_lifecycle()
+    check_count += _check_fixture_git_starts_no_background_maintenance()
     check_count += _check_inherited_index_is_replaced()
     check_count += _check_linked_worktree_is_measurable()
     check_count += _check_index_free_git_dir_is_not_the_fix()

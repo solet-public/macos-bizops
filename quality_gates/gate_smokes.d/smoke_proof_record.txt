@@ -1,0 +1,2 @@
+# What a run's proof record and the proof store keep: digests and counts, and raw output only for a smoke that did not pass cleanly. In-memory fixture tree, offline.
+quality_gates/tests/smoke_proof_record_smoke.py

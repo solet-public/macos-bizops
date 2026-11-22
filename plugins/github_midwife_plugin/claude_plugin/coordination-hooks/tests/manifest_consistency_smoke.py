@@ -30,9 +30,13 @@ import sys
 sys.dont_write_bytecode = True
 
 import ast  # noqa: E402
+import copy  # noqa: E402
+import hashlib  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
+from collections.abc import Callable  # noqa: E402
 from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(_ROOT))
@@ -46,6 +50,9 @@ from _harness import (  # noqa: E402
     preflight,
 )
 
+# The heartbeat report-alive hook was deleted; the smoke asserts its absence instead of enumerating it.
+RETIRED_HEARTBEAT_HOOK = "heartbeat_report_alive.py"
+
 # Each entry-point hook and the words a prose surface may use to name it. A new
 # hook must be added here, and then every document below must mention it -- that
 # coupling is the whole point of this file.
@@ -54,9 +61,7 @@ HOOK_KEYWORDS: dict[str, tuple[str, ...]] = {
     "step_zero_reminder.py": ("knowledge-base-first", "kb-first", "knowledge base"),
     "session_start_context.py": ("live session context",),
     "wake_waiter.py": ("wake waiter", "idle-wake", "wake_waiter"),
-    "heartbeat_report_alive.py": ("heartbeat", "report_alive", "report-alive"),
     "rotation_due_watch.py": ("rotation-due", "rotation due"),
-    "rotation_due_notice.py": ("rotation-due notice", "rotation_due_notice"),
     "capture.py": ("memory-passthrough", "memory passthrough"),
     "session_context.py": ("memory-passthrough", "memory passthrough"),
     "drain.py": ("memory-passthrough", "memory passthrough"),
@@ -65,6 +70,7 @@ HOOK_KEYWORDS: dict[str, tuple[str, ...]] = {
     "sync.py": ("memory-passthrough", "memory passthrough"),
     "headless_tool_allowlist_gate.py": ("spawn-injected",),
     "capture_session_mapping.py": ("spawn-injected",),
+    "recovery_claude.py": ("recovery_claude", "working-tree recovery", "recovery saves"),
 }
 
 # R4 seed-packaging audit, Package B (2026-08-10): files that are
@@ -80,6 +86,24 @@ AGENT_INVOKED_CLI_UTILITIES = frozenset(
 )
 OPTIONAL_RUNNER = "optional_hook_runner.py"
 NON_HOOK_MODULES = frozenset({"coordination_owner.py", OPTIONAL_RUNNER})
+
+# Working-tree recovery (0.10.0). One adapter, recovery_claude.py, is a hook. Beside it ship the
+# shared engine's modules: byte-identical copies of coordination_hooks_common/, listed by the
+# literal MODULES tuple in the shipped working_tree_recovery.py. This suite reads THAT copy of the
+# list, so it never reaches outside the plugin. Engine modules are not hooks: nothing registers
+# them, and working_tree_recovery.py is also the user's restore CLI, run by hand like drain.py.
+RECOVERY_ADAPTER = "recovery_claude.py"
+ENGINE_FACADE = "working_tree_recovery.py"
+# The engine's one place a child process is spawned. Its claim is "one Git spawn boundary".
+ENGINE_SPAWN_BOUNDARY = "recovery_git.py"
+# The only modules the adapter may import: the stdlib it needs and the engine facade (lazily,
+# after the interpreter floor, so an old python3 exits 0 before any engine module is parsed).
+ADAPTER_IMPORTS = frozenset({"__future__", "contextlib", "json", "sys", "pathlib", "working_tree_recovery"})
+# Git subcommands the engine must never name: they write history, refs or packs, or reach a remote.
+ENGINE_ABSENT_SUBCOMMANDS = frozenset({"pack-objects", "index-pack", "update-ref", "fetch", "push", "pull", "rebase", "gc", "fsck", "checkout", "reset", "add", "commit", "merge", "rm", "mv"})
+# Subcommands that write objects or the index. They run only on an explicit user `restore`.
+ENGINE_RESTORE_ONLY_SUBCOMMANDS = frozenset({"hash-object", "read-tree", "update-index", "write-tree", "commit-tree"})
+ENGINE_RESTORE_MODULES = frozenset({"recovery_restore.py", "recovery_rebuild.py"})
 
 # R4 Package C (2026-08-10): files that are entry-point-SHAPED and are ALSO
 # invoked by a DIFFERENT plugin's spawn mechanism -- a spawned headless/tmux
@@ -136,11 +160,10 @@ NETWORK_MODULES = frozenset(
 
 # Source-level names that would falsify "No hook writes a file as an action of
 # its own" for a hook NOT in FILE_WRITE_CAPABLE_HOOKS. Reads are fine and
-# expected (hooks read the session file). heartbeat_report_alive.py and
-# rotation_due_watch.py are the two DISCLOSED exceptions: both write small,
-# secret-free throttle/latch marker files (a timestamp, nothing else) under
-# AGENT_HEARTBEAT_MARKER_DIR (or a temp-dir fallback for the latter) -- see
-# SECURITY.md's "heartbeat and rotation-due" section for the full contract.
+# expected (hooks read the session file). rotation_due_watch.py is the
+# DISCLOSED exception: it writes a small, secret-free throttle marker file (a
+# timestamp, nothing else) under the receipt-derived identity directory -- see
+# SECURITY.md's "The rotation-due watch hook" section for the full contract.
 WRITE_PRIMITIVES = (
     "write_text",
     "write_bytes",
@@ -162,14 +185,14 @@ WRITE_PRIMITIVES = (
     '"a", encoding',
 )
 # Two distinct write shapes: MARKER_ONLY writes a bare timestamp and
-# nothing else (Package A's two hooks, checked below); CONTENT_BEARING
+# nothing else (rotation_due_watch.py, checked below); CONTENT_BEARING
 # writes real fact content sourced from an already-authenticated export
 # snapshot or the agent's own append-only journal, never held to
 # MARKER_ONLY's narrower bare-timestamp claim (membership here only feeds
 # the write-primitive/subprocess-shape checks above, not a content-source
 # claim -- narrowing that claim precisely enough to check accurately was
 # tried and dropped this pass, see the commit message's disclosed gaps).
-MARKER_ONLY_WRITE_HOOKS = frozenset({"heartbeat_report_alive.py", "rotation_due_watch.py"})
+MARKER_ONLY_WRITE_HOOKS = frozenset({"rotation_due_watch.py"})
 CONTENT_BEARING_WRITE_HOOKS = frozenset(
     {
         "capture.py",
@@ -181,19 +204,13 @@ CONTENT_BEARING_WRITE_HOOKS = frozenset(
         # not a bare timestamp -- same CONTENT_BEARING class as capture.py's journal
         # entry, never MARKER_ONLY's narrower bare-timestamp claim.
         "capture_session_mapping.py",
-        # L4b (2026-08-17): rewrites the self-notify marker it just surfaced,
-        # stamping `surfaced_at` INTO the existing record so the latch and the
-        # record it latches cannot disagree. That carries the marker's content
-        # back out with it, so it is CONTENT_BEARING rather than MARKER_ONLY --
-        # the bare-timestamp claim would be false of it.
-        "rotation_due_notice.py",
     },
 )
 FILE_WRITE_CAPABLE_HOOKS = MARKER_ONLY_WRITE_HOOKS | CONTENT_BEARING_WRITE_HOOKS
 
 # Source-level names that would falsify "no hook outside SUBPROCESS_CAPABLE_HOOKS
-# executes a subprocess." wake_waiter.py, heartbeat_report_alive.py, and
-# rotation_due_watch.py are the three DISCLOSED exceptions -- each is checked
+# executes a subprocess." wake_waiter.py and rotation_due_watch.py are among
+# the DISCLOSED exceptions -- each is checked
 # against its OWN fixed-shape contract below (no shell=True, subprocess.run
 # only, a fixed/bounded argv), not just membership in the set.
 # "subprocess." (WITH the trailing dot), never the bare word "subprocess" --
@@ -217,7 +234,17 @@ SUBPROCESS_PRIMITIVES = (
 )
 SUBPROCESS_OWNER = "wake_waiter.py"
 SUBPROCESS_CAPABLE_HOOKS = frozenset(
-    {"wake_waiter.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "sync.py", "session_start_context.py", "session_cron_sentinel.py"},
+    {
+        "wake_waiter.py",
+        "rotation_due_watch.py",
+        "sync.py",
+        "session_start_context.py",
+        "session_cron_sentinel.py",
+        # The seventh: its read-only git children are spawned by the engine's one spawn boundary
+        # (ENGINE_SPAWN_BOUNDARY), which it calls. The adapter file itself names no subprocess
+        # primitive, so check_subprocess_capable_hooks credits it through that boundary.
+        RECOVERY_ADAPTER,
+    },
 )
 # The fixed process_key each hook's subprocess.run call must carry verbatim --
 # same shape-fixity property as the wake waiter's argv check below, applied to
@@ -228,8 +255,7 @@ SUBPROCESS_CAPABLE_HOOKS = frozenset(
 # same bar every other solet-calling hook here is held to.
 SOLET_CALLER_PROCESS_KEYS = {
     "session_cron_sentinel.py": "plugin::fleet_maintenance_plugin::session_cron_observation",
-    "heartbeat_report_alive.py": "plugin::agent_messaging_plugin::report_alive",
-    "rotation_due_watch.py": "plugin::agent_messaging_plugin::session_status",
+    "rotation_due_watch.py": "plugin::agent_messaging_plugin::report_context_status",
     "sync.py": "service_interface::memory_service::export_memories",
 }
 
@@ -265,7 +291,7 @@ PLUGIN_ROOT_TOKEN = "${CLAUDE_PLUGIN_ROOT}/hooks/"
 
 # Cadence ruling (2026-08-11, cadence-only): step_zero_reminder.py and
 # check_messages_reminder.py moved from UserPromptSubmit to
-# SessionStart(startup|resume|clear) so they stop re-firing every prompt
+# SessionStart(startup|resume|clear|compact) so they stop re-firing every prompt
 # turn. The 2026-08-01 always-armed ruling for step_zero_reminder.py (no
 # environment gate) is untouched by this move and stays pinned by
 # reminder_hooks_smoke.py's check_step_zero_fires_everywhere.
@@ -289,9 +315,27 @@ def _read_prose(relative: str) -> str:
     return re.sub(r"\s+", " ", _read(relative))
 
 
+def _string_constants(source: str, filename: str) -> set[str]:
+    return {node.value for node in ast.walk(ast.parse(source, filename=filename)) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+
+
+def _engine_modules() -> tuple[str, ...]:
+    """The module names the shipped working_tree_recovery.py lists in its literal MODULES tuple."""
+    facade = HOOKS_DIR / ENGINE_FACADE
+    if not facade.is_file():
+        return ()
+    for node in ast.parse(facade.read_text(encoding="utf-8"), filename=ENGINE_FACADE).body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "MODULES" for target in node.targets):
+            value = ast.literal_eval(node.value)
+            if isinstance(value, tuple) and all(isinstance(name, str) for name in value):
+                return value
+    return ()
+
+
 def _entry_point_hooks() -> list[str]:
-    """Hook scripts Claude Code invokes directly (siblings start with '_')."""
-    return sorted(path.name for path in HOOKS_DIR.iterdir() if path.is_file() and path.suffix in {".js", ".py"} and not path.name.startswith("_") and path.name not in NON_HOOK_MODULES)
+    """Hook scripts Claude Code invokes directly (siblings start with '_'); engine modules are not hooks."""
+    engine = set(_engine_modules())
+    return sorted(path.name for path in HOOKS_DIR.iterdir() if path.is_file() and path.suffix in {".js", ".py"} and not path.name.startswith("_") and path.name not in NON_HOOK_MODULES and path.name not in engine)
 
 
 def _sibling_modules() -> list[str]:
@@ -428,7 +472,7 @@ def _bind_by_event_matcher(hooks: dict[str, object]) -> dict[tuple[str, str], se
     """
     bound: dict[tuple[str, str], set[str]] = {}
     for event, groups in hooks.items():
-        if not isinstance(event, str) or not isinstance(groups, list):
+        if not isinstance(groups, list):
             continue
         for group in groups:
             key = (event, _group_matcher(group))
@@ -436,7 +480,17 @@ def _bind_by_event_matcher(hooks: dict[str, object]) -> dict[tuple[str, str], se
     return bound
 
 
-def check_cron_matchers(res: Results, manifest: dict[str, object]) -> None:
+def check_session_start_sources(res: Results, manifest: dict[str, Any]) -> None:
+    """The principle-block hook is sent every source a session starts from, a compaction included."""
+    matchers = [_group_matcher(g) for g in manifest["hooks"]["SessionStart"] if "session_start_context.py" in _group_scripts(g)]
+    res.check(len(matchers) == 1, "session_start_context.py is bound once under SessionStart")
+    pattern = "|".join(matchers)
+    for source in ("startup", "resume", "clear", "compact"):
+        res.check(bool(re.fullmatch(pattern, source)), f"the session_start_context.py group matches source {source}")
+    res.check(not re.fullmatch(pattern, "unknown"), "the session_start_context.py group does not match an unnamed source")
+
+
+def check_cron_matchers(res: Results, manifest: dict[str, Any]) -> None:
     """Both tool names belong to exactly one sentinel registration per surface."""
     groups = manifest["hooks"]["PostToolUse"]
     matches = [group for group in groups if any("session_cron_sentinel.py" in str(hook) for hook in group["hooks"])]
@@ -465,10 +519,10 @@ def check_reminder_cadence(res: Results, manifest: dict[str, object]) -> None:
     assert isinstance(hooks, dict)
     bound = _bind_by_event_matcher(hooks)
 
-    session_start = bound.get(("SessionStart", "startup|resume|clear"), set())
+    session_start = bound.get(("SessionStart", "startup|resume|clear|compact"), set())
     res.check(
         REQUIRED_SESSION_START_CADENCE <= session_start,
-        "step_zero/check_messages/role_binding reminders all fire on SessionStart(startup|resume|clear)",
+        "step_zero/check_messages/role_binding reminders all fire on SessionStart(startup|resume|clear|compact)",
         f"missing {sorted(REQUIRED_SESSION_START_CADENCE - session_start)}",
     )
 
@@ -527,6 +581,13 @@ def check_tree_matches_manifest(res: Results, entries: list[dict[str, object]], 
     )
 
 
+def check_heartbeat_hook_is_deleted(res: Results, entries: list[dict[str, object]]) -> None:
+    """The heartbeat report-alive hook is deleted: no registered command names it and no file ships."""
+    named = [entry for entry in entries if RETIRED_HEARTBEAT_HOOK in json.dumps(entry)]
+    res.check(not named, f"hooks.json registers no command naming {RETIRED_HEARTBEAT_HOOK}", f"found {named}")
+    res.check(not (HOOKS_DIR / RETIRED_HEARTBEAT_HOOK).exists(), f"{RETIRED_HEARTBEAT_HOOK} is not shipped in hooks/")
+
+
 def check_siblings_are_not_orphans(res: Results, siblings: list[str], hooks: list[str]) -> None:
     """A '_'-prefixed module is exempt from the manifest only if a hook imports it."""
     imported: set[str] = set()
@@ -578,7 +639,9 @@ def check_security_md_counts(res: Results, hooks: list[str]) -> None:
         "SECURITY.md 'execute nothing' count matches the tree",
         f"expected 'other {_NUMBER_WORDS[inert]} hooks execute nothing' ({total} total minus the {len(SUBPROCESS_CAPABLE_HOOKS)} disclosed subprocess-capable hooks)",
     )
-    default_off = total - 3  # every hook except the unconditionally-armed step_zero_reminder.py
+    # Every hook except the four that are armed for every session with no environment gate: the three
+    # that were (see SECURITY.md) and recovery_claude.py, which has to fire in a user's own session.
+    default_off = total - 4
     # .lower() here (unlike the two checks above): this phrase is expected to
     # open its own sentence in prose ("Six of the seven..."), so a literal
     # lowercase match would wrongly fail on ordinary sentence-initial
@@ -608,7 +671,7 @@ def check_no_file_writes(res: Results, hooks: list[str], siblings: list[str]) ->
 
 
 def check_file_write_hooks_write_only_markers(res: Results) -> None:
-    """The MARKER_ONLY file-writers may only write a throttle/latch marker
+    """The MARKER_ONLY file-writers may only write a throttle marker
     -- a timestamp string -- never anything content-bearing. Source-level:
     proves no OTHER write target exists, e.g. no writing to a path built from
     stdin/tool-input data, which would be a materially different claim than
@@ -628,8 +691,11 @@ def check_subprocess_capable_hooks(res: Results, hooks: list[str], siblings: lis
         source = (HOOKS_DIR / name).read_text(encoding="utf-8")
         if any(token in source for token in SUBPROCESS_PRIMITIVES):
             owners.append(name)
+    boundary = HOOKS_DIR / ENGINE_SPAWN_BOUNDARY
+    if boundary.is_file() and any(token in boundary.read_text(encoding="utf-8") for token in SUBPROCESS_PRIMITIVES):
+        owners.append(RECOVERY_ADAPTER)  # its children are spawned by the engine boundary it calls
     res.check(
-        set(owners) == SUBPROCESS_CAPABLE_HOOKS,
+        frozenset(owners) == SUBPROCESS_CAPABLE_HOOKS,
         "exactly the disclosed hooks can execute a subprocess",
         f"expected {sorted(SUBPROCESS_CAPABLE_HOOKS)}, found {sorted(owners)}",
     )
@@ -760,7 +826,7 @@ def check_docs_name_the_bounded_wake_argv(res: Results) -> None:
 # dependency SAME-PLATFORM module (not a PyPI package; ships alongside this
 # plugin in every capability bundle), resolved via CLAUDE_PROJECT_DIR and
 # imported inside a try/except that degrades gracefully (warns + skips the
-# notify-threshold computation) if it is ever absent. Never silently widen
+# gauge computation) if it is ever absent. Never silently widen
 # this set -- a real third-party or unbounded dependency belongs in
 # SECURITY.md's Supply chain section, not just here.
 ALLOWED_CROSS_PLATFORM_IMPORTS: dict[str, frozenset[str]] = {
@@ -904,10 +970,207 @@ def check_plugin_manifest_loads(res: Results) -> None:
             )
 
 
+# The hooks.json groups that existed before recovery_claude.py was registered (0.9.3, base commit
+# 2093d1ac9), pinned by digest so "no existing entry changed" is a measurement rather than a
+# reading. Each digest is the SHA-256 of the group's canonical JSON (sorted keys, no spaces); the
+# comment names the group. An existing entry may change only together with SECURITY.md, and then
+# the new digest goes here in the same patch.
+PINNED_EXISTING: dict[str, tuple[str, ...]] = {
+    "UserPromptSubmit": ("2764eeb103877a0d112893b2ee4653451cfaaa0f373f3a223c5d9237f788601f",),  # session_context.py
+    "SessionStart": (
+        "1820ff5358bfbbcb458d7319573d297ee7180026efe1abc72999f434e2094e01",  # startup|resume|clear|compact: step_zero_reminder.py, session_start_context.py (timeout 8 to 30, was 280dbb2fb996ffb90be783b3c0f085529c5e2c01c0685228f4dafa202be9a27d)
+        "0890d327eec45297b428eb4b4092e325f80ac859c89004a2015bfba43f194684",  # session_context.py
+        "4506c07f1f8b4bb9651e759fec6368423f2b1544a5511eeb9519674d5fac5a7f",  # capture_session_mapping.py
+    ),
+    "Stop": ("8b5d3b9a1d91e60d4f4f8c7f5d04d71b68ff0e63d75145aa28d35083dbb4db50",),  # wake_waiter.py (asyncRewake)
+    "PreToolUse": ("79f3f9dccf381478b4c314c365077a67a5c29a036bd1c0b4263bacecbc2ca7dc",),  # headless_tool_allowlist_gate.py (direct route)
+    "PostToolUse": (
+        "e64760fb7ab72ff02e0b09d67e400382e77168ef145c53c726d75ab2b949ea39",  # rotation_due_watch.py
+        "c133c772ff2fc9689cbba2ff44977ee7625084707bb52834cc2de7c1afdb79e8",  # Write|Edit|MultiEdit: capture.py
+        "6f23b0ca5883bcdd9cf0a1cecc35d3eb65e63754a250c3298636f4e6e8abc46f",  # CronCreate|ScheduleWakeup: session_cron_sentinel.py
+    ),
+}
+
+# What the recovery registration must be, per event: (matcher, timeout seconds, async). Every entry is
+# exec form through the optional runner, so a script missing from a stale or partial plugin cache is
+# skipped with exit 0; a bare interpreter call on a missing file exits 2, which blocks a PreToolUse.
+RECOVERY_REGISTRATION: dict[str, tuple[str, int, bool]] = {
+    "PreToolUse": ("Bash", 15, False),
+    "PostToolUse": ("Write|Edit|MultiEdit|NotebookEdit|Bash", 10, False),
+    "Stop": ("", 120, True),
+    "SessionEnd": ("", 10, False),
+    "SessionStart": ("startup|resume|clear", 10, False),
+}
+_RUNNER_TOKEN = PLUGIN_ROOT_TOKEN + OPTIONAL_RUNNER
+_ADAPTER_TOKEN = PLUGIN_ROOT_TOKEN + RECOVERY_ADAPTER
+
+
+def _group_digest(group: object) -> str:
+    return hashlib.sha256(json.dumps(group, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _recovery_group_problems(event: str, group: object, matcher: str, timeout: int, is_async: bool) -> list[str]:
+    if not isinstance(group, dict) or not set(group) <= {"matcher", "hooks"}:
+        return [f"{event}: the recovery group is not a plain matcher group"]
+    problems: list[str] = []
+    if group.get("matcher", "") != matcher:
+        problems.append(f"{event}: matcher is {group.get('matcher', '')!r}, expected {matcher!r}")
+    inner = group.get("hooks")
+    if not isinstance(inner, list) or len(inner) != 1 or not isinstance(inner[0], dict):
+        return [*problems, f"{event}: the recovery group must hold exactly one hook"]
+    return [*problems, *_recovery_hook_problems(event, inner[0], timeout, is_async)]
+
+
+def _recovery_hook_problems(event: str, hook: dict[str, Any], timeout: int, is_async: bool) -> list[str]:
+    expected_keys = {"type", "command", "args", "timeout"} | ({"async"} if is_async else set())
+    checks = (
+        (set(hook) == expected_keys, f"hook keys are {sorted(hook)}, expected {sorted(expected_keys)}"),
+        (hook.get("type") == "command" and hook.get("command") == "python3", "not exec form with the bare python3 interpreter"),
+        (hook.get("args") == [_RUNNER_TOKEN, _ADAPTER_TOKEN, event], f"args are {hook.get('args')!r}, expected the optional runner, the adapter and {event!r}"),
+        (hook.get("timeout") == timeout, f"timeout is {hook.get('timeout')!r}, expected {timeout}"),
+        (not is_async or hook.get("async") is True, "async must be true"),
+    )
+    return [f"{event}: {message}" for sound, message in checks if not sound]
+
+
+def _pinned_problems(hooks: dict[str, Any]) -> list[str]:
+    problems: list[str] = []
+    for event, pinned in PINNED_EXISTING.items():
+        groups = hooks.get(event)
+        if not isinstance(groups, list) or len(groups) < len(pinned):
+            problems.append(f"{event}: fewer groups than the {len(pinned)} existing ones")
+            continue
+        problems.extend(f"{event}[{index}]: an existing entry changed" for index, expected in enumerate(pinned) if _group_digest(groups[index]) != expected)
+    return problems
+
+
+def _added_problems(event: str, groups: object) -> list[str]:
+    extra = groups[len(PINNED_EXISTING.get(event, ())) :] if isinstance(groups, list) else []
+    wanted = RECOVERY_REGISTRATION.get(event)
+    if wanted is None:
+        return [f"{event}: unexpected new group"] * len(extra)
+    if len(extra) != 1:
+        return [f"{event}: expected exactly one recovery group, found {len(extra)}"]
+    return _recovery_group_problems(event, extra[0], *wanted)
+
+
+def _registration_problems(manifest: dict[str, Any]) -> list[str]:
+    """Every way a hooks.json departs from 'the pinned existing groups, then exactly the five recovery groups'."""
+    hooks = manifest.get("hooks")
+    if not isinstance(hooks, dict):
+        return ["hooks.json has no hooks object"]
+    problems = _pinned_problems(hooks)
+    for event, groups in hooks.items():
+        problems.extend(_added_problems(event, groups))
+    problems.extend(f"{event}: no recovery registration" for event in RECOVERY_REGISTRATION if event not in hooks)
+    return problems
+
+
+def _recovery_hook(manifest: dict[str, Any], event: str) -> dict[str, Any]:
+    hook = manifest["hooks"][event][-1]["hooks"][0]
+    assert isinstance(hook, dict)
+    return hook
+
+
+# Named defects. Each is applied to a copy of the real hooks.json and the registration check must
+# turn red for it, so the check is proven able to fail on the very properties SECURITY.md claims.
+REGISTRATION_MUTATIONS: dict[str, Callable[[dict[str, Any]], object]] = {
+    "Stop recovery entry loses async": lambda m: _recovery_hook(m, "Stop").pop("async"),
+    "Stop recovery entry becomes asyncRewake": lambda m: (_recovery_hook(m, "Stop").pop("async"), _recovery_hook(m, "Stop").update({"asyncRewake": True})),
+    "PreToolUse recovery entry loses its timeout": lambda m: _recovery_hook(m, "PreToolUse").pop("timeout"),
+    "Stop timeout raised to a day": lambda m: _recovery_hook(m, "Stop").update({"timeout": 86400}),
+    "PreToolUse recovery entry bypasses the optional runner": lambda m: _recovery_hook(m, "PreToolUse").update({"args": [_ADAPTER_TOKEN, "PreToolUse"]}),
+    "PreToolUse recovery entry becomes a shell string": lambda m: _recovery_hook(m, "PreToolUse").update({"command": "sh", "args": ["-c", "python3 recovery_claude.py"]}),
+    "PreToolUse matcher widened to every tool": lambda m: m["hooks"]["PreToolUse"][-1].pop("matcher"),
+    "SessionEnd recovery entry removed": lambda m: m["hooks"].pop("SessionEnd"),
+    "a second recovery entry added to Stop": lambda m: m["hooks"]["Stop"].append(copy.deepcopy(m["hooks"]["Stop"][-1])),
+    "an output-steering key added to a recovery entry": lambda m: _recovery_hook(m, "PostToolUse").update({"decision": "block"}),
+    "an existing entry's timeout changed": lambda m: m["hooks"]["SessionStart"][0]["hooks"][1].update({"timeout": 31}),
+    "an existing entry removed": lambda m: m["hooks"]["UserPromptSubmit"].pop(0),
+}
+
+
+def check_recovery_registration(res: Results, manifest: dict[str, Any]) -> None:
+    """hooks.json = the pinned existing entries unchanged, plus exactly the five recovery entries."""
+    problems = _registration_problems(manifest)
+    res.check(not problems, "hooks.json keeps every existing entry unchanged and adds exactly the five recovery entries", "; ".join(problems))
+    for name, mutate in REGISTRATION_MUTATIONS.items():
+        mutated = copy.deepcopy(manifest)
+        try:
+            mutate(mutated)
+        except (KeyError, IndexError, AttributeError) as exc:
+            res.fail(f"mutation could not be applied: {name}", repr(exc))
+            continue
+        res.check(bool(_registration_problems(mutated)), f"mutation is caught: {name}", "the registration check still passes with this defect")
+
+
+def _inventory_is_sound(engine: list[str]) -> bool:
+    return bool(engine) and len(engine) == len(set(engine)) and all(name.endswith(".py") and Path(name).name == name for name in engine)
+
+
+def _engine_sources(res: Results, engine: list[str]) -> dict[str, str]:
+    """Check the shipped MODULES inventory against the directory and return the source of each present module."""
+    res.check(_inventory_is_sound(engine), "the shipped MODULES inventory is a non-empty list of unique module files", f"got {engine}")
+    res.check(ENGINE_FACADE in engine and ENGINE_SPAWN_BOUNDARY in engine, "the inventory names the facade and the spawn boundary")
+    present = [name for name in engine if (HOOKS_DIR / name).is_file()]
+    res.check(present == engine, "every module the inventory names is shipped beside the hooks", f"missing {sorted(set(engine) - set(present))}")
+    return {name: (HOOKS_DIR / name).read_text(encoding="utf-8") for name in present}
+
+
+def _check_engine_spawning(res: Results, sources: dict[str, str]) -> None:
+    spawners = sorted(name for name, source in sources.items() if any(token in source for token in SUBPROCESS_PRIMITIVES))
+    res.check(spawners == [ENGINE_SPAWN_BOUNDARY], "exactly one engine module can spawn a child", f"found {spawners}")
+    shells = sorted(name for name, source in sources.items() if re.search(r"\bshell\s*=\s*True", source) or "os.system" in source or "os.popen" in source)
+    res.check(not shells, "no engine module hands a command to a shell", f"found {shells}")
+
+
+def _check_engine_git_subcommands(res: Results, sources: dict[str, str]) -> None:
+    """SECURITY.md: a save writes nothing to the user's repository.
+
+    The git subcommands that could (history, refs, packs, the network) are named nowhere in the save
+    path, and the ones that write objects or the index appear only in the restore modules, which run
+    on an explicit `restore`.
+    """
+    scanned = {name: _string_constants(source, name) for name, source in sources.items() if name.startswith("recovery_") or name in {"custody_store.py", ENGINE_FACADE}}
+    named = sorted((name, word) for name, words in scanned.items() for word in words & ENGINE_ABSENT_SUBCOMMANDS)
+    res.check(not named, "no recovery module names a git subcommand that writes history, refs or packs, or reaches a remote", f"found {named}")
+    writers = sorted(name for name, words in scanned.items() if words & ENGINE_RESTORE_ONLY_SUBCOMMANDS and name not in ENGINE_RESTORE_MODULES)
+    res.check(not writers, "git subcommands that write objects or the index appear only in the restore modules", f"found {writers}")
+
+
+def _check_adapter_imports(res: Results) -> None:
+    adapter = HOOKS_DIR / RECOVERY_ADAPTER
+    if res.check(adapter.is_file(), f"{RECOVERY_ADAPTER} exists"):
+        extra = sorted(_py_imports(adapter.read_text(encoding="utf-8"), RECOVERY_ADAPTER) - ADAPTER_IMPORTS)
+        res.check(not extra, f"{RECOVERY_ADAPTER} imports only the stdlib it needs and the engine facade", f"also imports {extra}")
+
+
+def check_engine_contract(res: Results, engine: list[str]) -> None:
+    """The shipped engine is the listed set, one spawn boundary, no shell, no network; the adapter stays thin."""
+    sources = _engine_sources(res, engine)
+    _check_engine_spawning(res, sources)
+    _check_engine_git_subcommands(res, sources)
+    _check_adapter_imports(res)
+
+
+def check_engine_documented(res: Results, engine: list[str]) -> None:
+    """README.md and SECURITY.md name the adapter, every engine module and each registration bound."""
+    for surface in ("README.md", "SECURITY.md"):
+        text = _read_prose(surface)
+        missing = [name for name in (RECOVERY_ADAPTER, *engine) if name not in text]
+        res.check(not missing, f"{surface} names the recovery adapter and every engine module", f"missing {missing}")
+    security = _read_prose("SECURITY.md")
+    for event, (matcher, timeout, is_async) in RECOVERY_REGISTRATION.items():
+        res.check(event in security and (not matcher or matcher in security) and f"timeout {timeout}" in security, f"SECURITY.md states the {event} recovery registration", f"needs {event}, {matcher!r} and 'timeout {timeout}'")
+        if is_async:
+            res.check("async" in security, f"SECURITY.md states that the {event} recovery entry is async")
+
+
 def main() -> int:
     preflight()
     res = Results("coordination-hooks — manifest and security-claim consistency")
 
+    engine = list(_engine_modules())
     hooks = _entry_point_hooks()
     siblings = _sibling_modules()
     manifest = json.loads(_read("hooks/hooks.json"))
@@ -915,6 +1178,7 @@ def main() -> int:
 
     print(f"Entry-point hooks: {len(hooks)} — {', '.join(hooks)}")
     print(f"Sibling modules:   {len(siblings)} — {', '.join(siblings) or 'none'}")
+    print(f"Engine modules:    {len(engine)} (the shipped MODULES inventory; not hooks)")
     print(f"Manifest entries:  {len(entries)}")
     print("-" * 68)
 
@@ -925,17 +1189,24 @@ def main() -> int:
     check_manifest_is_exec_form(res, entries)
     check_optional_runner_contract(res, entries)
     check_reminder_cadence(res, manifest)
+    check_session_start_sources(res, manifest)
+    check_heartbeat_hook_is_deleted(res, entries)
     check_tree_matches_manifest(res, entries, hooks)
+    check_recovery_registration(res, manifest)
+    check_engine_contract(res, engine)
     check_siblings_are_not_orphans(res, siblings, hooks)
     check_every_hook_is_documented(res, hooks)
+    check_engine_documented(res, engine)
     check_security_md_counts(res, hooks)
-    check_no_network(res, hooks, [*siblings, OPTIONAL_RUNNER])
+    check_no_network(res, hooks, [*siblings, OPTIONAL_RUNNER, *engine])
+    # Engine modules are deliberately not scanned here: writing the local recovery store is their
+    # disclosed purpose (SECURITY.md, "Working-tree recovery"), and recovery_claude.py itself writes no file.
     check_no_file_writes(res, hooks, [*siblings, OPTIONAL_RUNNER])
     check_file_write_hooks_write_only_markers(res)
     check_subprocess_capable_hooks(res, hooks, [*siblings, OPTIONAL_RUNNER])
     check_child_output_is_unread(res)
     check_docs_name_the_bounded_wake_argv(res)
-    check_stdlib_only(res, hooks, [*siblings, OPTIONAL_RUNNER])
+    check_stdlib_only(res, hooks, [*siblings, OPTIONAL_RUNNER, *engine])
     check_verification_section(res)
     check_artifact_is_self_contained(res)
     check_plugin_manifest_loads(res)

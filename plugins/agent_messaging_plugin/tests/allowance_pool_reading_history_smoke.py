@@ -33,9 +33,9 @@ def submit(method: Any, key: str, arguments: dict[str, Any]) -> None:
     metadata = getattr(method, "_platform_process_metadata", None) or method._service_interface_metadata
     factory = ActionFactory(
         process_registry={"processes": {key: {"parameters": {name: parameter.to_dict() for name, parameter in metadata.parameters.items()}}}},
-        template_engine=SimpleNamespace(resolve_templates=lambda action_def, context: action_def),
-        state_service=SimpleNamespace(generate_unique_string=lambda **kw: {"action_status": "completed", "data": {"random_string": "fixture"}}),
-        action_event_recorder=SimpleNamespace(store_action_event=lambda action: "ae-fixture"),
+        template_engine=SimpleNamespace(resolve_templates=lambda action_def, context: action_def),  # pyright: ignore[reportArgumentType]
+        state_service=SimpleNamespace(generate_unique_string=lambda **kw: {"action_status": "completed", "data": {"random_string": "fixture"}}),  # pyright: ignore[reportArgumentType]
+        action_event_recorder=SimpleNamespace(store_action_event=lambda action: "ae-fixture"),  # pyright: ignore[reportArgumentType]
     )
     factory.submit_action_definition({"process_key": key, "arguments": arguments, "flow_id": "flow-history", "result_processor_kind": None, "error_processor_kind": None})
 
@@ -58,7 +58,7 @@ _FIXTURES: list[Any] = []
 def new_state() -> Any:
     sys.path.insert(0, str(ROOT / "ananta/tests/llm/session_ledger"))
     from ananta.services.plugin_schema_service.serialization import to_json
-    from session_usage_totals_smoke import Fixture
+    from session_usage_totals_smoke import Fixture  # pyright: ignore[reportMissingImports]
 
     fixture = Fixture()
     _FIXTURES.append(fixture)
@@ -186,7 +186,7 @@ def main() -> None:
     except ModuleNotFoundError as exc:
         print(f"SKIP optional plugin unavailable: {exc.name}")
         raise SystemExit(77) from exc
-    check(schema.get_session_lifecycle_schema_definition().version == "1.16.0", "SCHEMA_VERSION_BUMPED")
+    check(schema.get_session_lifecycle_schema_definition().version == "1.20.0", "SCHEMA_VERSION_BUMPED")
     state = new_state()
     lifecycle(state)
     cursor(state)

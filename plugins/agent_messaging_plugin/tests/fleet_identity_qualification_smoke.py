@@ -10,17 +10,15 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
-from _register_unit_double import FIXTURE_UNIT_ID, RegisterUnitDouble  # noqa: E402
-from managed_dispatch_smoke import _coordinator_actor, _state  # noqa: E402
+from _register_unit_double import coordinator_state  # noqa: E402
 
 import agent_messaging_plugin.plugin as plugin_module  # noqa: E402
-from agent_messaging_plugin.managed_dispatch import DispatchActor  # noqa: E402
 from agent_messaging_plugin.models import BridgeBinding  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.role_claim import RoleClaimSuccess  # noqa: E402
@@ -46,14 +44,16 @@ class _Registry:
         if session_id != _SESSION_ID:
             return None
         return BridgeBinding(
-            bridge_id="agc-qualify-smoke", agent_id="qualification",
-            agent_instance_id=_INSTANCE_ID, session_label="qualify-fleet-worker",
-            parent_pid=None, agent_session_id=_SESSION_ID,
+            bridge_id="agc-qualify-smoke",
+            agent_id="qualification",
+            agent_instance_id=_INSTANCE_ID,
+            session_label="qualify-fleet-worker",
+            parent_pid=None,
+            agent_session_id=_SESSION_ID,
         )
 
 
 class _FakePlugin:
-    _native_spawn_actor = AgentMessagingPlugin._native_spawn_actor
     _qualify_fleet_worker = AgentMessagingPlugin._qualify_fleet_worker
     _wait_for_qualification_binding = AgentMessagingPlugin._wait_for_qualification_binding
     _qualification_action_error = staticmethod(AgentMessagingPlugin._qualification_action_error)
@@ -64,24 +64,18 @@ class _FakePlugin:
         self._bridge_manager = object()
         self.delivery = delivery
         self.releases = 0
-        self.state_service = _state()
-        self.register = RegisterUnitDouble()
-        self.register.add_unit()
+        self.state_service = coordinator_state()
 
     def _get_state_service(self) -> Any:
         return self.state_service
-
-    def _dispatch_actor_from_state(self, _state: dict[str, Any]) -> DispatchActor:
-        return _coordinator_actor()
-
-    def _register_unit_client(self) -> RegisterUnitDouble:
-        return self.register
 
     def _handover_service(self) -> None:
         return None
 
     def peer_send_by_name(
-        self, params: dict[str, object], state: dict[str, object],
+        self,
+        params: dict[str, object],
+        state: dict[str, object],
     ) -> dict[str, object]:
         del params, state
         return {
@@ -90,7 +84,9 @@ class _FakePlugin:
         }
 
     def peer_release_role(
-        self, params: dict[str, object], state: dict[str, object],
+        self,
+        params: dict[str, object],
+        state: dict[str, object],
     ) -> dict[str, object]:
         del params, state
         self.releases += 1
@@ -104,10 +100,12 @@ def _run(delivery: str) -> tuple[dict[str, Any], _FakePlugin, list[str]]:
     original_claim = plugin_module.claim_role_for_session
     original_retire = plugin_module.lifecycle_retire_session
     plugin_module.lifecycle_spawn_session = (  # type: ignore[assignment]
-        lambda state, request, *, register, actor: {"agent_instance_id": _INSTANCE_ID}
+        lambda state, request: {"agent_instance_id": _INSTANCE_ID}
     )
     plugin_module.claim_role_for_session = lambda **kwargs: RoleClaimSuccess(  # type: ignore[assignment]
-        action="claimed", name="qualify-fleet-worker", agent_instance_id=_INSTANCE_ID,
+        action="claimed",
+        name="qualify-fleet-worker",
+        agent_instance_id=_INSTANCE_ID,
         agent_session_id=_SESSION_ID,
     )
     plugin_module.lifecycle_retire_session = lambda state, *, agent_instance_id, directed_by: (  # type: ignore[assignment]
@@ -115,8 +113,9 @@ def _run(delivery: str) -> tuple[dict[str, Any], _FakePlugin, list[str]]:
     )
     try:
         result = AgentMessagingPlugin.qualify_fleet(
-            fake, {"unit_id": FIXTURE_UNIT_ID, "spawned_by_role": "Coordinator-Main",
-                   "repository_root": str(REPO_ROOT)}, {},
+            cast(Any, fake),
+            {},
+            {},
         )
     finally:
         plugin_module.lifecycle_spawn_session = original_spawn
@@ -129,11 +128,7 @@ def main() -> int:
     green, fake, retired = _run("queued_watcher")
     data = green.get("data", {})
     _check(
-        green.get("action_status") == "completed"
-        and data.get("spawned") is True
-        and data.get("role_claimed") is True
-        and data.get("addressed_delivery_confirmed") is True
-        and data.get("retired") is True,
+        green.get("action_status") == "completed" and data.get("spawned") is True and data.get("role_claimed") is True and data.get("addressed_delivery_confirmed") is True and data.get("retired") is True,
         "success requires spawn, role claim, watcher-addressed delivery, and retirement",
     )
     _check(
@@ -144,9 +139,7 @@ def main() -> int:
     red, failed_fake, failed_retired = _run("queued_notification")
     error = red.get("error")
     _check(
-        red.get("action_status") == "failed"
-        and isinstance(error, dict)
-        and error.get("code") == "qualification_delivery_unobserved",
+        red.get("action_status") == "failed" and isinstance(error, dict) and error.get("code") == "qualification_delivery_unobserved",
         "a non-watcher queued result is not over-credited as delivery observation",
     )
     _check(

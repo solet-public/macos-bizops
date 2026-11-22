@@ -9,6 +9,7 @@ import importlib
 import os
 import stat
 import threading
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,29 @@ class RecoveryTests(RecoveryBase):
         with patch.object(recovery, "prepare_root", side_effect=OSError(errno_value("EACCES"), "store root")):
             result = f.handle(f.event("SessionStart"))
         self.assertIn("Recovery is inactive", result.context)
+
+    def test_empty_recovery_root_is_unset(self) -> None:
+        """An empty or blank SOLET_RECOVERY_ROOT means unset: the default root is used and the current folder is left alone."""
+        metadata = importlib.import_module("recovery_metadata")
+        base = Path(self.temporary.name).resolve()
+        home = base / "home"
+        home.mkdir()
+        for index, value in enumerate(("", "   ")):
+            plain = base / f"plain{index}"
+            plain.mkdir()
+            plain.chmod(0o750)
+            mode = stat.S_IMODE(plain.stat().st_mode)
+            previous = Path.cwd()
+            os.chdir(plain)
+            try:
+                with patch.dict(os.environ, {"SOLET_RECOVERY_ROOT": value, "HOME": str(home)}):
+                    expected = metadata._default_root().resolve()
+                    chosen, _ = recovery.prepare_root(None, plain, time.monotonic() + 5)
+            finally:
+                os.chdir(previous)
+            self.assertEqual(list(plain.iterdir()), [], f"value {value!r} wrote into the current folder")
+            self.assertEqual(stat.S_IMODE(plain.stat().st_mode), mode, f"value {value!r} changed the current folder's mode")
+            self.assertEqual(chosen, expected)
 
     def test_capture_layers_custody_git_unchanged_and_safe_output(self) -> None:
         f = self.fixture

@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::logout",
+  "display_name": "Salesforce: Log Out Of An Org",
+  "description": "Log the sf CLI out of one bound org (org is required) with sf org logout --target-org <its username> --no-prompt; flags takes the CLI's client-app to log out of one connected app only. The binding stays: the org is dormant, and every verb against it reports sf.auth_failed until it is logged in to again with login. The CLI's --all (every org the CLI knows) is refused because the plugin acts only on bound orgs. Runs without checking the org's session first, so an expired session can still be logged out. Returns job_id/status queued.",
+  "embedding_description": "Log this solet's Salesforce CLI session out of one connected org while keeping the org on the solet's list, so it can be logged in to again later. Use to pause access to an org, rotate its login, or end a session; requests to the org fail until the next login.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce logout queued",
+    "result_type": "salesforce_logout_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: logged_out_usernames (what the CLI reports it logged out), binding_kept true, org (the alias) and org_id.",
+    "presentation_guidance": "Say which org was logged out and that it stays bound; it needs login before it can be used again."
+  },
+  "error_processor_customizations": {
+    "action_context": "Log the sf CLI out of one bound org.",
+    "error_interpretation": "sf.invalid_params: org is missing, or flags holds anything but client-app. sf.unknown_org: org matches no bound org (the message lists them). sf.api_error: the CLI reported a logout failure.",
+    "recovery_guidance": "Pick an org from list_orgs. To remove the org from the solet entirely, use disconnect_org."
+  }
+}

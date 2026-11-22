@@ -1,0 +1,4 @@
+# A generic claude_code tmux spawn carries its first turn as the CLI launch prompt:
+# launch argv shape and a slow-composer spawn that still delivers. Registered in its
+# own fragment per quality_gates/gate_smokes.txt's header.
+plugins/agent_messaging_plugin/tests/spawn_first_turn_launch_smoke.py

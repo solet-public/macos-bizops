@@ -1,44 +1,49 @@
 name: salesforce_plugin
 description: >
-  Salesforce org connector — SOQL reads (including queryAll), typed record CRUD
-  (including delete), metadata describe, Bulk API 2.0 ingest and query jobs,
-  REST composite resources, the Tooling API with anonymous Apex, Reports and
+  Salesforce org connector — many orgs bound at once (production orgs,
+  sandboxes, scratch orgs and Dev Hubs: list_orgs, bind_org, login by
+  browser, JWT, SFDX auth URL or access token, logout, set_default_org,
+  disconnect_org, and an optional org on every verb whose result names the
+  org), the org lifecycle (scratch orgs from a Dev Hub and sandboxes from a
+  production org: create, clone, refresh, resume, status, display, open and
+  delete), SOQL reads (including queryAll), typed record CRUD (including
+  delete), metadata describe, Bulk API 2.0 ingest and query jobs, REST
+  composite resources, the Tooling API with anonymous Apex, Reports and
   Dashboards, REST resources (limits, external-id upsert and delete, paged
   query and queryAll, explain, search, relationship writes), invocable
   actions, Metadata API deployments over the REST deployRequest resource,
   Salesforce Files (ContentVersion upload, verified download and
   ContentDocument delete), and a generic authenticated request for every
-  other REST endpoint. Executor: full CLI
-  delegation — every verb shells out to the operator's `sf` CLI (operator-ratified 2026-07-14, replacing the
+  other REST endpoint. Executor: full CLI delegation — every verb shells out
+  to the operator's `sf` CLI (operator-ratified 2026-07-14, replacing the
   sf-CLI session-borrow client factory, dead on current CLI releases because
   `sf org display --json` now redacts `accessToken` unconditionally). The
-  CLI's own keychain-backed refresh token (established once via
-  `sf org login web`) is the durable credential; the platform stores NO
-  Salesforce secret, and no access token of any kind ever enters this
-  process. There is no session-expiry retry mechanism — the CLI refreshes
-  its own credential transparently inside every invocation.
+  CLI keeps every bound org's session; the plugin never holds one. Its vault
+  holds the index of bound orgs and, for orgs that log in unattended, the
+  login secrets the operator stored, read only inside the call that hands
+  them to the CLI. There is no session-expiry retry mechanism — the CLI
+  refreshes its own credential transparently inside every invocation.
 
   Foreign-target invariant (SQL-lockdown honesty condition, umbrella design §3):
-  this plugin reaches ONLY the org whose instance_host is pinned in the
-  operator-registered "salesforce_org" address-book entry — the CLI alias's
-  resolved host is verified against the pin exactly once per process
-  lifetime, and no verb takes an org/domain parameter. It never imports or
-  touches the platform state DB.
+  this plugin reaches only bound orgs. Each binding pins its org's instance
+  host; the CLI target of each binding is verified against that pin once per
+  process lifetime, and an org argument that names no binding is refused with
+  the list of bound orgs. It never imports or touches the platform state DB.
 
   FULL R/W INCLUDING DELETE (operator-ratified RATIFY-2; USER ruling
-  rul_4c99a30d): Salesforce's permissions on the registered user are the only
+  rul_4c99a30d): Salesforce's permissions on each bound user are the only
   boundary. Bulk API v2 ingest (insert/update/upsert/delete/hardDelete,
   submitted --async and polled), composite and sObject Collections deletes,
   Tooling record deletes, anonymous Apex, report and dashboard deletes,
   external-id deletes and invocable-action invocation, relationship deletes,
-  report instance deletes, metadata deployments with destructive changes and
-  ContentDocument deletes are all first-class. Org-defined Apex REST
-  resources use authenticated_request by design. SOAP-only calls (Partner
-  merge, convertLead, undelete, emptyRecycleBin; Metadata retrieve,
-  describeMetadata, listMetadata, readMetadata) take the access token in the
-  SOAP SessionHeader, which this CLI-delegated plugin never holds, and
-  Platform Event subscription needs a streaming transport; both are a later
-  build.
+  report instance deletes, metadata deployments with destructive changes,
+  ContentDocument deletes, and scratch org and sandbox deletes are all
+  first-class. Org-defined Apex REST resources use authenticated_request by
+  design. SOAP-only calls (Partner merge, convertLead, undelete,
+  emptyRecycleBin; Metadata retrieve, describeMetadata, listMetadata,
+  readMetadata) take the access token in the SOAP SessionHeader, which this
+  CLI-delegated plugin never holds; Platform Event subscription needs a
+  streaming transport; source and packaging commands are a later build.
 optional: true
 
 implements:
@@ -60,9 +65,9 @@ config:
       Path to the sf CLI binary. The default resolves via PATH; deployments
       where the platform process's PATH does not carry the CLI (LaunchAgent)
       pin an absolute path — e.g. the standalone bundle's bin/sf.
-# Org binding lives in the address book entry "salesforce_org": two literal
-# fields, target_org (the sf CLI alias or username every verb is invoked
-# against) and instance_host (the pinned my-domain host that alias must
-# resolve to). No vault key exists for this plugin — the durable credential
-# is the sf CLI's own keychain-backed refresh token, and no access token of
-# any kind ever enters this process, so both VaultKeysProvider hooks return [].
+# Bound orgs live in this plugin's vault index (<solet>.salesforce_plugin.orgs_index):
+# one binding per org keyed by org id, with an alias, the CLI target, the pinned
+# instance host and the default. Login secrets for unattended orgs are vault
+# keys <solet>.salesforce_plugin.org_secret__<name>, stored by the operator with
+# vault_service store_from_file. The pre-build-6 address-book entry
+# "salesforce_org" (target_org + instance_host) is migrated on first use.

@@ -12,10 +12,10 @@ description: >
     - repo_service (Half-1): read-only repo primitives (search / read_file /
       list_files / git_status / git_diff / propose_patch). Repo-root-confined,
       secret-scrubbed, bounded output. propose_patch stores an artifact only —
-      apply stays behind Git-Controller/operator and is NEVER a verb.
+      apply stays behind the operator (in the platform's own development checkout, Git-Controller) and is NEVER a verb.
 
   Nothing here mutates the repo or .git/. git_status/git_diff use only the
-  read-only git surface the GIT-CONTROLLER policy permits. Every verb logs its
+  read-only git surface and have no mutating path. Every verb logs its
   server-built CallContext principal (requires_call_context).
 
   LOCAL-PROFILE ONLY: this plugin anchors on the git worktree (it locates the

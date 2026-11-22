@@ -12,7 +12,11 @@ from ananta.types.sql_function_detector import SqlFunctionDetector
 # child rows; the SET DEFAULT path is omitted intentionally — no current
 # schema uses it).
 ReferentialAction = Literal[
-    "NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT",
+    "NO ACTION",
+    "RESTRICT",
+    "CASCADE",
+    "SET NULL",
+    "SET DEFAULT",
 ]
 
 
@@ -25,9 +29,7 @@ class ColumnDefinition:
     unique: bool = False
     check: str | None = None
     description: str | None = None  # Human-readable column description for schema introspection
-    type_params: dict[str, object] | None = (
-        None  # Type-specific parameters (e.g., {"dimension": 384} for VECTOR)
-    )
+    type_params: dict[str, object] | None = None  # Type-specific parameters (e.g., {"dimension": 384} for VECTOR)
     # Data sensitivity annotation (0.0 = public, 1.0 = restricted). SCHEMA
     # metadata — persisted by the schema registry and round-tripped through
     # plugin schema serialization; NOT part of the removed exposure filter.
@@ -53,9 +55,7 @@ class ColumnDefinition:
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.data_sensitivity <= 1.0:
-            raise ValueError(
-                f"data_sensitivity must be in [0, 1], got {self.data_sensitivity}"
-            )
+            raise ValueError(f"data_sensitivity must be in [0, 1], got {self.data_sensitivity}")
 
     def to_sql(self, column_name: str) -> str:
         """
@@ -122,9 +122,7 @@ class TableSchema:
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.data_sensitivity <= 1.0:
-            raise ValueError(
-                f"data_sensitivity must be in [0, 1], got {self.data_sensitivity}"
-            )
+            raise ValueError(f"data_sensitivity must be in [0, 1], got {self.data_sensitivity}")
 
 
 @dataclass
@@ -133,6 +131,10 @@ class SchemaDefinition:
     tables: dict[str, TableSchema]
     version: str = "1.0.0"
     description: str | None = None
+    # Tables this plugin no longer uses. Installing or updating the schema drops
+    # each one that ownership records as active; a table that is merely omitted
+    # from ``tables`` is left alone (a namespace is declared piecewise).
+    retired_tables: tuple[str, ...] = ()
 
     # Class-level service instance for validation
     _validator = SchemaValidator()
@@ -152,11 +154,13 @@ class SchemaDefinition:
 
         REFACTORED: Delegated to SchemaValidator service - reduced from B(8) to A(1) complexity
         """
-        return self._validator.validate_schema(
+        errors = self._validator.validate_schema(
             namespace=self.namespace,
             tables=self.tables,
             require_primary_keys=False,  # Allow plugin schemas without primary keys
         )
+        errors.extend(f"table '{name}' is both declared and listed in retired_tables" for name in self.retired_tables if name in self.tables)
+        return errors
 
 
 @dataclass

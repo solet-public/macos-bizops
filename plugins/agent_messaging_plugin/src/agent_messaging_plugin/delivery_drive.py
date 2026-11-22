@@ -59,6 +59,7 @@ from .composer_preservation import COMPOSER_RECOVERY_NEEDED
 from .role_binding_store import resolve_role_binding
 from .session_lifecycle_verbs import (
     DRIVE_DRIVER_ERROR,
+    DRIVE_DRIVER_NOT_NEEDED,
     DRIVE_DRIVER_QUEUE_FULL,
     DRIVE_DRIVER_SCHEDULED,
     DRIVE_DRIVER_UNAVAILABLE,
@@ -682,12 +683,19 @@ def schedule_drive_on_delivery(
     recipient_agent_session_id: str,
     sender_label: str,
     message_id: str,
+    channel_delivered: bool,
     recipient_agent_id: str = "",
     recipient_role_name: str = "",
 ) -> DriveOnDeliveryOutcome:
     """Resolve the drive now; run its host half on the delivery-drive executor.
 
-    Returns the lookup's own outcome when no drive is due,
+    ``channel_delivered`` is the send seam's own fact (see
+    :func:`channel_support.channel_carries_message`): the message was just queued
+    on a live channel the recipient surfaces. Then the notice would repeat it,
+    so nothing is looked up, written or scheduled and ``driver_not_needed`` is
+    returned. Required, so a caller cannot forget to say.
+
+    Otherwise returns the lookup's own outcome when no drive is due,
     ``driver_queue_full`` when the queue is at its cap, ``driver_unavailable``
     when the executor has shut down (interpreter exit), else
     ``driver_scheduled``. Each refusal is logged as a WARNING and every
@@ -696,6 +704,15 @@ def schedule_drive_on_delivery(
     drive it replaces, it must not fail a send whose message is already
     durable.
     """
+    if channel_delivered:
+        # Before _remember_delivery_pickup: a message the channel carries needs
+        # no pickup row and no doorbell.
+        logger.info(
+            "drive_on_delivery: pane notice not needed for message %s to %s: the recipient's live channel carries it",
+            message_id,
+            recipient_agent_instance_id,
+        )
+        return _record_lookup_outcome(message_id, recipient_agent_instance_id, DRIVE_DRIVER_NOT_NEEDED)
     if state is not None and recipient_agent_id in {"codex", "claude_code"}:
         outcome = _remember_delivery_pickup(state, message_id, recipient_agent_instance_id, recipient_agent_session_id, recipient_role_name, recipient_agent_id)
         if outcome is not None:
@@ -778,6 +795,7 @@ OPERATOR_SEAT_MANUAL_WAKE: Final[str] = "to wake an attended seat by hand, type 
 _LOOKUP_OUTCOME_DETAILS: Final[dict[str, str]] = {
     DRIVE_NOT_MANAGED: "no managed_session row for this recipient, so no drive applies; durable mail is retained and read on the recipient's next inbox read",
     DRIVE_INELIGIBLE_STATE: "the managed row's lifecycle state is not drive-eligible; durable mail is retained and read on the recipient's next inbox read",
+    DRIVE_DRIVER_NOT_NEEDED: "the message was queued on the recipient's live channel, which carries it to the session; no pane notice was typed",
     DRIVE_DRIVER_UNAVAILABLE: f"the managed row's host has no driver channel, so no wake mechanism exists for it; durable mail is retained and read on the recipient's next inbox read; {OPERATOR_SEAT_MANUAL_WAKE}",
 }
 
@@ -797,10 +815,12 @@ def _record_lookup_outcome(
     host with no driver channel, which is exactly the channel-absent seat this
     answer was never available for.
 
-    Only :func:`resolve_delivery_drive`'s own outcome comes here. The managed
-    pickup branch is deliberately excluded: it can hand off a real pickup drive
-    that records its own finished outcome under the same message id, and a
-    synthetic record would clobber that one.
+    :func:`resolve_delivery_drive`'s own outcome comes here, and so does the
+    ``driver_not_needed`` return of :func:`schedule_drive_on_delivery`, which runs
+    before any pickup hand-off and so cannot clobber one. The managed pickup
+    branch is deliberately excluded: it can hand off a real pickup drive that
+    records its own finished outcome under the same message id, and a synthetic
+    record would clobber that one.
 
     Returns the outcome unchanged. This is a report, not a gate: it adds no
     refusal, drops no message and changes nothing about durability.
@@ -872,6 +892,22 @@ def finished_drive_outcome(message_id: str, *, timeout_s: float) -> _DriveResult
         return DRIVE_DRIVER_UNAVAILABLE, "plugin stopped before queued drive ran; durable mail retained"
 
 
+def wake_attempt_record(message_id: str) -> tuple[bool, _DriveResult | None]:
+    """Whether a wake attempt is on record for ``message_id``, and its finished result.
+
+    ``(False, None)``: nothing is on record (the process restarted, more than
+    ``DRIVE_RECORD_LIMIT`` sends followed, or the id was never sent).
+    ``(True, None)``: a drive is on record and has not finished. ``(True, result)``:
+    it finished. ``finished_drive_outcome`` alone cannot tell those first two
+    apart, since it answers ``None`` for both. Never waits for a drive.
+    """
+    with _DRIVE_RECORDS_LOCK:
+        recorded = message_id in _DRIVE_RECORDS
+    if not recorded:
+        return False, None
+    return True, finished_drive_outcome(message_id, timeout_s=0)
+
+
 def _release_cancelled_drive(future: Future[_DriveResult]) -> None:
     if future.cancelled():
         with _DRIVE_RECORDS_LOCK:
@@ -924,4 +960,5 @@ __all__ = [
     "drive_queue_snapshot",
     "finished_drive_outcome",
     "schedule_drive_on_delivery",
+    "wake_attempt_record",
 ]

@@ -97,6 +97,7 @@ class FixtureApp:
         self.popup = bool(args.popup)
         self.claude_like = bool(args.claude_like)
         self.text_sgr = str(args.claude_text_sgr)
+        self.suggestion = str(args.suggestion)
         self.log = Path(args.log).open("a", encoding="utf-8")  # noqa: SIM115 -- one handle for the program's lifetime
         self.seq = 0
 
@@ -115,6 +116,7 @@ class FixtureApp:
         self.cursor += len(chunk)
 
     def key(self, sequence: str) -> None:
+        self.suggestion = ""
         if sequence in {"\r", "\n"}:
             self.enter()
             return
@@ -175,7 +177,13 @@ class FixtureApp:
         Measured on live Claude panes: the empty row is a dim ``❯`` plus a
         NBSP (it strips to the bare glyph, the channel's cleared signature);
         text in the composer carries the bright-white SGR 97 stranded-input
-        signature unless ``--claude-text-sgr`` says otherwise. Continuation rows are indented two cells."""
+        signature unless ``--claude-text-sgr`` says otherwise. Continuation rows are indented two cells.
+
+        ``--suggestion TEXT`` draws Claude Code's prompt suggestion in an empty
+        composer: the glyph and NBSP, then TEXT in SGR 2 (faint). Any key or
+        paste drops it before it changes the buffer, as the real TUI does."""
+        if not self.text and self.suggestion:
+            return [f"❯\xa0\x1b[2m{self.suggestion}\x1b[0m"], (top, 2)
         if not self.text:
             return ["\x1b[2m❯\xa0\x1b[0m"], (top, 2)
         rows: list[str] = []
@@ -226,6 +234,7 @@ def _serve(app: FixtureApp) -> None:
         if readable:
             for sequence in _sequences(decoder.decode(os.read(sys.stdin.fileno(), 65536))):
                 if sequence.startswith(_PASTE_START):
+                    app.suggestion = ""
                     app.insert(sequence[len(_PASTE_START) :])
                     app.record("paste", pasted=sequence[len(_PASTE_START) :])
                 else:
@@ -245,6 +254,7 @@ def main() -> int:
     parser.add_argument("--popup", action="store_true")
     parser.add_argument("--claude-like", action="store_true")
     parser.add_argument("--claude-text-sgr", default="97", help="SGR for composer text in --claude-like mode; 97 is the stranded-input signature")
+    parser.add_argument("--suggestion", default="", help="--claude-like only: faint prompt-suggestion text shown in the empty composer until any key or paste")
     app = FixtureApp(parser.parse_args())
     saved = termios.tcgetattr(sys.stdin.fileno())
     tty.setraw(sys.stdin.fileno())

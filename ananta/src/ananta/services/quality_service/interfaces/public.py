@@ -120,7 +120,6 @@ def _hash_verify_return_schema() -> ReturnValueSchema:
         type=ParameterType.OBJECT,
         description="Per-file SHA-256 verification and editable-install shadowing warnings.",
         properties={
-            "unit_id": ParameterMetadata(type=ParameterType.STRING, description="Declared work-unit id."),
             "root_path": ParameterMetadata(type=ParameterType.STRING, description="Absolute root inspected."),
             "files": ParameterMetadata(type=ParameterType.LIST, description="[{path, expected_sha256, actual_sha256|null, status}]."),
             "all_exact": ParameterMetadata(type=ParameterType.BOOLEAN, description="True iff every declared path matched."),
@@ -137,14 +136,14 @@ def _merge_predict_return_schema() -> ReturnValueSchema:
         properties={
             "base_ref": ParameterMetadata(type=ParameterType.STRING, description="Base revision read."),
             "current_master": ParameterMetadata(type=ParameterType.STRING, description="Current master revision read."),
-            "lane_root_path": ParameterMetadata(type=ParameterType.STRING, description="Lane worktree inspected."),
+            "candidate_root_path": ParameterMetadata(type=ParameterType.STRING, description="Candidate directory inspected."),
             "register_path": ParameterMetadata(type=ParameterType.STRING, description="Tracked register path."),
             "master_drifted_since_base": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether current master differs from base."),
-            "lane_change_is_append_only": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether lane content preserves the base as a prefix."),
-            "lane_hunk": ParameterMetadata(type=ParameterType.STRING, description="Lane-only appended text, or empty when not append-only."),
-            "lane_registrations": ParameterMetadata(type=ParameterType.LIST, description="Non-comment registrations in the lane hunk."),
-            "duplicate_registrations_on_master": ParameterMetadata(type=ParameterType.LIST, description="Lane registrations already present on current master."),
-            "missing_registrations_on_master": ParameterMetadata(type=ParameterType.LIST, description="Lane registrations absent from current master."),
+            "candidate_change_is_append_only": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether candidate content preserves the base as a prefix."),
+            "candidate_hunk": ParameterMetadata(type=ParameterType.STRING, description="Candidate-only appended text, or empty when not append-only."),
+            "candidate_registrations": ParameterMetadata(type=ParameterType.LIST, description="Non-comment registrations in the candidate hunk."),
+            "duplicate_registrations_on_master": ParameterMetadata(type=ParameterType.LIST, description="Candidate registrations already present on current master."),
+            "missing_registrations_on_master": ParameterMetadata(type=ParameterType.LIST, description="Candidate registrations absent from current master."),
             "merged_candidate_content": ParameterMetadata(type=ParameterType.STRING, description="git merge-file -p output; contains conflict markers when verdict is conflict."),
             "merge_verdict": ParameterMetadata(type=ParameterType.STRING, description="clean or conflict."),
             "git_merge_file_exit_code": ParameterMetadata(type=ParameterType.INTEGER, description="0 clean, 1 conflict."),
@@ -355,38 +354,41 @@ class QualitySmokeProofPublicAPI(ABC):
 
     @service_interface_process(
         is_async=True,
-        name="ensure_full_smoke_schedule",
-        provider=PROVIDER,
-        is_discoverable=True,
-        parameters={},
-        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Ensure the six-hour full battery and five-minute durable retry schedules.")),
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        result_processor_customizations=MergeResultProcessorCustomizations(result_type="ensure_full_smoke_schedule_result"),
-        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
-        requires_call_context=True,
-    )
-    @abstractmethod
-    def ensure_full_smoke_schedule(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
-        """Ensure the six-hour full battery and five-minute durable retry schedules."""
-        ...
-
-    @service_interface_process(
-        is_async=True,
         name="trigger_full_smoke_battery",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={
             "trigger": ParameterMetadata(type=ParameterType.STRING, required=False, description="trigger for trigger_full_smoke_battery."),
         },
-        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Queue a full battery or retry pending work off the action queue.")),
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Request a full battery run of the newest master commit; it runs once, after any run in progress.")),
         processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
         result_processor_customizations=MergeResultProcessorCustomizations(result_type="trigger_full_smoke_battery_result"),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
         requires_call_context=True,
     )
     @abstractmethod
-    def trigger_full_smoke_battery(self, trigger: str = "schedule", *, call_context: CallContext | None = None) -> dict[str, Any]:
-        """Queue a full battery or retry pending work off the action queue."""
+    def trigger_full_smoke_battery(self, trigger: str = "manual", *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Request a full battery run of the newest master commit; it runs once, after any run in progress."""
+        ...
+
+    @service_interface_process(
+        is_async=True,
+        name="list_full_smoke_campaigns",
+        provider=PROVIDER,
+        is_discoverable=True,
+        parameters={
+            "finished_after": ParameterMetadata(type=ParameterType.STRING, required=False, description="Exclusive ISO-8601 timestamp with a timezone; only campaigns that finished after it are listed. Pass the previous page's next_finished_after to continue."),
+            "limit": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="Most campaigns to return, from 1 to 100; defaults to 50."),
+        },
+        return_value_schema=registered_job_return_schema(ReturnValueSchema(type=ParameterType.OBJECT, description="Read closed full-battery campaign records, oldest first, without changing them.")),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(result_type="list_full_smoke_campaigns_result"),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def list_full_smoke_campaigns(self, finished_after: str | None = None, limit: int = 50, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Read closed full-battery campaign records, oldest first, without changing them."""
         ...
 
 
@@ -458,7 +460,6 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
         provider=PROVIDER,
         is_discoverable=True,
         parameters={
-            "unit_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Work-unit id for the report."),
             "root_path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Existing absolute worktree/candidate-tree root."),
             "manifest": ParameterMetadata(type=ParameterType.DICT, required=True, description="Declared {repo_relative_path: lowercase_sha256} manifest."),
         },
@@ -471,7 +472,6 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
     @abstractmethod
     def verify_hash_manifest(
         self,
-        unit_id: str,
         root_path: str,
         manifest: dict[str, str],
         *,
@@ -486,8 +486,8 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
         is_discoverable=True,
         parameters={
             "base_ref": ParameterMetadata(type=ParameterType.STRING, required=True, description="Common base Git revision."),
-            "lane_root_path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Existing absolute lane worktree root."),
-            "current_master": ParameterMetadata(type=ParameterType.STRING, required=True, description="Current master revision in that worktree."),
+            "candidate_root_path": ParameterMetadata(type=ParameterType.STRING, required=True, description="Existing absolute candidate directory."),
+            "current_master": ParameterMetadata(type=ParameterType.STRING, required=True, description="Current master revision available from the candidate directory."),
             "register_path": ParameterMetadata(type=ParameterType.STRING, required=False, default="quality_gates/gate_smokes.txt", description="Repo-relative append-only tracked-debt register; its fragment directory (quality_gates/gate_smokes.d/) is resolved beside it and merged in."),
         },
         return_value_schema=registered_job_return_schema(_merge_predict_return_schema()),
@@ -500,7 +500,7 @@ class QualityServicePublicAPI(QualitySmokeProofPublicAPI):
     def predict_gate_smokes_merge(
         self,
         base_ref: str,
-        lane_root_path: str,
+        candidate_root_path: str,
         current_master: str,
         register_path: str = "quality_gates/gate_smokes.txt",
         *,

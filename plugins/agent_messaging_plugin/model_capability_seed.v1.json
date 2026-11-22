@@ -3,7 +3,7 @@
   "seed_version": "model-capability-seed-v1",
   "measured_at": "2026-09-19T00:00:00+00:00",
   "provenance": {
-    "source_ref": "project-solet register iss_f452fe5e schema_version-2 ticket header (2026-09-19); numbers hand-reconciled by the operator from two direct Artificial Analysis fetches (Intelligence Index + cost-per-task) cross-checked against OpenAI per-model docs and claude.com/pricing for effort support",
+    "source_ref": "operator provenance record iss_f452fe5e schema_version-2 ticket header (2026-09-19); numbers hand-reconciled by the operator from two direct Artificial Analysis fetches (Intelligence Index + cost-per-task) cross-checked against OpenAI per-model docs and claude.com/pricing for effort support",
     "fetch_method": "hand-reconciled seed; NOT a mechanical fetch. Every cell seeded from here carries acceptance=pending_crosscheck and is never served until a real refresh run cross-checks it.",
     "acceptance_on_seed": "pending_crosscheck"
   },

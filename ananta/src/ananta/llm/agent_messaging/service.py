@@ -1213,8 +1213,8 @@ class AgentMessagingService:
     # persist_direct_wake, rehome_owed_direct_wakes, list_owed_direct_for_instance,
     # mark_direct_emitted_for_instance, mark_direct_consumed_on_ack) retired
     # here — Guard 1 ("no model-initiated call since emission") was blind to
-    # local-only work; sweep_overdue_sessions + _notify_steward_of_overdue
-    # (session_sweep.py, D1) is the sole successor. The ROLE delivery
+    # local-only work; no sweep replaced it (nothing on a clock watches a
+    # session; state is read on demand). The ROLE delivery
     # durability guarantee (list_undelivered_for/list_undelivered_for_instance,
     # mark_delivered_for_instance, mark_role_consumed_on_ack, persist_role_message)
     # is untouched. core__agent_direct_wake and the role message's

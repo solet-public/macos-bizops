@@ -24,7 +24,6 @@ plugins/actr_memory_plugin/tests/setup_schedules_canonical_smoke.py  # owner: is
 plugins/agent_messaging_plugin/tests/action_cost_profile_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 plugins/agent_messaging_plugin/tests/events_after_page_limit_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 plugins/agent_messaging_plugin/tests/forwarder_reconnect_announcement_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
-plugins/agent_messaging_plugin/tests/legacy_session_backfill_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 plugins/agent_messaging_plugin/tests/mcp_descriptor_parity_smoke.py  # owner: iss_fb75bf89 reason: pre-existing smoke awaiting offline-suitability review expires: 2026-12-31
 plugins/agent_messaging_plugin/tests/read_thread_messages_live_smoke.py  # owner: iss_fb75bf89 reason: requires a live external or production service expires: 2026-12-31
 plugins/agent_messaging_plugin/tools/oauth_surface_smoke.py  # owner: iss_fb75bf89 reason: operator tooling, not an offline battery smoke expires: 2026-12-31

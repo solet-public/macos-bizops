@@ -1,0 +1,2 @@
+# The shared stage-execution seam (chg_72c0ab55): the ordinary ladder driver and
+# the later snapshot-replay driver must run ONE stage implementation, not two.

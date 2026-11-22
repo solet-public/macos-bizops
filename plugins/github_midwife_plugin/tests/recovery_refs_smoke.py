@@ -216,6 +216,27 @@ class RecoveryTests(RecoveryBase):
         self.assertEqual(list((f.store / "tmp").iterdir()), [])
         f.assert_no_canaries()
 
+    def test_restore_pruned_stash_names_the_paths_the_save_kept_out(self) -> None:
+        f = self.fixture
+        f.stash(hidden=True)
+        result = f.handle(f.event(command="git stash drop"))
+        self.assertTrue(result.saves, result)
+        save_id = result.saves[0]
+        kept_out = {row["path"] for row in f.manifest(save_id)["unsaved"] if row["reason"] == "ignored_in_ref"}
+        self.assertEqual(kept_out, {".env", "hidden/.gitignore"})
+        git(f.repo, "stash", "drop")
+        git(f.repo, "reflog", "expire", "--expire-unreachable=now", "--all")
+        git(f.repo, "gc", "--prune=now")
+        rebuilt = [row for row in f.cli("restore", save_id, "--refs") if "rebuilt" in row["outcome"]]
+        self.assertEqual(len(rebuilt), 1, rebuilt)
+        row = rebuilt[0]
+        self.assertEqual(row["unsaved"], [{"path": ".env", "reason": "ignored_in_ref"}, {"path": "hidden/.gitignore", "reason": "ignored_in_ref"}])
+        self.assertTrue(row["outcome"].startswith("reference rebuilt from visible saved paths"), row)
+        self.assertIn(".env (ignored_in_ref)", row["outcome"])
+        self.assertIn("hidden/.gitignore (ignored_in_ref)", row["outcome"])
+        self.assertEqual(set(row), {"path", "outcome", "oid", "unsaved"})
+        f.assert_no_canaries()
+
     def test_restore_exact_refs_branch_collision_and_explicit_stage(self) -> None:
         f = self.fixture
         f.write("f", b"index\n")
@@ -231,6 +252,7 @@ class RecoveryTests(RecoveryBase):
         result = f.handle(f.event(command="git stash drop"))
         outcomes = f.cli("restore", result.saves[0], "--refs")
         self.assertTrue(any("exactly" in row["outcome"] for row in outcomes))
+        self.assertTrue(all(set(row) == {"path", "outcome", "oid"} and row["outcome"] == "reference restored exactly" for row in outcomes), outcomes)
         git(f.repo, "branch", "lost")
         branch = f.handle(f.event(command="git branch -D lost"))
         outcomes = f.cli("restore", branch.saves[0], "--refs")

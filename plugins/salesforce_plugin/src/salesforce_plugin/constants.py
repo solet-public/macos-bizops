@@ -1,20 +1,33 @@
 """Salesforce plugin constants.
 
-Single source of truth for every magic value: the address-book entry + field
-identifiers, the sf CLI invocation knobs, the pinned API version, error codes
-(``sf.*`` prefix), result types, and caps. No magic strings anywhere else in
-the plugin.
+Single source of truth for every magic value: the vault keys of the bound
+orgs, the pre-build-6 address-book entry + field identifiers, the sf CLI
+invocation knobs, the pinned API version, error codes (``sf.*`` prefix),
+result types, and caps. No magic strings anywhere else in the plugin.
 
 Auth model (operator-ratified 2026-07-14, full CLI delegation — replacing
 the sf-CLI session-borrow client factory, dead on current CLI releases
 because `sf org display --json` now redacts `accessToken` unconditionally):
-every verb shells out to the `sf` CLI itself. The durable credential is the
-CLI's own keychain-backed refresh token, established once via
-``sf org login web`` — the platform stores NO Salesforce secret of its own,
-and no access token of any kind ever enters this process.
+every verb shells out to the `sf` CLI itself, and the durable credential of
+each bound org is the CLI's own session for it. The plugin's vault holds the
+index of bound orgs and, only for orgs that log in unattended, the login
+secrets the operator stored (``org_secrets.py``); the plugin never holds a
+session.
 """
 
+import os
 from typing import Final
+
+
+def _solet_or_fail() -> str:
+    """Resolve SOLET_NAME at import time for scoped vault keys (``<solet>.<plugin>.<credential>``)."""
+    name = os.environ.get("SOLET_NAME", "").strip()
+    if not name:
+        raise RuntimeError("salesforce_plugin.constants: SOLET_NAME env var is required to resolve scoped vault keys.")
+    return name
+
+
+_SOLET = _solet_or_fail()
 
 # ---------------------------------------------------------------------------
 # Plugin identity
@@ -23,13 +36,29 @@ PLUGIN_NAME: Final[str] = "salesforce_plugin"
 PLUGIN_VERSION: Final[str] = "3.0.0"
 
 # ---------------------------------------------------------------------------
-# Address book entry — which CLI org this plugin is allowed to talk to
+# Bound orgs (build 6, the Google multi-account pattern; orgs.py). The index
+# of bindings and the default org is ONE vault value in this plugin's own
+# namespace. Operator-stored login secrets (a JWT private key, an SFDX auth
+# URL, an access token, a connected app client secret) live under the
+# org_secret__ prefix and are read only inside the call that uses them.
+# ---------------------------------------------------------------------------
+VAULT_KEY_ORGS_INDEX: Final[str] = f"{_SOLET}.salesforce_plugin.orgs_index"
+VAULT_KEY_ORG_SECRET_PREFIX: Final[str] = f"{_SOLET}.salesforce_plugin.org_secret__"
+VAULT_TAG_ORGS_INDEX: Final[str] = "salesforce_orgs_index"
+# APP_HOME/data/plugin_data/<plugin>/jwt_keys: a JWT key file exists there only
+# while a CLI call for an org that logged in with it runs (org_secrets.py).
+JWT_KEY_DIRECTORY_PARTS: Final[tuple[str, ...]] = ("data", "plugin_data", "salesforce_plugin", "jwt_keys")
+
+# ---------------------------------------------------------------------------
+# Address book entry — the single org binding that predates build 6. It is
+# migrated into the vault index on first use and kept until that org is
+# disconnected (orgs.py).
 # ---------------------------------------------------------------------------
 ADDRESS_BOOK_ENTRY_NAME: Final[str] = "salesforce_org"
-ADDRESS_BOOK_ENTRY_TYPE: Final[str] = "api"
-ADDRESS_BOOK_ENTRY_DESCRIPTION: Final[str] = "Salesforce org binding for salesforce_plugin: target_org (the sf CLI alias or username every verb is invoked against) and instance_host (the pinned my-domain host that alias must resolve to)."
 ADDRESS_BOOK_FIELD_TARGET_ORG: Final[str] = "target_org"
 ADDRESS_BOOK_FIELD_INSTANCE_HOST: Final[str] = "instance_host"
+# The address book's own error code for a name that is not registered.
+ADDRESS_BOOK_NOT_FOUND_CODE: Final[str] = "address_book.not_found"
 
 # ---------------------------------------------------------------------------
 # sf CLI invocation
@@ -40,6 +69,15 @@ ADDRESS_BOOK_FIELD_INSTANCE_HOST: Final[str] = "instance_host"
 CONFIG_KEY_SF_CLI_PATH: Final[str] = "sf_cli_path"
 DEFAULT_SF_CLI_PATH: Final[str] = "sf"
 SF_CLI_TIMEOUT_SECONDS: Final[float] = 30.0
+# A browser login waits for the operator to sign in (SSO and MFA included).
+SF_CLI_WEB_LOGIN_TIMEOUT_SECONDS: Final[float] = 300.0
+# Org lifecycle calls that finish server-side work before answering: resuming
+# a scratch org authorizes it and deploys its settings; deletes and sandbox
+# requests make several vendor calls. Creates are always submitted --async.
+SF_CLI_LIFECYCLE_TIMEOUT_SECONDS: Final[float] = 300.0
+# The sf CLI prints access tokens, passwords and SFDX auth URLs unmasked when
+# this is true in its environment; every child process gets it false.
+SF_SHOW_SECRETS_ENV: Final[str] = "SF_TEMP_SHOW_SECRETS"
 RESULT_TYPE_AUTHENTICATED_REQUEST: Final[str] = "salesforce_authenticated_request_result"
 # Sforce-Locator and Sforce-NumberOfRecords page Bulk API 2.0 query results.
 REQUEST_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset({"content-type", "retry-after", "sforce-limit-info", "x-request-id", "sforce-locator", "sforce-numberofrecords"})
@@ -132,6 +170,11 @@ ERROR_PROVISION_CONSENT_REQUIRED: Final[str] = "sf.provision_consent_required"
 ERROR_BAD_REQUEST: Final[str] = "sf.bad_request"
 ERROR_CONFLICT: Final[str] = "sf.conflict"
 ERROR_PRECONDITION_FAILED: Final[str] = "sf.precondition_failed"
+# Bound orgs: `org` names no binding, or several are bound and none is the default.
+ERROR_UNKNOWN_ORG: Final[str] = "sf.unknown_org"
+# The vault index of bound orgs could not be read or written.
+ERROR_ORG_REGISTRY_FAILED: Final[str] = "sf.org_registry_failed"
+ERROR_VAULT_NOT_AVAILABLE: Final[str] = "vault_service_not_available"
 
 # ---------------------------------------------------------------------------
 # Result types
@@ -160,3 +203,10 @@ RESULT_TYPE_REST_RESOURCES: Final[str] = "salesforce_rest_resources_result"
 RESULT_TYPE_ACTIONS: Final[str] = "salesforce_actions_result"
 RESULT_TYPE_METADATA: Final[str] = "salesforce_metadata_result"
 RESULT_TYPE_CONTENT_FILES: Final[str] = "salesforce_content_files_result"
+RESULT_TYPE_LIST_ORGS: Final[str] = "salesforce_list_orgs_result"
+RESULT_TYPE_BIND_ORG: Final[str] = "salesforce_bind_org_result"
+RESULT_TYPE_LOGIN: Final[str] = "salesforce_login_result"
+RESULT_TYPE_LOGOUT: Final[str] = "salesforce_logout_result"
+RESULT_TYPE_SET_DEFAULT_ORG: Final[str] = "salesforce_set_default_org_result"
+RESULT_TYPE_DISCONNECT_ORG: Final[str] = "salesforce_disconnect_org_result"
+RESULT_TYPE_ORG_LIFECYCLE: Final[str] = "salesforce_org_lifecycle_result"

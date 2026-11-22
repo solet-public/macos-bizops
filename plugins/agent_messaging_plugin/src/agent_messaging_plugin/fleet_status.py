@@ -75,23 +75,23 @@ def fleet_status(
     """Return one bounded, read-only classification of the active fleet.
 
     The no-contract population is deliberately read with the state interface's
-    explicit ``is_null`` grammar.  It is inventory, not a report-or-die lane,
-    and must never be silently folded into ``STALLED``.
+    explicit ``is_null`` grammar.  It is inventory, not a report-or-die check.
+    Every classification is a recorded fact (a null ``report_by``, a worktree
+    disposition, an armed dependency, an idle or parked lifecycle state); a
+    session that is simply live is ``active``.  No verdict is computed from the
+    absence of a report, so reading this projection raises no false alarm.
     """
     selected_scope = _validated_scope(scope)
     observed_at = now or datetime.now(UTC)
     rows = _active_sessions(state)
     no_contract_rows = _no_contract_sessions(state)
     dependencies = _armed_dependencies(state)
-    classifications = _classifications(rows, dependencies, observed_at)
+    classifications = _classifications(rows, dependencies)
     scoped_rows = _scoped_rows(rows, selected_scope)
-    rendered_sessions = [
-        _session_view(row, classifications[str(row.get("agent_instance_id") or "")], state, observed_at)
-        for row in scoped_rows[:FLEET_STATUS_MAX_SESSIONS]
-    ]
+    rendered_sessions = [_session_view(row, classifications[str(row.get("agent_instance_id") or "")], state, observed_at) for row in scoped_rows[:FLEET_STATUS_MAX_SESSIONS]]
     owed_messages = _owed_role_messages(state)
     class_counts = Counter(item["classification"] for item in classifications.values())
-    for classification in ("working", "STALLED", "no-contract", "retiring", "idle", "holding"):
+    for classification in ("active", "no-contract", "idle", "holding"):
         class_counts.setdefault(classification, 0)
     return {
         "as_of": observed_at.isoformat(),
@@ -129,10 +129,7 @@ def _active_sessions(state: StateManagementInterface) -> list[dict[str, Any]]:
             table=TABLE_MANAGED_SESSION,
             filters={"lifecycle_state": list(_ACTIVE_LIFECYCLE_STATES)},
             ceiling=_ACTIVE_SESSION_READ_CEILING,
-            reason=(
-                "fleet_status reads the complete active managed-session population "
-                "(1,017 rows measured 2026-09-15; 10,000-row ceiling leaves about 10x headroom)"
-            ),
+            reason=("fleet_status reads the complete active managed-session population (1,017 rows measured 2026-09-15; 10,000-row ceiling leaves about 10x headroom)"),
         )
     ]
 
@@ -149,10 +146,7 @@ def _no_contract_sessions(state: StateManagementInterface) -> list[dict[str, Any
                 "report_by": {"op": "is_null"},
             },
             ceiling=_NO_CONTRACT_SESSION_READ_CEILING,
-            reason=(
-                "fleet_status reads the complete contract-less active managed-session population "
-                "(999 rows measured 2026-09-15; 10,000-row ceiling leaves about 10x headroom)"
-            ),
+            reason=("fleet_status reads the complete contract-less active managed-session population (999 rows measured 2026-09-15; 10,000-row ceiling leaves about 10x headroom)"),
         )
     ]
 
@@ -165,10 +159,7 @@ def _armed_dependencies(state: StateManagementInterface) -> dict[str, list[dict[
         table=TABLE_SESSION_DEPENDENCY,
         filters={"fired_at": {"op": "is_null"}},
         ceiling=_ARMED_DEPENDENCY_READ_CEILING,
-        reason=(
-            "fleet_status reads the complete armed-dependency set "
-            "(1 row measured 2026-09-15; 10,000 rows accommodate dependency growth with the active fleet)"
-        ),
+        reason=("fleet_status reads the complete armed-dependency set (1 row measured 2026-09-15; 10,000 rows accommodate dependency growth with the active fleet)"),
     ):
         waiter = str(row.get("waiter_instance_id") or "")
         if waiter:
@@ -185,41 +176,33 @@ def _armed_dependencies(state: StateManagementInterface) -> dict[str, list[dict[
 def _classifications(
     rows: list[dict[str, Any]],
     dependencies: dict[str, list[dict[str, str]]],
-    now: datetime,
 ) -> dict[str, dict[str, Any]]:
-    return {
-        str(row.get("agent_instance_id") or ""): _classify(row, dependencies, now)
-        for row in rows
-    }
+    return {str(row.get("agent_instance_id") or ""): _classify(row, dependencies) for row in rows}
 
 
 def _classify(
     row: dict[str, Any],
     dependencies: dict[str, list[dict[str, str]]],
-    now: datetime,
 ) -> dict[str, Any]:
     agent_instance_id = str(row.get("agent_instance_id") or "")
     if row.get("report_by") is None:
         return {"classification": "no-contract", "reason": "report_by is null", "holds": []}
-    if str(row.get("worktree_disposition") or ""):
-        return {"classification": "retiring", "reason": "worktree disposition is recorded", "holds": []}
     holds = dependencies.get(agent_instance_id, [])
     if holds:
         return {"classification": "holding", "reason": "armed session dependency", "holds": holds}
     lifecycle_state = str(row.get("lifecycle_state") or "")
     if lifecycle_state in {LIFECYCLE_IDLE, LIFECYCLE_PARKED}:
         return {"classification": "idle", "reason": f"lifecycle_state is {lifecycle_state}", "holds": []}
-    report_by = _timestamp(row.get("report_by"))
-    if report_by is not None and report_by <= now:
-        return {"classification": "STALLED", "reason": "report_by is past due", "holds": []}
-    return {"classification": "working", "reason": "report_by is still in the future", "holds": []}
+    return {
+        "classification": "active",
+        "reason": f"report_by {_string_or_none(row.get('report_by'))} recorded; no verdict is computed from silence",
+        "holds": [],
+    }
 
 
 def _scoped_rows(rows: list[dict[str, Any]], scope: str) -> list[dict[str, Any]]:
-    selected = rows if scope == FLEET_STATUS_SCOPE_ALL else [
-        row for row in rows if row.get("report_by") is not None
-    ]
-    return sorted(selected, key=lambda row: (str(row.get("lane_id") or ""), str(row.get("id") or "")))
+    selected = rows if scope == FLEET_STATUS_SCOPE_ALL else [row for row in rows if row.get("report_by") is not None]
+    return sorted(selected, key=lambda row: (str(row.get("label") or ""), str(row.get("id") or "")))
 
 
 def _session_view(
@@ -231,11 +214,10 @@ def _session_view(
     agent_instance_id = str(row.get("agent_instance_id") or "")
     return {
         "agent_instance_id": agent_instance_id,
-        "lane_id": row.get("lane_id"),
+        "label": row.get("label"),
         "role_name": row.get("role_name"),
         "model": row.get("model"),
         "effort": row.get("effort"),
-        "dispatch_kind": row.get("dispatch_kind"),
         "host": row.get("host"),
         "ledger_state": row.get("lifecycle_state"),
         "classification": classification["classification"],
@@ -311,9 +293,7 @@ def _owed_message_view(row: dict[str, object]) -> dict[str, Any]:
 
 
 def _unregistered_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    timestamps = sorted(
-        value for row in rows if (value := _string_or_none(row.get("created_at"))) is not None
-    )
+    timestamps = sorted(value for row in rows if (value := _string_or_none(row.get("created_at"))) is not None)
     return {
         "count": len(rows),
         "oldest_created_at": timestamps[0] if timestamps else None,

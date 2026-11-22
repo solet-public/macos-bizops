@@ -12,12 +12,6 @@
     "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
   },
   {
-    "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/lane_worktree_preservation.py",
-    "function": "_rebuilt_index",
-    "prefix": "'lane-custody-index-'",
-    "reason": "Context-managed temporary directory, removed at scope exit on adopter hosts without a register."
-  },
-  {
     "path": "plugins/audio_processing_plugin/src/audio_processing_plugin/blob_io.py",
     "function": "save_audio_to_blob",
     "prefix": "<default>",

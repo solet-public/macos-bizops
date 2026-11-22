@@ -62,9 +62,7 @@ from agent_messaging_plugin import rotation_thresholds as rt  # noqa: E402
 # re-measurement re-opened it to 68,111, so the guard is now armed rather than
 # nearly tripped. It stays because the width is a MEASUREMENT, not a design
 # choice, and it has now moved in both directions inside a single day.
-_DISCRIMINATING_TOKENS: int = (
-    rt.POLICY_H_TOKENS + rt.WARM_BAND_KEEP_WORKING_TOKENS
-) // 2
+_DISCRIMINATING_TOKENS: int = (rt.POLICY_H_TOKENS + rt.WARM_BAND_KEEP_WORKING_TOKENS) // 2
 
 # ★ THE BELOW-H SIZE -- DERIVED FOR THE SAME REASON, AND STRANDED FOR REAL
 # (2026-08-19 rehydration re-measurement).
@@ -100,12 +98,15 @@ def _check(condition: object, label: str) -> None:
 
 def test_table_carries_exactly_the_seat_confirmed_keys() -> None:
     _check(
-        set(rt.MODEL_CONTEXT_CEILINGS.keys()) == {
-            "claude-fable-5", "claude-sonnet-5", "claude-opus-5",
-            "claude-haiku-4-5", "claude-haiku-4-5-20251001",
+        set(rt.MODEL_CONTEXT_CEILINGS.keys())
+        == {
+            "claude-fable-5",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
         },
-        "MODEL_CONTEXT_CEILINGS carries exactly the seat-confirmed alias set, "
-        "no silent additions or removals",
+        "MODEL_CONTEXT_CEILINGS carries exactly the seat-confirmed alias set, no silent additions or removals",
     )
 
 
@@ -143,8 +144,7 @@ def test_plausible_future_model_still_falls_back_conservative() -> None:
     exact-key lookup."""
     _check(
         rt.resolve_ceiling("claude-opus-6") == rt.DEFAULT_CONSERVATIVE_CEILING,
-        "a plausible-but-not-yet-added future model name still falls back "
-        "to the conservative ceiling, never silently exempted",
+        "a plausible-but-not-yet-added future model name still falls back to the conservative ceiling, never silently exempted",
     )
 
 
@@ -164,13 +164,11 @@ def test_fable_51_is_recognized_but_its_window_is_unverified() -> None:
         "unverified Fable 5.1 ceiling uses conservative value, not Fable 5 data",
     )
     _check(
-        rt.resolve_ceiling_with_provenance("claude-fable-5-1")
-        == (rt.DEFAULT_CONSERVATIVE_CEILING, "unverified-model-window"),
+        rt.resolve_ceiling_with_provenance("claude-fable-5-1") == (rt.DEFAULT_CONSERVATIVE_CEILING, "unverified-model-window"),
         "ceiling resolver returns an explicit unverified provenance marker",
     )
     _check(
-        rt.resolve_ceiling_with_provenance("some-future-model")
-        == (rt.DEFAULT_CONSERVATIVE_CEILING, "unknown-model-conservative-fallback"),
+        rt.resolve_ceiling_with_provenance("some-future-model") == (rt.DEFAULT_CONSERVATIVE_CEILING, "unknown-model-conservative-fallback"),
         "unknown models retain a distinct conservative-fallback provenance",
     )
     _check(
@@ -179,21 +177,28 @@ def test_fable_51_is_recognized_but_its_window_is_unverified() -> None:
     )
     _check(
         rt.resolve_notice_window(
-            model="claude-fable-5-1", effort="high", runtime_window_tokens=None,
-        ) == (None, "unverified-model-window", False),
+            model="claude-fable-5-1",
+            effort="high",
+            runtime_window_tokens=None,
+        )
+        == (None, "unverified-model-window", False),
         "unverified Fable 5.1 window is recognized and explicitly unverified",
     )
     verdict = rt.rotation_notice_verdict(
-        model="claude-fable-5-1", effort="high", current_tokens=0,
-        runtime_window_tokens=None, configured_hard_clear_tokens=400_000,
+        model="claude-fable-5-1",
+        effort="high",
+        current_tokens=0,
+        runtime_window_tokens=None,
+        configured_hard_clear_tokens=400_000,
     )
     _check(
-        verdict.window_source == "unverified-model-window"
-        and not verdict.unrecognized_model and verdict.window_tokens is None,
+        verdict.window_source == "unverified-model-window" and not verdict.unrecognized_model and verdict.window_tokens is None,
         "notice verdict carries the named unverified state without calling model unknown",
     )
     measured = rt.resolve_notice_window(
-        model="claude-fable-5-1", effort="high", runtime_window_tokens=750_000,
+        model="claude-fable-5-1",
+        effort="high",
+        runtime_window_tokens=750_000,
     )
     _check(
         measured == (750_000, "runtime-reported", False),
@@ -219,10 +224,12 @@ def test_is_rotation_due_false_strictly_below_threshold() -> None:
     just_below = int(ceiling * rt.ROTATION_THRESHOLD_FRACTION) - 1
     _check(
         rt.is_rotation_due(
-            model="unknown", current_tokens=just_below, cache_cold=False,
-        ) is False,
-        "one token below the threshold fraction -> not due (and the band half is "
-        "warm_keep at 49,999, so the fraction half is what is under test here)",
+            model="unknown",
+            current_tokens=just_below,
+            cache_cold=False,
+        )
+        is False,
+        "one token below the threshold fraction -> not due (and the band half is warm_keep at 49,999, so the fraction half is what is under test here)",
     )
 
 
@@ -231,60 +238,42 @@ def test_is_rotation_due_true_at_exact_threshold_boundary() -> None:
     at_threshold = int(ceiling * rt.ROTATION_THRESHOLD_FRACTION)
     _check(
         rt.is_rotation_due(
-            model="unknown", current_tokens=at_threshold, cache_cold=False,
-        ) is True,
+            model="unknown",
+            current_tokens=at_threshold,
+            cache_cold=False,
+        )
+        is True,
         "exactly at the threshold fraction -> due (kills a strict-greater-than mutation)",
     )
 
 
-def test_watch_threshold_constants_match_ratified_values() -> None:
-    """Structural drift guard, same pattern as the ceiling-table key-set test
-    above -- these four values were individually ratified (P4(a) ratification
-    condition 4); a silent edit to any of them should fail this smoke, not
-    slip through unnoticed."""
-    _check(
-        rt.WATCH_POLL_INTERVAL_SECONDS == 60,
-        "WATCH_POLL_INTERVAL_SECONDS matches its ratified value (60s)",
-    )
-    _check(
-        rt.IDLE_POKE_THRESHOLD_SECONDS == 300,
-        "IDLE_POKE_THRESHOLD_SECONDS matches its ratified value (300s)",
-    )
-    _check(
-        rt.IDLE_ROTATE_THRESHOLD_SECONDS == 2100,
-        "IDLE_ROTATE_THRESHOLD_SECONDS matches its ratified value (2100s)",
-    )
-    _check(
-        rt.POKE_COOLDOWN_SECONDS == 1800,
-        "POKE_COOLDOWN_SECONDS matches its ratified value (1800s)",
-    )
+def test_the_seat_idle_watcher_surface_is_gone() -> None:
+    """r74 W2 a09: the seat idle watcher polled a seat's pane and inbox on an
+    interval and typed a fixed wake turn into it. It, its tunables and its
+    driver text are deleted; nothing may bring the tunables or the text back.
+    Absence is asserted against the production module and the production
+    driver-text catalog, not a fixture."""
+    from agent_messaging_plugin.driver_texts import render_driver_text
 
-
-def test_poke_threshold_is_strictly_below_rotate_threshold() -> None:
-    """Load-bearing ordering, not just individual values: the poke path is
-    supposed to have a chance to fire and drain pending mail well before the
-    rotate path would otherwise trigger (P4(a).4 precedence design -- poke
-    evaluated first, and only wins the race if its threshold is the smaller
-    one). If a future edit ever inverted this ordering, poke would never have
-    a window to act before rotate did instead."""
-    _check(
-        rt.IDLE_POKE_THRESHOLD_SECONDS < rt.IDLE_ROTATE_THRESHOLD_SECONDS,
-        "poke threshold is strictly below rotate threshold, preserving the "
-        "poke-fires-first design window",
-    )
-
-
-def test_rotate_threshold_is_margined_below_cache_ttl_floor() -> None:
-    """The trade-off documented on IDLE_ROTATE_THRESHOLD_SECONDS is only real
-    if the number itself actually sits below the fleet's conservative 45-min
-    cache-TTL floor -- this pins that margin so it can't silently drift past
-    the boundary it exists to stay ahead of."""
-    conservative_ttl_floor_seconds = 45 * 60
-    _check(
-        rt.IDLE_ROTATE_THRESHOLD_SECONDS < conservative_ttl_floor_seconds,
-        "rotate threshold fires strictly before the conservative 45-minute "
-        "cache-TTL floor, not at or after it",
-    )
+    for name in (
+        "IDLE_POKE_THRESHOLD_SECONDS",
+        "IDLE_ROTATE_THRESHOLD_SECONDS",
+        "WATCH_POLL_INTERVAL_SECONDS",
+        "POKE_COOLDOWN_SECONDS",
+    ):
+        _check(
+            not hasattr(rt, name) and name not in rt.__all__,
+            f"rotation_thresholds neither defines nor exports {name}",
+        )
+    try:
+        render_driver_text("seat.poke")
+    except RuntimeError as exc:
+        _check(
+            "cannot be loaded" in str(exc),
+            "the driver text catalog has no text_key seat.poke (loader refuses it)",
+        )
+    else:
+        _check(False, "the driver text catalog has no text_key seat.poke (loader refused nothing)")
 
 
 def test_h_is_the_sum_of_its_measured_parts() -> None:
@@ -307,21 +296,17 @@ def test_h_is_the_sum_of_its_measured_parts() -> None:
     # boot half untouched, which is exactly the shape a total-only pin cannot
     # express.
     _check(rt.POLICY_H_BOOT_TOKENS == 43_474, "boot payload is the measured 43,474")
-    _check(rt.POLICY_H_REHYDRATION_TOKENS == 38_415,
-           "incremental rehydration is the measured 38,415")
+    _check(rt.POLICY_H_REHYDRATION_TOKENS == 38_415, "incremental rehydration is the measured 38,415")
 
 
 def test_warm_bands_are_ordered_and_exhaustive() -> None:
     """Every warm size lands in exactly one band, and the boundaries ascend.
     An unordered band table silently swallows a whole range."""
     _check(
-        rt.WARM_BAND_KEEP_WORKING_TOKENS
-        < rt.WARM_BAND_TASK_BOUNDARY_TOKENS
-        < rt.WARM_BAND_SAFE_CHECKPOINT_TOKENS,
+        rt.WARM_BAND_KEEP_WORKING_TOKENS < rt.WARM_BAND_TASK_BOUNDARY_TOKENS < rt.WARM_BAND_SAFE_CHECKPOINT_TOKENS,
         "warm band boundaries ascend",
     )
-    seen = {rt.rotation_band(n, cache_cold=False)[0]
-            for n in (0, 149_999, 150_000, 199_999, 200_000, 299_999, 300_000, 10**7)}
+    seen = {rt.rotation_band(n, cache_cold=False)[0] for n in (0, 149_999, 150_000, 199_999, 200_000, 299_999, 300_000, 10**7)}
     _check(
         seen == {"warm_keep", "warm_task_boundary", "warm_safe_checkpoint", "warm_immediate"},
         "every warm size resolves to exactly one of the four bands",
@@ -332,12 +317,9 @@ def test_band_boundaries_are_inclusive_where_the_policy_says_so() -> None:
     """The crossing tick is the one that matters: a >-only comparison misses
     the exact boundary, which is the same defect this file already guards for
     is_rotation_due."""
-    _check(rt.rotation_band(149_999, cache_cold=False)[0] == "warm_keep",
-           "just under 150K still keeps working")
-    _check(rt.rotation_band(150_000, cache_cold=False)[0] == "warm_task_boundary",
-           "exactly 150K has crossed into the task-boundary band")
-    _check(rt.rotation_band(300_000, cache_cold=False)[0] == "warm_immediate",
-           "exactly 300K rotates immediately, not at the next checkpoint")
+    _check(rt.rotation_band(149_999, cache_cold=False)[0] == "warm_keep", "just under 150K still keeps working")
+    _check(rt.rotation_band(150_000, cache_cold=False)[0] == "warm_task_boundary", "exactly 150K has crossed into the task-boundary band")
+    _check(rt.rotation_band(300_000, cache_cold=False)[0] == "warm_immediate", "exactly 300K rotates immediately, not at the next checkpoint")
 
 
 def test_cold_is_a_different_question_not_a_stricter_band() -> None:
@@ -348,22 +330,12 @@ def test_cold_is_a_different_question_not_a_stricter_band() -> None:
     # The probe is DERIVED (see `_BELOW_H_TOKENS`); the two bounds it has to sit
     # inside are asserted here rather than trusted, so a future H that strands
     # it says so instead of quietly re-labelling the case.
-    _check(_BELOW_H_TOKENS < rt.POLICY_H_TOKENS,
-           f"the below-H probe {_BELOW_H_TOKENS:,} really is below H "
-           f"({rt.POLICY_H_TOKENS:,})")
-    _check(_BELOW_H_TOKENS < rt.WARM_BAND_KEEP_WORKING_TOKENS,
-           f"...and below the first warm band ({rt.WARM_BAND_KEEP_WORKING_TOKENS:,}), "
-           "so warm and cold agree there for DIFFERENT reasons, which is the "
-           "case this test is about")
-    _check(rt.rotation_band(_BELOW_H_TOKENS, cache_cold=True)[0] == "cold_below_h",
-           "cold and under H -> keep working; a clear would cost more than it saves")
-    _check(rt.rotation_band(250_000, cache_cold=True)[0] == "cold_above_h",
-           "cold and over H -> rotate")
-    _check(rt.rotation_band(_BELOW_H_TOKENS, cache_cold=False)[0] == "warm_keep",
-           f"the same {_BELOW_H_TOKENS:,} warm is also keep -- but for a "
-           "different reason")
-    _check(rt.rotation_band(250_000, cache_cold=False)[0] == "warm_safe_checkpoint",
-           "the same 250K warm waits for a safe checkpoint rather than rotating now")
+    _check(_BELOW_H_TOKENS < rt.POLICY_H_TOKENS, f"the below-H probe {_BELOW_H_TOKENS:,} really is below H ({rt.POLICY_H_TOKENS:,})")
+    _check(_BELOW_H_TOKENS < rt.WARM_BAND_KEEP_WORKING_TOKENS, f"...and below the first warm band ({rt.WARM_BAND_KEEP_WORKING_TOKENS:,}), so warm and cold agree there for DIFFERENT reasons, which is the case this test is about")
+    _check(rt.rotation_band(_BELOW_H_TOKENS, cache_cold=True)[0] == "cold_below_h", "cold and under H -> keep working; a clear would cost more than it saves")
+    _check(rt.rotation_band(250_000, cache_cold=True)[0] == "cold_above_h", "cold and over H -> rotate")
+    _check(rt.rotation_band(_BELOW_H_TOKENS, cache_cold=False)[0] == "warm_keep", f"the same {_BELOW_H_TOKENS:,} warm is also keep -- but for a different reason")
+    _check(rt.rotation_band(250_000, cache_cold=False)[0] == "warm_safe_checkpoint", "the same 250K warm waits for a safe checkpoint rather than rotating now")
     # THE DISCRIMINATING VALUE. The below-H probe and 250K cannot tell
     # "compares against H"
     # apart from "compares against the 150K warm band" -- both thresholds sort
@@ -374,14 +346,9 @@ def test_cold_is_a_different_question_not_a_stricter_band() -> None:
     # was blind to exactly the collapse it is named after. The probe is
     # DERIVED (see `_DISCRIMINATING_TOKENS`) so a future H re-measurement moves
     # it with the threshold rather than stranding it on the wrong side.
-    _check(rt.WARM_BAND_KEEP_WORKING_TOKENS > rt.POLICY_H_TOKENS,
-           "H sits BELOW the first warm band -- there is a range that separates them")
-    _check(rt.rotation_band(_DISCRIMINATING_TOKENS, cache_cold=True)[0] == "cold_above_h",
-           f"{_DISCRIMINATING_TOKENS:,} cold is ABOVE H -> rotate, even though the "
-           "same size warm would keep working")
-    _check(rt.rotation_band(_DISCRIMINATING_TOKENS, cache_cold=False)[0] == "warm_keep",
-           f"{_DISCRIMINATING_TOKENS:,} warm keeps working -- the same size, "
-           "opposite verdicts by cache state")
+    _check(rt.WARM_BAND_KEEP_WORKING_TOKENS > rt.POLICY_H_TOKENS, "H sits BELOW the first warm band -- there is a range that separates them")
+    _check(rt.rotation_band(_DISCRIMINATING_TOKENS, cache_cold=True)[0] == "cold_above_h", f"{_DISCRIMINATING_TOKENS:,} cold is ABOVE H -> rotate, even though the same size warm would keep working")
+    _check(rt.rotation_band(_DISCRIMINATING_TOKENS, cache_cold=False)[0] == "warm_keep", f"{_DISCRIMINATING_TOKENS:,} warm keeps working -- the same size, opposite verdicts by cache state")
 
 
 def test_the_discriminating_window_is_real() -> None:
@@ -403,20 +370,14 @@ def test_the_discriminating_window_is_real() -> None:
     them, so it cannot pass by agreeing with a stale transcription.
     """
     width = rt.WARM_BAND_KEEP_WORKING_TOKENS - rt.POLICY_H_TOKENS
-    _check(width > 0,
-           f"the H-to-first-warm-band window is non-empty (width {width:,}) -- "
-           "without it no size can tell the cold axis from the warm one")
-    _check(rt.POLICY_H_TOKENS < _DISCRIMINATING_TOKENS < rt.WARM_BAND_KEEP_WORKING_TOKENS,
-           f"the derived probe {_DISCRIMINATING_TOKENS:,} lands STRICTLY inside "
-           f"({rt.POLICY_H_TOKENS:,}, {rt.WARM_BAND_KEEP_WORKING_TOKENS:,})")
+    _check(width > 0, f"the H-to-first-warm-band window is non-empty (width {width:,}) -- without it no size can tell the cold axis from the warm one")
+    _check(rt.POLICY_H_TOKENS < _DISCRIMINATING_TOKENS < rt.WARM_BAND_KEEP_WORKING_TOKENS, f"the derived probe {_DISCRIMINATING_TOKENS:,} lands STRICTLY inside ({rt.POLICY_H_TOKENS:,}, {rt.WARM_BAND_KEEP_WORKING_TOKENS:,})")
     # The probe must also be low enough that the FRACTION half of the union
     # cannot be what decides the cold/warm split -- otherwise the cold-axis
     # tests would be green for a reason that has nothing to do with the cache.
     _check(
-        _DISCRIMINATING_TOKENS
-        < rt.resolve_ceiling("claude-opus-5") * rt.ROTATION_THRESHOLD_FRACTION,
-        "the probe is below the fraction threshold on a 1M ceiling, so the "
-        "fraction half of the union decides neither answer",
+        _DISCRIMINATING_TOKENS < rt.resolve_ceiling("claude-opus-5") * rt.ROTATION_THRESHOLD_FRACTION,
+        "the probe is below the fraction threshold on a 1M ceiling, so the fraction half of the union decides neither answer",
     )
 
 
@@ -425,11 +386,9 @@ def test_clearing_wins_needs_calls_to_amortise_over() -> None:
     amortised, so a clear cannot win no matter how large C is -- the guard
     against 'rotate at the very end of the work', which pays the rewrite and
     then throws it away."""
-    _check(not rt.clearing_wins(10_000_000, 0),
-           "N=0 -> clearing never wins, however large the context")
+    _check(not rt.clearing_wins(10_000_000, 0), "N=0 -> clearing never wins, however large the context")
     _check(not rt.clearing_wins(10_000_000, -3), "negative N is refused too")
-    _check(rt.clearing_wins(559_000, 50),
-           "the 559K case with 50 calls ahead: clearing wins")
+    _check(rt.clearing_wins(559_000, 50), "the 559K case with 50 calls ahead: clearing wins")
     # ★ MUST BE ABOVE H (GAU-05, 2026-08-19). This probe exists to exercise the
     # AMORTISATION term, so it has to be a context a clear could plausibly pay
     # for -- i.e. C > H -- and lose only because N is too small. The old literal
@@ -442,14 +401,9 @@ def test_clearing_wins_needs_calls_to_amortise_over() -> None:
     # its own subject. Derived from H for the same reason the discriminating
     # size is.
     _amortisation_probe = rt.POLICY_H_TOKENS + 50_000
-    _check(_amortisation_probe > rt.POLICY_H_TOKENS,
-           "the amortisation probe sits ABOVE H, so only N can decide it")
-    _check(not rt.clearing_wins(_amortisation_probe, 2),
-           f"{_amortisation_probe:,} (above H) with only 2 calls ahead: clearing "
-           "loses -- the rewrite never amortises")
-    _check(rt.clearing_wins(_amortisation_probe, 10_000),
-           "...and the SAME context with plenty of calls ahead wins -- so N, not "
-           "size, is what the previous assertion measured")
+    _check(_amortisation_probe > rt.POLICY_H_TOKENS, "the amortisation probe sits ABOVE H, so only N can decide it")
+    _check(not rt.clearing_wins(_amortisation_probe, 2), f"{_amortisation_probe:,} (above H) with only 2 calls ahead: clearing loses -- the rewrite never amortises")
+    _check(rt.clearing_wins(_amortisation_probe, 10_000), "...and the SAME context with plenty of calls ahead wins -- so N, not size, is what the previous assertion measured")
 
 
 def test_the_superseded_fraction_survives_as_a_hint_only() -> None:
@@ -457,12 +411,9 @@ def test_the_superseded_fraction_survives_as_a_hint_only() -> None:
     it. This pins that it was not silently repurposed as the policy: it is a
     fraction, the policy is absolute token counts, and the two must not drift
     into each other."""
-    _check(isinstance(rt.ROTATION_THRESHOLD_FRACTION, float),
-           "the legacy hint is still a FRACTION, not a token count")
+    _check(isinstance(rt.ROTATION_THRESHOLD_FRACTION, float), "the legacy hint is still a FRACTION, not a token count")
     _check(rt.ROTATION_THRESHOLD_FRACTION == 0.5, "the hint is unchanged at 0.5")
-    _check(type(rt.WARM_BAND_KEEP_WORKING_TOKENS) is int
-           and rt.WARM_BAND_KEEP_WORKING_TOKENS > 1_000,
-           "the policy bands are absolute token counts, not fractions")
+    _check(type(rt.WARM_BAND_KEEP_WORKING_TOKENS) is int and rt.WARM_BAND_KEEP_WORKING_TOKENS > 1_000, "the policy bands are absolute token counts, not fractions")
 
 
 def _call(offset_s: float, *, cold: bool, base: datetime) -> rt.AssistantCall:
@@ -477,42 +428,30 @@ def test_post_clear_rewrite_is_not_evidence_of_a_cold_cache() -> None:
     it is cold BY CONSTRUCTION. Counting it makes every rotation immediately
     recommend another rotation."""
     base = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
-    st = rt.classify_cache_state(
-        [_call(1, cold=True, base=base)], base + timedelta(seconds=2), cleared_at=base)
+    st = rt.classify_cache_state([_call(1, cold=True, base=base)], base + timedelta(seconds=2), cleared_at=base)
     _check(not st.cold, "the post-clear rewrite alone is NOT a cold cache")
-    st = rt.classify_cache_state(
-        [_call(1, cold=True, base=base), _call(2, cold=False, base=base)],
-        base + timedelta(seconds=3), cleared_at=base)
+    st = rt.classify_cache_state([_call(1, cold=True, base=base), _call(2, cold=False, base=base)], base + timedelta(seconds=3), cleared_at=base)
     _check(not st.cold, "post-clear rewrite then a warm call -> warm")
 
 
 def test_isolated_cold_call_is_the_resolved_idle_case() -> None:
     base = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
-    st = rt.classify_cache_state(
-        [_call(0, cold=False, base=base), _call(7200, cold=True, base=base)],
-        base + timedelta(seconds=7210), cleared_at=None)
-    _check(not st.cold and not st.overage_signature,
-           "ONE cold call after a long gap = idle case resolved, warm bands apply")
+    st = rt.classify_cache_state([_call(0, cold=False, base=base), _call(7200, cold=True, base=base)], base + timedelta(seconds=7210), cleared_at=None)
+    _check(not st.cold and not st.overage_signature, "ONE cold call after a long gap = idle case resolved, warm bands apply")
 
 
 def test_repeated_cold_calls_across_short_gaps_are_the_overage_signature() -> None:
     base = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
-    st = rt.classify_cache_state(
-        [_call(0, cold=False, base=base), _call(60, cold=True, base=base),
-         _call(120, cold=True, base=base)],
-        base + timedelta(seconds=130), cleared_at=None)
-    _check(st.cold and st.overage_signature,
-           "TWO cold calls across sub-TTL gaps = overage signature")
+    st = rt.classify_cache_state([_call(0, cold=False, base=base), _call(60, cold=True, base=base), _call(120, cold=True, base=base)], base + timedelta(seconds=130), cleared_at=None)
+    _check(st.cold and st.overage_signature, "TWO cold calls across sub-TTL gaps = overage signature")
 
 
 def test_ttl_lapse_is_caught_even_when_the_last_call_read_cache() -> None:
     """The robustness half. cache_read==0 is structurally blind to a PARTIAL
     cache read after the TTL lapsed; the age comparison is not."""
     base = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
-    st = rt.classify_cache_state(
-        [_call(0, cold=False, base=base)], base + timedelta(seconds=4000), cleared_at=None)
-    _check(st.cold and not st.overage_signature,
-           "past the TTL -> cold, even though that call read cache fine")
+    st = rt.classify_cache_state([_call(0, cold=False, base=base)], base + timedelta(seconds=4000), cleared_at=None)
+    _check(st.cold and not st.overage_signature, "past the TTL -> cold, even though that call read cache fine")
 
 
 def test_transcript_parser_refuses_a_naive_timestamp() -> None:
@@ -524,8 +463,7 @@ def test_transcript_parser_refuses_a_naive_timestamp() -> None:
         _check(False, "a naive timestamp is REFUSED, never assumed to be UTC")
     except rt.TimestampAwarenessError:
         _check(True, "a naive timestamp is REFUSED, never assumed to be UTC")
-    _check(rt.parse_transcript_timestamp("2026-08-16T20:04:13.422Z").tzinfo is not None,
-           "an aware Z timestamp parses")
+    _check(rt.parse_transcript_timestamp("2026-08-16T20:04:13.422Z").tzinfo is not None, "an aware Z timestamp parses")
 
 
 # ---------------------------------------------------------------------------
@@ -560,10 +498,12 @@ def test_rotation_due_covers_the_whole_actionable_range() -> None:
         )
         _check(
             rt.is_rotation_due(
-                model="claude-opus-5", current_tokens=tokens, cache_cold=False,
-            ) is True,
-            f"{tokens:,} on a 1M ceiling is rotation-due -- the band decides here, "
-            f"and the old fraction hint said False for all 200,000 tokens of this range",
+                model="claude-opus-5",
+                current_tokens=tokens,
+                cache_cold=False,
+            )
+            is True,
+            f"{tokens:,} on a 1M ceiling is rotation-due -- the band decides here, and the old fraction hint said False for all 200,000 tokens of this range",
         )
 
 
@@ -589,22 +529,25 @@ def test_a_small_ceiling_model_is_still_due_at_its_own_fraction() -> None:
     _check(ceiling == 200_000, "the decoy is stated against a real 200K-ceiling model")
     _check(
         rt.rotation_band(100_000, cache_cold=False)[0] == "warm_keep",
-        "at 100,000 the ECONOMICS band still says keep working -- so a pure-band "
-        "definition of rotation_due returns False here",
+        "at 100,000 the ECONOMICS band still says keep working -- so a pure-band definition of rotation_due returns False here",
     )
     _check(
         rt.is_rotation_due(
-            model="claude-haiku-4-5", current_tokens=100_000, cache_cold=False,
-        ) is True,
-        "...and rotation_due is True anyway, because 100,000 is 0.5 of this model's "
-        "OWN 200,000 ceiling -- the fraction half is load-bearing, not vestigial",
+            model="claude-haiku-4-5",
+            current_tokens=100_000,
+            cache_cold=False,
+        )
+        is True,
+        "...and rotation_due is True anyway, because 100,000 is 0.5 of this model's OWN 200,000 ceiling -- the fraction half is load-bearing, not vestigial",
     )
     _check(
         rt.is_rotation_due(
-            model="claude-haiku-4-5", current_tokens=99_999, cache_cold=False,
-        ) is False,
-        "one token below its own halfway point is NOT due -- the fraction half still "
-        "has a real boundary, it was not widened into always-true",
+            model="claude-haiku-4-5",
+            current_tokens=99_999,
+            cache_cold=False,
+        )
+        is False,
+        "one token below its own halfway point is NOT due -- the fraction half still has a real boundary, it was not widened into always-true",
     )
 
 
@@ -621,24 +564,21 @@ def test_the_union_can_only_ever_notify_more() -> None:
     """
     for model in ("claude-opus-5", "claude-haiku-4-5", "a-model-nobody-added"):
         ceiling = rt.resolve_ceiling(model)
-        for tokens in (0, 1, 49_999, 50_000, 99_999, 100_000,
-                       rt.POLICY_H_TOKENS, _DISCRIMINATING_TOKENS,
-                       149_999, 150_000, 199_999, 200_000, 299_999, 300_000,
-                       499_999, 500_000, 750_000, 900_000, 1_500_000):
+        for tokens in (0, 1, 49_999, 50_000, 99_999, 100_000, rt.POLICY_H_TOKENS, _DISCRIMINATING_TOKENS, 149_999, 150_000, 199_999, 200_000, 299_999, 300_000, 499_999, 500_000, 750_000, 900_000, 1_500_000):
             for cold in (True, False):
                 historical = tokens >= ceiling * rt.ROTATION_THRESHOLD_FRACTION
                 now = rt.is_rotation_due(
-                    model=model, current_tokens=tokens, cache_cold=cold,
+                    model=model,
+                    current_tokens=tokens,
+                    cache_cold=cold,
                 )
                 if historical and not now:
                     _check(
                         False,
-                        f"MONOTONICITY BROKEN: {model} at {tokens:,} cold={cold} was "
-                        f"due under the old fraction rule and is not due now",
+                        f"MONOTONICITY BROKEN: {model} at {tokens:,} cold={cold} was due under the old fraction rule and is not due now",
                     )
                     return
-    _check(True, "across 3 ceilings x 19 sizes x 2 cache states, every session the old "
-                 "fraction rule called due is still due -- the union only ever adds")
+    _check(True, "across 3 ceilings x 19 sizes x 2 cache states, every session the old fraction rule called due is still due -- the union only ever adds")
 
 
 def test_capacity_can_never_be_the_reason_a_session_is_due() -> None:
@@ -660,10 +600,7 @@ def test_capacity_can_never_be_the_reason_a_session_is_due() -> None:
     """
     _check(
         rt.CAPACITY_BAND_APPROACHING_FRACTION > rt.ROTATION_THRESHOLD_FRACTION,
-        "the first capacity band (0.75) sits ABOVE the rotation fraction hint (0.5), "
-        "so the fraction term fires first on every ceiling -- this inequality is what "
-        "makes the two-term union complete, and the union must gain a capacity term "
-        "if it is ever reversed",
+        "the first capacity band (0.75) sits ABOVE the rotation fraction hint (0.5), so the fraction term fires first on every ceiling -- this inequality is what makes the two-term union complete, and the union must gain a capacity term if it is ever reversed",
     )
     for model in ("claude-opus-5", "claude-haiku-4-5", "a-model-nobody-added"):
         ceiling = rt.resolve_ceiling(model)
@@ -674,8 +611,11 @@ def test_capacity_can_never_be_the_reason_a_session_is_due() -> None:
         )
         _check(
             rt.is_rotation_due(
-                model=model, current_tokens=approaching, cache_cold=False,
-            ) is True,
+                model=model,
+                current_tokens=approaching,
+                cache_cold=False,
+            )
+            is True,
             f"{model}: it is already due there for a reason that is NOT capacity",
         )
 
@@ -693,18 +633,21 @@ def test_a_cold_cache_above_h_is_due_where_the_same_size_warm_is_not() -> None:
     """
     _check(
         rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=True,
-        ) is True,
-        "the discriminating size with a COLD cache is due -- the context is "
-        "re-paid at full price "
-        "on the next call whether or not you rotate",
+            model="claude-opus-5",
+            current_tokens=_DISCRIMINATING_TOKENS,
+            cache_cold=True,
+        )
+        is True,
+        "the discriminating size with a COLD cache is due -- the context is re-paid at full price on the next call whether or not you rotate",
     )
     _check(
         rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=False,
-        ) is False,
-        "the same size WARM is not due -- same size, opposite verdicts by cache "
-        "state, and the fraction is identical in both",
+            model="claude-opus-5",
+            current_tokens=_DISCRIMINATING_TOKENS,
+            cache_cold=False,
+        )
+        is False,
+        "the same size WARM is not due -- same size, opposite verdicts by cache state, and the fraction is identical in both",
     )
 
 
@@ -722,18 +665,25 @@ def test_unmeasured_cache_state_is_treated_as_warm_never_upgraded_to_cold() -> N
     """
     _check(
         rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=None,
-        ) is False,
+            model="claude-opus-5",
+            current_tokens=_DISCRIMINATING_TOKENS,
+            cache_cold=None,
+        )
+        is False,
         "an UNMEASURED cache state answers exactly as warm does, not as cold",
     )
     _check(
         rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=None,
-        ) == rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=False,
+            model="claude-opus-5",
+            current_tokens=_DISCRIMINATING_TOKENS,
+            cache_cold=None,
+        )
+        == rt.is_rotation_due(
+            model="claude-opus-5",
+            current_tokens=_DISCRIMINATING_TOKENS,
+            cache_cold=False,
         ),
-        "...and it is the SAME answer as warm at the one size where warm and cold "
-        "differ -- so None is the warm default, not a third behaviour",
+        "...and it is the SAME answer as warm at the one size where warm and cold differ -- so None is the warm default, not a third behaviour",
     )
 
 
@@ -749,22 +699,17 @@ def test_overage_cannot_change_which_band_a_size_falls_in() -> None:
     ever makes a band boundary overage-dependent, the union acquires a real
     missing input and this test says so.
     """
-    for tokens in (0, _BELOW_H_TOKENS, rt.POLICY_H_TOKENS, _DISCRIMINATING_TOKENS,
-                   149_999, 150_000, 200_000,
-                   250_000, 300_000, 500_000):
+    for tokens in (0, _BELOW_H_TOKENS, rt.POLICY_H_TOKENS, _DISCRIMINATING_TOKENS, 149_999, 150_000, 200_000, 250_000, 300_000, 500_000):
         for cold in (True, False):
             nominal = rt.rotation_band(tokens, cache_cold=cold, overage=False)[0]
             collapsed = rt.rotation_band(tokens, cache_cold=cold, overage=True)[0]
             if nominal != collapsed:
                 _check(
                     False,
-                    f"overage MOVED a band at {tokens:,} cold={cold}: "
-                    f"{nominal} -> {collapsed}; the union now needs an overage input",
+                    f"overage MOVED a band at {tokens:,} cold={cold}: {nominal} -> {collapsed}; the union now needs an overage input",
                 )
                 return
-    _check(True, "across 10 sizes x 2 cache states the collapsed-TTL premium changes the "
-                 "quoted horizon but never the band NAME -- so it cannot change whether "
-                 "a session is rotation-due")
+    _check(True, "across 10 sizes x 2 cache states the collapsed-TTL premium changes the quoted horizon but never the band NAME -- so it cannot change whether a session is rotation-due")
 
 
 def test_the_two_entry_points_agree_on_the_models_own_ceiling() -> None:
@@ -780,25 +725,25 @@ def test_the_two_entry_points_agree_on_the_models_own_ceiling() -> None:
     """
     for model in ("claude-opus-5", "claude-haiku-4-5", "a-model-nobody-added"):
         ceiling = rt.resolve_ceiling(model)
-        for tokens in (0, 99_999, 100_000, 149_999, 150_000, 299_999,
-                       300_000, 499_999, 500_000, 900_000):
+        for tokens in (0, 99_999, 100_000, 149_999, 150_000, 299_999, 300_000, 499_999, 500_000, 900_000):
             for cold in (True, False, None):
                 by_model = rt.is_rotation_due(
-                    model=model, current_tokens=tokens, cache_cold=cold,
+                    model=model,
+                    current_tokens=tokens,
+                    cache_cold=cold,
                 )
                 by_ceiling = rt.is_rotation_due_for_ceiling(
-                    ceiling=ceiling, current_tokens=tokens, cache_cold=cold,
+                    ceiling=ceiling,
+                    current_tokens=tokens,
+                    cache_cold=cold,
                 )
                 if by_model != by_ceiling:
                     _check(
                         False,
-                        f"the two entry points DISAGREE for {model} at {tokens:,} "
-                        f"cold={cold}: model-form {by_model}, ceiling-form {by_ceiling}",
+                        f"the two entry points DISAGREE for {model} at {tokens:,} cold={cold}: model-form {by_model}, ceiling-form {by_ceiling}",
                     )
                     return
-    _check(True, "across 3 models x 10 sizes x 3 cache states the model-taking delegate "
-                 "and the ceiling-taking core return the same verdict -- one predicate, "
-                 "two entry points, not two predicates")
+    _check(True, "across 3 models x 10 sizes x 3 cache states the model-taking delegate and the ceiling-taking core return the same verdict -- one predicate, two entry points, not two predicates")
 
 
 def test_the_frozen_out_of_tree_call_shape_still_works() -> None:
@@ -820,22 +765,20 @@ def test_the_frozen_out_of_tree_call_shape_still_works() -> None:
     """
     _check(
         rt.is_rotation_due(model="claude-opus-5", current_tokens=350_000) is True,
-        "the frozen two-argument call shape still resolves -- AND it now returns "
-        "True at 350,000, so a copy nobody can update inherits the fix",
+        "the frozen two-argument call shape still resolves -- AND it now returns True at 350,000, so a copy nobody can update inherits the fix",
     )
     _check(
         rt.is_rotation_due(model="claude-opus-5", current_tokens=10_000) is False,
-        "...without becoming always-true: the same frozen shape still says no "
-        "where neither axis fires",
+        "...without becoming always-true: the same frozen shape still says no where neither axis fires",
     )
     _check(
         rt.is_rotation_due(model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS)
         == rt.is_rotation_due(
-            model="claude-opus-5", current_tokens=_DISCRIMINATING_TOKENS, cache_cold=None,
+            model="claude-opus-5",
+            current_tokens=_DISCRIMINATING_TOKENS,
+            cache_cold=None,
         ),
-        "...and omitting the argument is EXACTLY the unmeasured case, not a "
-        "fourth behaviour: an absent argument means nobody measured, which is "
-        "what None already means",
+        "...and omitting the argument is EXACTLY the unmeasured case, not a fourth behaviour: an absent argument means nobody measured, which is what None already means",
     )
 
 
@@ -853,7 +796,9 @@ def test_the_ceiling_form_refuses_a_non_positive_ceiling() -> None:
     for bad in (0, -1):
         try:
             rt.is_rotation_due_for_ceiling(
-                ceiling=bad, current_tokens=400_000, cache_cold=False,
+                ceiling=bad,
+                current_tokens=400_000,
+                cache_cold=False,
             )
         except ValueError:
             _check(True, f"a ceiling of {bad} is refused rather than defaulted")
@@ -863,30 +808,31 @@ def test_the_ceiling_form_refuses_a_non_positive_ceiling() -> None:
 
 def test_rotation_notice_boundaries_and_sources() -> None:
     """The operator rule is one derived boundary, never an economics band."""
+
     def verdict(
-        *, model: str, window: int | None, tokens: int, hard: int = 400_000,
+        *,
+        model: str,
+        window: int | None,
+        tokens: int,
+        hard: int = 400_000,
     ) -> rt.RotationNoticeDecision:
         return rt.rotation_notice_verdict(
-            model=model, effort="high", current_tokens=tokens,
-            runtime_window_tokens=window, configured_hard_clear_tokens=hard,
+            model=model,
+            effort="high",
+            current_tokens=tokens,
+            runtime_window_tokens=window,
+            configured_hard_clear_tokens=hard,
         )
 
-    _check(not verdict(model="claude-fable-5", window=1_000_000, tokens=319_999).due,
-           "319,999 is below the 400K hard-clear-derived notice")
-    _check(verdict(model="claude-fable-5", window=1_000_000, tokens=320_000).due,
-           "320,000 is the one 80% notice point")
-    _check(not verdict(model="claude-fable-5", window=1_000_000, tokens=399_999, hard=500_000).due,
-           "raising hard clear to 500K moves the boundary, not a copied literal")
-    _check(verdict(model="claude-fable-5", window=1_000_000, tokens=400_000, hard=500_000).due,
-           "500K hard clear notices at 400K")
-    _check(not verdict(model="claude-haiku-4-5", window=200_000, tokens=143_999).due,
-           "200K runtime window is quiet at 143,999")
+    _check(not verdict(model="claude-fable-5", window=1_000_000, tokens=319_999).due, "319,999 is below the 400K hard-clear-derived notice")
+    _check(verdict(model="claude-fable-5", window=1_000_000, tokens=320_000).due, "320,000 is the one 80% notice point")
+    _check(not verdict(model="claude-fable-5", window=1_000_000, tokens=399_999, hard=500_000).due, "raising hard clear to 500K moves the boundary, not a copied literal")
+    _check(verdict(model="claude-fable-5", window=1_000_000, tokens=400_000, hard=500_000).due, "500K hard clear notices at 400K")
+    _check(not verdict(model="claude-haiku-4-5", window=200_000, tokens=143_999).due, "200K runtime window is quiet at 143,999")
     haiku = verdict(model="claude-haiku-4-5", window=200_000, tokens=144_000)
-    _check(haiku.due and haiku.notice_at_tokens == 144_000,
-           "200K runtime window uses the 180K compaction bound and notices at 144K")
+    _check(haiku.due and haiku.notice_at_tokens == 144_000, "200K runtime window uses the 180K compaction bound and notices at 144K")
     unknown = verdict(model="unrecognised", window=None, tokens=320_000)
-    _check(unknown.due and unknown.unrecognized_model and unknown.window_tokens is None,
-           "unknown model uses hard-clear fallback and surfaces that it was unrecognised")
+    _check(unknown.due and unknown.unrecognized_model and unknown.window_tokens is None, "unknown model uses hard-clear fallback and surfaces that it was unrecognised")
 
 
 def main() -> int:
@@ -897,9 +843,7 @@ def main() -> int:
     test_unknown_model_resolves_to_conservative_fallback()
     test_fable_51_is_recognized_but_its_window_is_unverified()
     test_known_model_resolves_to_its_own_ceiling_not_the_fallback()
-    test_watch_threshold_constants_match_ratified_values()
-    test_poke_threshold_is_strictly_below_rotate_threshold()
-    test_rotate_threshold_is_margined_below_cache_ttl_floor()
+    test_the_seat_idle_watcher_surface_is_gone()
     test_h_is_the_sum_of_its_measured_parts()
     test_warm_bands_are_ordered_and_exhaustive()
     test_band_boundaries_are_inclusive_where_the_policy_says_so()

@@ -25,21 +25,38 @@ fix (Dawn ruling arm-11511b07): the ``spawning -> live`` edge fires exactly
 once on first registration, a reconnect self-corrects identity without
 re-firing, and an agent_instance_id with no ledger row is a silent no-op.
 
+THE SCHEMA HOLDS NO WORK MODEL (release 74): the plugin's declarations carry
+no Unit, lane, dispatch, work-class or budget-line column or table.
+``managed_session`` keeps three declarations only as input to
+``session_origin_backfill`` on a direct
+upgrade. The real state-service diff, run in update mode against the
+predecessor declaration, drops every other work-model column and none of the
+three. With a private PostgreSQL (``PRIVATE_TEST_PG_MANIFEST``) the smoke also
+upgrades a populated predecessor schema: the three retired tables are dropped
+by owner-aware retirement and the classifier still reads its three inputs.
+Without one, that proof is a disclosed skip (exit 77) after every other check.
+
 Run:
     .venv/bin/python3 plugins/agent_messaging_plugin/tests/session_lifecycle_store_smoke.py
 """
 
 from __future__ import annotations
 
+import os
+import re
 import sys
+from dataclasses import fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _ROOT = REPO_ROOT
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
+sys.path.insert(0, str(REPO_ROOT / "plugins" / "postgres_state_management_plugin" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -47,40 +64,51 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
+from ananta.config.core_schemas import CoreSchemaDefinitions  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
-from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
+from ananta.llm.agent_messaging.state_results import require_completed, require_records, require_updated  # noqa: E402
+from ananta.services.schema_manager import SchemaManager  # noqa: E402
+from ananta.types.column_types import ColumnType  # noqa: E402
+from ananta.types.schema_standardizer import SchemaStandardizer  # noqa: E402
+from ananta.types.schema_types import ColumnDefinition, IndexDefinition, SchemaDefinition, TableSchema  # noqa: E402
+from postgres_state_management_plugin.postgres_backend.ddl_renderer import resolve_index_name  # noqa: E402
+from postgres_state_management_plugin.postgres_backend.schema_diff import diff_schema  # noqa: E402
 
+from agent_messaging_plugin import schema as schema_module  # noqa: E402
+from agent_messaging_plugin import session_origin_backfill  # noqa: E402
 from agent_messaging_plugin.http_routes import (  # noqa: E402
     _managed_session_registration_backfill,
 )
-from agent_messaging_plugin.register_unit_client import VerbError, assignment_from_record  # noqa: E402
+from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
     LIFECYCLE_RETIRED,
     LIFECYCLE_SPAWNING,
     LIFECYCLE_TERMINATED,
-    TABLE_LANE_CHARTER,
+    TABLE_MANAGED_SESSION,
+    TABLE_SESSION_DEPENDENCY,
     TABLE_SESSION_TRANSITION,
+    get_session_lifecycle_schema_definition,
 )
-from agent_messaging_plugin.session_lifecycle_control import HostAttempt, read_host_attempt  # noqa: E402
+from agent_messaging_plugin.session_lifecycle_control import (  # noqa: E402
+    HostAttempt,
+    read_host_attempt,
+)
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     IllegalLifecycleTransitionError,
-    LaneCharterSpec,
     ManagedSessionSpec,
     SessionNotFoundError,
     StaleLifecycleStateError,
     backfill_registration,
-    capture_lane_charter,
     insert_managed_session,
     iter_managed_sessions_unbounded,
     list_managed_sessions,
     read_managed_session,
-    resolve_lane_charter,
     set_host_ref,
     transition_lifecycle_state,
 )
+from quality_gates.private_test_pg import MANIFEST_ENV, ledger_fixture, skip_fixture  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -108,14 +136,66 @@ def _transition_count(state: StateManagementInterface, agent_instance_id: str) -
     return len(require_records(result))
 
 
+# The work-model columns the predecessor managed_session declared beyond the
+# three upgrade inputs, with their declared types. None had a default, NOT
+# NULL or UNIQUE, so the type is the whole DDL shape.
+_REMOVED_SESSION_COLUMNS: dict[str, ColumnType] = {
+    "lane_id": ColumnType.TEXT,
+    "assignment_sha256": ColumnType.TEXT,
+    "unit_id": ColumnType.TEXT,
+    "dispatch_kind": ColumnType.TEXT,
+    "reviewed_report_vendor": ColumnType.TEXT,
+    "pair_id": ColumnType.TEXT,
+    "scope_tags": ColumnType.JSON,
+    "capability_floors": ColumnType.JSON,
+    "difficulty_score": ColumnType.REAL,
+    "selection_receipt": ColumnType.JSON,
+    "work_class": ColumnType.TEXT,
+    "budget_line": ColumnType.TEXT,
+    "dispatch_id": ColumnType.TEXT,
+    "worktree_disposition": ColumnType.TEXT,
+    "lane_repo_root": ColumnType.TEXT,
+}
+_REMOVED_SESSION_INDEXES = {"idx_managed_session_lane": "lane_id", "idx_managed_session_unit": "unit_id"}
+_REMOVED_DEPENDENCY_COLUMN = "waiter_lane_id"
+_WORK_MODEL_COLUMNS = frozenset({*_REMOVED_SESSION_COLUMNS, _REMOVED_DEPENDENCY_COLUMN})
+# The predecessor's three work-model tables: their id prefixes and a few of
+# their real columns, enough to hold populated rows for the retirement proof.
+_RETIRED_TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "managed_dispatch": ("mdp", ("dispatch_id", "lane_id", "unit_id", "state")),
+    "managed_dispatch_event": ("mde", ("event_id", "dispatch_id", "event_kind")),
+    "lane_charter": ("lch", ("lane_id", "charter_text", "unit_id")),
+}
+# The DDL shape (type, NOT NULL, default) of the three declarations release 74
+# keeps as session_origin_backfill's input on a direct upgrade. Each name is
+# spelled in two pieces, so only _seed_predecessor, which builds the predecessor
+# rows, spells the kept names whole; the order is the one _HISTORICAL_SESSIONS uses.
+_UPGRADE_INPUTS = {
+    "provisioning" + "_mode": (ColumnType.TEXT, True, "worktree"),
+    "brief" + "_ref": (ColumnType.TEXT, False, None),
+    "assign" + "ment": (ColumnType.JSON, False, None),
+}
+# Every column no live writer names: the work-model columns and the three upgrade
+# inputs. The database default fills the one the upgrade still declares NOT NULL.
+_FORMER_COLUMNS = _WORK_MODEL_COLUMNS | frozenset(_UPGRADE_INPUTS)
+_RETIRED_CONSTANTS = (
+    "TABLE_MANAGED_DISPATCH",
+    "MANAGED_DISPATCH_ID_PREFIX",
+    "TABLE_MANAGED_DISPATCH_EVENT",
+    "MANAGED_DISPATCH_EVENT_ID_PREFIX",
+    "TABLE_LANE_CHARTER",
+    "LANE_CHARTER_ID_PREFIX",
+    "WORK_CLASS_READ_ONLY",
+    "WORK_CLASS_ANALYSIS_DELIVERABLE",
+    "WORK_CLASS_PRODUCTION_MUTATION",
+    "CONDITION_LANE_CLOSED",
+)
+
+
 def test_insert_and_read() -> None:
     state = _state()
     spec = ManagedSessionSpec(
         agent_instance_id="agi-spawn-1",
-        lane_id="lane-x",
-        assignment=fixture_assignment(),
-        work_class="analysis_deliverable",
-        budget_line="budget-1",
         host="headless",
         spawned_by_instance_id="agi-spawner",
         spawned_by_role="Claude-C",
@@ -123,8 +203,10 @@ def test_insert_and_read() -> None:
     )
     insert_managed_session(state, spec)
     row = read_managed_session(state, "agi-spawn-1")
+    _check(row["session_origin"] == "unknown", "a store caller without creation evidence records unknown")
+    _check(_FORMER_COLUMNS.isdisjoint(row), f"new rows record no former column (found {sorted(_FORMER_COLUMNS & set(row))})")
     _check(row["lifecycle_state"] == LIFECYCLE_SPAWNING, "fresh spawn lands in 'spawning' state")
-    _check(row["lane_id"] == "lane-x", "ledger row carries lineage (lane_id)")
+    _check(row["spawned_by_instance_id"] == "agi-spawner", "ledger row carries lineage (spawned_by_instance_id)")
 
     not_found = False
     try:
@@ -140,10 +222,7 @@ def test_list_filters() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-1",
-            lane_id="lane-x",
-            assignment=fixture_assignment(),
-            work_class="analysis_deliverable",
-            budget_line="budget-1",
+            label="label-x",
             host="headless",
         ),
     )
@@ -151,17 +230,14 @@ def test_list_filters() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-2",
-            lane_id="lane-y",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="budget-2",
+            label="label-y",
             host="operator",
         ),
     )
-    lane_x_rows = list_managed_sessions(state, {"lane_id": "lane-x"})
+    label_x_rows = list_managed_sessions(state, {"label": "label-x"})
     _check(
-        len(lane_x_rows) == 1 and lane_x_rows[0]["agent_instance_id"] == "agi-spawn-1",
-        "list_managed_sessions filters by lane_id",
+        len(label_x_rows) == 1 and label_x_rows[0]["agent_instance_id"] == "agi-spawn-1",
+        "list_managed_sessions filters by label",
     )
     all_rows = list(
         iter_managed_sessions_unbounded(
@@ -183,10 +259,6 @@ def test_transition_guards() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-1",
-            lane_id="lane-x",
-            assignment=fixture_assignment(),
-            work_class="analysis_deliverable",
-            budget_line="budget-1",
             host="headless",
         ),
     )
@@ -275,10 +347,6 @@ def test_backfill_registration_fires_once() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-3",
-            lane_id="lane-z",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="budget-3",
             host="headless",
         ),
     )
@@ -312,10 +380,6 @@ def test_backfill_reconnect_does_not_refire() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-3",
-            lane_id="lane-z",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="budget-3",
             host="headless",
         ),
     )
@@ -419,10 +483,6 @@ def test_backfill_registration_recovers_spawn_id_from_agent_session_id() -> None
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-recover",
-            lane_id="lane-z",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="budget-3",
             host="tmux",
         ),
     )
@@ -461,10 +521,6 @@ def test_backfill_registration_fallback_refuses_when_recovered_row_not_spawning(
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-completed",
-            lane_id="lane-z",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="budget-3",
             host="tmux",
         ),
     )
@@ -557,10 +613,6 @@ def test_set_host_ref() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-spawn-3",
-            lane_id="lane-z",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="budget-3",
             host="headless",
         ),
     )
@@ -577,7 +629,7 @@ def test_written_columns_are_declared() -> None:
     The battery's fakes accept any record shape, so a write-path column that
     was never declared passes every lifecycle smoke and then fails at the
     real provider with Postgres's undefined-column error (measured live
-    2026-08-28: ``provisioning_mode``). This check closes that seam: the
+    2026-08-28: a written column no declaration named). This check closes that seam: the
     insert payload — including the conditional report_by/expires_at keys —
     is compared against the schema declaration itself.
     """
@@ -588,10 +640,6 @@ def test_written_columns_are_declared() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-schema-parity",
-            lane_id="lane-schema-parity",
-            assignment=fixture_assignment(),
-            work_class="analysis_deliverable",
-            budget_line="budget-parity",
             host="tmux",
             spawned_by_instance_id="agi-spawner",
             spawned_by_role="Claude-C",
@@ -605,80 +653,16 @@ def test_written_columns_are_declared() -> None:
         not undeclared,
         f"every written managed_session column is declared in the schema (undeclared: {undeclared})",
     )
+    _check(_FORMER_COLUMNS.isdisjoint(record), f"the store writes no former column (wrote {sorted(_FORMER_COLUMNS & set(record))})")
 
 
-def test_native_assignment_and_historical_charter() -> None:
+def test_insert_managed_session_writes_no_former_column() -> None:
     state = _state()
-    code = ""
-    try:
-        insert_managed_session(
-            state,
-            ManagedSessionSpec(
-                agent_instance_id="agi-no-unit",
-                lane_id="lane",
-                assignment=None,
-                work_class="production_mutation",
-                budget_line="fixture",
-                host="headless",
-            ),
-        )
-    except VerbError as exc:
-        code = exc.code
-    _check(code == "unit_assignment_required", "spawn ledger refuses a missing assignment")
     row = insert_managed_session(
         state,
-        ManagedSessionSpec(
-            agent_instance_id="agi-native-unit",
-            lane_id="lane",
-            assignment=fixture_assignment(),
-            work_class="production_mutation",
-            budget_line="fixture",
-            host="headless",
-        ),
+        ManagedSessionSpec(agent_instance_id="agi-no-unit", host="headless"),
     )
-    _check(assignment_from_record(row) == fixture_assignment(), "session ledger retains exact registered assignment")
-    first = capture_lane_charter(
-        state,
-        LaneCharterSpec(
-            lane_id="native-charter",
-            charter_text="first",
-            captured_at="2026-10-09T00:00:00",
-            unit_id="unt_first",
-            revision_id="drv_first",
-        ),
-    )
-    capture_lane_charter(
-        state,
-        LaneCharterSpec(
-            lane_id="native-charter",
-            charter_text="corrected",
-            captured_at="2026-10-09T00:00:01",
-            unit_id="unt_second",
-            revision_id="drv_second",
-        ),
-    )
-    latest = resolve_lane_charter(state, "native-charter")
-    _check(latest is not None and latest.revision_id == "drv_second", "charter correction appends new registered provenance")
-    rows = cast(RealShapeState, state).rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_LANE_CHARTER)
-    _check(len(rows) == 2 and first["charter_text"] == rows[0]["charter_text"] == "first", "charter correction preserves original bytes")
-    state.write_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {
-            "table": TABLE_LANE_CHARTER,
-            "record": {
-                "lane_id": "historical-charter",
-                "charter_text": "old",
-                "captured_at": "2026-10-09T00:00:00",
-                "brief_ref": "historical/workbench.md",
-            },
-        },
-    )
-    code = ""
-    try:
-        resolve_lane_charter(state, "historical-charter")
-    except VerbError as exc:
-        code = exc.code
-    _check(code == "unit_assignment_historical", "historical charter cannot become a launch fallback")
+    _check(_FORMER_COLUMNS.isdisjoint(row), f"a spawned ledger row records no former column (found {sorted(_FORMER_COLUMNS & set(row))})")
 
 
 def _attempt_fixture() -> tuple[StateManagementInterface, HostAttempt]:
@@ -687,10 +671,6 @@ def _attempt_fixture() -> tuple[StateManagementInterface, HostAttempt]:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-attempt",
-            lane_id="lane-attempt",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="proof",
             host="operator",
         ),
     )
@@ -809,12 +789,274 @@ def test_latest_attempt_and_unreadable() -> None:
     _check(result["prior_host_outcome"] is None, "unreadable history supplies no proof")
 
 
+def test_registration_during_origin_completion() -> None:
+    """Reproduce the reviewer's store insert immediately after the empty text-unknown snapshot."""
+    fake = RealShapeState()
+    state = cast("StateManagementInterface", fake)
+    read_page = fake.query_ordered
+    inserted = False
+
+    def insert_after_snapshot(namespace: str, query: dict[str, Any]) -> dict[str, Any]:
+        nonlocal inserted
+        snapshot = read_page(namespace, query)
+        filters = query["filters"]
+        if not inserted and filters.get("session_origin") == "unknown" and "lifecycle_state" in filters:
+            inserted = True
+            written = insert_managed_session(state, ManagedSessionSpec(agent_instance_id="late-origin", host="tmux"))
+            # The fake applies no column default; Postgres fills each NOT NULL column with a declared default that an insert omits.
+            declared = schema_module.get_managed_session_schema().columns
+            omitted = {name: column.default for name, column in declared.items() if column.not_null and column.default is not None and name not in written}
+            require_updated(state.update_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_MANAGED_SESSION, "filters": {"agent_instance_id": "late-origin"}}, omitted))
+        return snapshot
+
+    with patch.object(fake, "query_ordered", side_effect=insert_after_snapshot):
+        first = session_origin_backfill.backfill_session_origins(state)
+    assert inserted
+    row = read_managed_session(state, "late-origin")
+    assert row["lifecycle_state"] == LIFECYCLE_SPAWNING and row["session_origin"] == "unknown"
+    assert first == {"status": "live_unknown", "row_id": row["id"], "updated": 0}, f"completion published over the interleaved live row: {first}"
+    _check(session_origin_backfill.read_session_origin_completion(state) == {"status": "live_unknown", "row_id": row["id"]}, "interleaved spawning row withholds current completion")
+    _check(session_origin_backfill.backfill_session_origins(state) == {"status": "completed", "updated": 1}, "retry classifies the interleaved row")
+    _check(read_managed_session(state, "late-origin")["session_origin"] == "spawned", "recovered row records the legacy spawn origin")
+    _check(session_origin_backfill.read_session_origin_completion(state) == {"status": "completed"}, "current completion reads zero live unknowns after recovery")
+
+
+def _ddl_shape(column: ColumnDefinition) -> tuple[ColumnType, bool, object]:
+    return column.type, column.not_null, column.default
+
+
+def _work_model_columns(definitions: list[SchemaDefinition]) -> list[str]:
+    """Every declared ``table.column`` whose column is a work-model column."""
+    return sorted(f"{name}.{column}" for definition in definitions for name, table in definition.tables.items() for column in table.columns if column in _WORK_MODEL_COLUMNS)
+
+
+def _work_model_indexes(definitions: list[SchemaDefinition]) -> list[str]:
+    """Every declared index that covers a work-model column."""
+    return sorted(index.name for definition in definitions for table in definition.tables.values() for index in table.indexes if not _WORK_MODEL_COLUMNS.isdisjoint(index.columns))
+
+
+def _lifecycle(definitions: list[SchemaDefinition]) -> SchemaDefinition:
+    return next(definition for definition in definitions if TABLE_MANAGED_SESSION in definition.tables)
+
+
+def _kept_upgrade_inputs(lifecycle: SchemaDefinition) -> dict[str, tuple[ColumnType, bool, object]]:
+    columns = lifecycle.tables[TABLE_MANAGED_SESSION].columns
+    return {name: _ddl_shape(columns[name]) for name in _UPGRADE_INPUTS if name in columns}
+
+
+def test_schema_holds_no_work_model() -> None:
+    """CATCHES: a work-model column, index or table left in a declaration the plugin installs."""
+    definitions = AgentMessagingPlugin().get_schema_definitions()
+    work_columns = _work_model_columns(definitions)
+    _check(not work_columns, f"no declared table carries a work-model column (found {work_columns})")
+    work_indexes = _work_model_indexes(definitions)
+    _check(not work_indexes, f"no declared index covers a work-model column (found {work_indexes})")
+    declared_tables = {table_name for definition in definitions for table_name in definition.tables}
+    _check(declared_tables.isdisjoint(_RETIRED_TABLES), "no definition declares managed_dispatch, managed_dispatch_event or lane_charter")
+    lifecycle = _lifecycle(definitions)
+    _check(set(_RETIRED_TABLES) <= set(lifecycle.retired_tables), f"the session lifecycle definition retires the three work-model tables by name (retired: {lifecycle.retired_tables})")
+    kept = _kept_upgrade_inputs(lifecycle)
+    _check(kept == _UPGRADE_INPUTS, f"managed_session keeps its three upgrade-input declarations with their declared shape (kept: {kept})")
+    spec_fields = {field.name for field in fields(ManagedSessionSpec)}
+    _check(spec_fields.isdisjoint(_FORMER_COLUMNS), f"ManagedSessionSpec carries no former column (found {sorted(spec_fields & _FORMER_COLUMNS)})")
+    leftover = [name for name in _RETIRED_CONSTANTS if hasattr(schema_module, name)]
+    _check(not leftover, f"schema.py defines no retired work-model constant (found {leftover})")
+
+
+def _predecessor(definition: SchemaDefinition) -> SchemaDefinition:
+    """The lifecycle declaration a direct upgrade starts from: this one plus
+    every work-model declaration it removes, and without ``session_origin``,
+    which the same release adds."""
+    tables = dict(definition.tables)
+    session = tables[TABLE_MANAGED_SESSION]
+    session_columns = {name: column for name, column in session.columns.items() if name != "session_origin"}
+    session_columns.update({name: ColumnDefinition(type=kind) for name, kind in _REMOVED_SESSION_COLUMNS.items()})
+    old_indexes = [IndexDefinition(name=name, columns=[column]) for name, column in _REMOVED_SESSION_INDEXES.items()]
+    tables[TABLE_MANAGED_SESSION] = replace(session, columns=session_columns, indexes=[*session.indexes, *old_indexes])
+    dependency = tables[TABLE_SESSION_DEPENDENCY]
+    tables[TABLE_SESSION_DEPENDENCY] = replace(dependency, columns={**dependency.columns, _REMOVED_DEPENDENCY_COLUMN: ColumnDefinition(type=ColumnType.TEXT)})
+    for name, (prefix, names) in _RETIRED_TABLES.items():
+        tables.setdefault(name, TableSchema(table_name=name, id_prefix=prefix, columns={column: ColumnDefinition(type=ColumnType.TEXT) for column in names}))
+    return replace(definition, tables=tables, retired_tables=tuple(name for name in definition.retired_tables if name not in _RETIRED_TABLES))
+
+
+_DROP_COLUMN = re.compile(r'^ALTER TABLE "[^"]+"\."([^"]+)" DROP COLUMN "([^"]+)"$')
+_ADD_COLUMN = re.compile(r'^ALTER TABLE "[^"]+"\."([^"]+)" ADD COLUMN "([^"]+)"')
+_DROP_INDEX = re.compile(r'^DROP INDEX IF EXISTS "[^"]+"\."([^"]+)"$')
+
+
+def _update_ops() -> tuple[str, list[str]]:
+    """The real state-service diff in update mode, rendered, on both declarations
+    standardized as the lifecycle standardizes them and limited, as
+    ``_apply_update`` limits it, to the tables the new declaration names."""
+    standardizer = SchemaStandardizer()
+    declared = standardizer.standardize_schema(get_session_lifecycle_schema_definition())
+    predecessor = standardizer.standardize_schema(_predecessor(get_session_lifecycle_schema_definition()))
+    current = replace(predecessor, tables={name: table for name, table in predecessor.tables.items() if name in declared.tables})
+    return declared.namespace, [op.as_string() for op in diff_schema(declared.namespace, current, declared, mode="update", schema_name="private_test_fixture")]
+
+
+def _classified_ops(rendered: list[str]) -> tuple[set[tuple[str, str]], set[tuple[str, str]], set[str], list[str]]:
+    """Split rendered DDL into dropped columns, added columns, dropped indexes and anything else."""
+    dropped: set[tuple[str, str]] = set()
+    added: set[tuple[str, str]] = set()
+    dropped_indexes: set[str] = set()
+    other: list[str] = []
+    for op in rendered:
+        if match := _DROP_COLUMN.match(op):
+            dropped.add((match.group(1), match.group(2)))
+        elif match := _ADD_COLUMN.match(op):
+            added.add((match.group(1), match.group(2)))
+        elif match := _DROP_INDEX.match(op):
+            dropped_indexes.add(match.group(1))
+        else:
+            other.append(op)
+    return dropped, added, dropped_indexes, other
+
+
+def test_predecessor_update_drops_only_work_model_columns() -> None:
+    """CATCHES: an upgrade that keeps a work-model column or drops an upgrade input."""
+    namespace, rendered = _update_ops()
+    dropped, added, dropped_indexes, other = _classified_ops(rendered)
+    session_table = f"{namespace}__{TABLE_MANAGED_SESSION}"
+    expected = {(session_table, column) for column in _REMOVED_SESSION_COLUMNS} | {(f"{namespace}__{TABLE_SESSION_DEPENDENCY}", _REMOVED_DEPENDENCY_COLUMN)}
+    _check(dropped == expected, f"update mode drops exactly the work-model columns (missing {sorted(expected - dropped)}, extra {sorted(dropped - expected)})")
+    _check(all(column not in _UPGRADE_INPUTS for _table, column in dropped), "no DROP COLUMN targets an upgrade input")
+    expected_indexes = {resolve_index_name(namespace, TABLE_MANAGED_SESSION, name) for name in _REMOVED_SESSION_INDEXES}
+    _check(dropped_indexes == expected_indexes, f"update mode drops exactly the lane and unit indexes (dropped {sorted(dropped_indexes)})")
+    _check(added == {(session_table, "session_origin")} and not other, f"the only other change is the release's added session_origin (added {sorted(added)}, other {other})")
+
+
+# identity -> (the three classifier inputs, lifecycle_state, the origin the classifier records)
+_HISTORICAL_SESSIONS: dict[str, tuple[str, str, dict[str, str] | None, str, str]] = {
+    "old-spawn": ("worktree", "", None, LIFECYCLE_LIVE, "spawned"),
+    "old-registration": ("operator_existing_checkout", "", None, LIFECYCLE_LIVE, "registered"),
+    "old-path": ("worktree", "/old/brief", None, LIFECYCLE_LIVE, "historical_read_only"),
+    "old-bound": ("synthetic_no_process", "/old/bound-brief", {"unit_id": "unt_old"}, LIFECYCLE_IDLE, "synthetic"),
+    "old-ambiguous": ("unrecorded", "", None, LIFECYCLE_TERMINATED, "unknown"),
+}
+
+
+def _seed_predecessor(state: StateManagementInterface) -> None:
+    """Populate every work-model column and table the predecessor declared."""
+    for identity, (mode, brief_ref, assignment, lifecycle_state, _origin) in _HISTORICAL_SESSIONS.items():
+        session: dict[str, object] = {
+            "agent_instance_id": identity,
+            "host": "tmux",
+            "lifecycle_state": lifecycle_state,
+            "provisioning_mode": mode,
+            "brief_ref": brief_ref,
+            "assignment": assignment,
+            "lane_id": f"lane-{identity}",
+            "assignment_sha256": "0" * 64,
+            "unit_id": "unt_old",
+            "dispatch_kind": "implement",
+            "reviewed_report_vendor": "codex",
+            "pair_id": "pair-old",
+            "scope_tags": ["state_schema"],
+            "capability_floors": [{"tag": "state_schema", "source": "declared", "detail": "old"}],
+            "difficulty_score": 62.0,
+            "selection_receipt": {"model": "old"},
+            "work_class": "read_only",
+            "budget_line": "budget-old",
+            "dispatch_id": f"mdp-{identity}",
+            "worktree_disposition": "removed",
+            "lane_repo_root": "/old/checkout",
+        }
+        require_completed(state.write_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_MANAGED_SESSION, "record": session}), f"seed predecessor session {identity}")
+    dependency = {"waiter_instance_id": "old-spawn", _REMOVED_DEPENDENCY_COLUMN: "lane-old-spawn", "condition_kind": "session_terminal", "condition_ref": "old-ambiguous"}
+    require_completed(state.write_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_SESSION_DEPENDENCY, "record": dependency}), "seed predecessor dependency")
+    for table, (_prefix, names) in _RETIRED_TABLES.items():
+        row = {column: f"{table}-{column}" for column in names}
+        require_completed(state.write_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": table, "record": row}), f"seed predecessor {table}")
+
+
+def _tables(state: StateManagementInterface) -> dict[str, Any]:
+    """The live tables of this namespace, read from the database catalog."""
+    schema = require_completed(state.describe_schema(AGENT_ROLE_BINDING_NAMESPACE), "describe private schema")
+    return cast("dict[str, Any]", schema["tables"])
+
+
+def _install(fixture_state: Any, plugin: Any, definition: SchemaDefinition) -> None:
+    manager = SchemaManager(fixture_state, plugin)
+    manager.initialize_schemas([CoreSchemaDefinitions.get_key_value_store_schema(), definition])
+    fixture_state.set_schema_manager(manager)
+
+
+_SESSION_TABLE = f"{AGENT_ROLE_BINDING_NAMESPACE}__{TABLE_MANAGED_SESSION}"
+
+
+def _check_predecessor_tables(state: StateManagementInterface) -> None:
+    before = _tables(state)
+    _check(all(f"{AGENT_ROLE_BINDING_NAMESPACE}__{table}" in before for table in _RETIRED_TABLES), "setup: the predecessor database holds the three work-model tables")
+    _check(set(_REMOVED_SESSION_COLUMNS) <= set(before[_SESSION_TABLE]["columns"]), "setup: the predecessor managed_session holds every work-model column")
+
+
+def _check_upgraded_tables(state: StateManagementInterface, installed: dict[str, Any]) -> None:
+    """The database catalog and the ownership record after the upgrade."""
+    after = _tables(state)
+    session_columns = set(after[_SESSION_TABLE]["columns"])
+    _check(session_columns.isdisjoint(_REMOVED_SESSION_COLUMNS), f"the upgrade dropped every work-model managed_session column (left {sorted(session_columns & set(_REMOVED_SESSION_COLUMNS))})")
+    _check(set(_UPGRADE_INPUTS) | {"session_origin"} <= session_columns, "the upgrade kept the three upgrade-input declarations and added session_origin")
+    _check(_REMOVED_DEPENDENCY_COLUMN not in after[f"{AGENT_ROLE_BINDING_NAMESPACE}__{TABLE_SESSION_DEPENDENCY}"]["columns"], "the upgrade dropped session_dependency.waiter_lane_id")
+    _check(all(f"{AGENT_ROLE_BINDING_NAMESPACE}__{table}" not in after for table in _RETIRED_TABLES), "owner-aware retirement dropped the three populated work-model tables")
+    owned = set(installed["tables"])
+    _check(owned.isdisjoint(_RETIRED_TABLES) and TABLE_MANAGED_SESSION in owned, "ownership no longer records the retired tables")
+
+
+def _check_classified_rows(state: StateManagementInterface) -> None:
+    """The upgraded rows keep their classifier inputs, and the classifier reads them."""
+    rows = {identity: read_managed_session(state, identity) for identity in _HISTORICAL_SESSIONS}
+    mode_column, file_column, payload_column = _UPGRADE_INPUTS
+    _check(
+        all((rows[identity][mode_column], rows[identity][file_column] or "", rows[identity][payload_column] is None, rows[identity]["session_origin"]) == (mode, file_ref, payload is None, "unknown") for identity, (mode, file_ref, payload, _lifecycle, _origin) in _HISTORICAL_SESSIONS.items()),
+        "every historical session keeps its identity and its three classifier inputs, with an unknown origin",
+    )
+    result = session_origin_backfill.backfill_session_origins(state)
+    _check(result == {"status": "completed", "updated": 4}, f"the classifier classifies the upgraded rows (result {result})")
+    origins = {identity: read_managed_session(state, identity)["session_origin"] for identity in _HISTORICAL_SESSIONS}
+    _check(origins == {identity: spec[4] for identity, spec in _HISTORICAL_SESSIONS.items()}, f"each upgraded row records the origin its inputs imply ({origins})")
+    marker = require_completed(state.get_key_value(AGENT_ROLE_BINDING_NAMESPACE, session_origin_backfill.SESSION_ORIGIN_MARKER), "read origin marker")
+    _check(marker["found"] and marker["value"] == "history_scanned", f"the history checkpoint reads back as scanned ({marker})")
+    _check(session_origin_backfill.read_session_origin_completion(state) == {"status": "completed"}, "origin completion reads back as completed")
+    waiting = require_records(state.query_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_SESSION_DEPENDENCY, "filters": {"waiter_instance_id": "old-spawn"}}))
+    _check(len(waiting) == 1 and _REMOVED_DEPENDENCY_COLUMN not in waiting[0], "the armed dependency row survives without its lane column")
+
+
+def check_private_pg_upgrade() -> None:
+    """A populated predecessor schema upgrades in place, and the classifier still reads its three inputs."""
+    with ledger_fixture("messaging_write", schema="work_model_upgrade_" + uuid4().hex[:12]) as fixture:
+        state = cast("StateManagementInterface", fixture.state)
+        _install(fixture.state, fixture.plugin, _predecessor(get_session_lifecycle_schema_definition()))
+        _seed_predecessor(state)
+        _check_predecessor_tables(state)
+        _install(fixture.state, fixture.plugin, get_session_lifecycle_schema_definition())
+        _check_upgraded_tables(state, fixture.plugin.get_installed_schema(AGENT_ROLE_BINDING_NAMESPACE))
+        _check_classified_rows(state)
+
+
+def check_private_pg_fresh_install() -> None:
+    """A fresh database gets the declared shape, and the store writes a session into it."""
+    namespace = AGENT_ROLE_BINDING_NAMESPACE
+    with ledger_fixture("messaging_write", schema="work_model_fresh_" + uuid4().hex[:12]) as fixture:
+        state = cast("StateManagementInterface", fixture.state)
+        _install(fixture.state, fixture.plugin, get_session_lifecycle_schema_definition())
+        tables = _tables(state)
+        session_columns = set(tables[f"{namespace}__{TABLE_MANAGED_SESSION}"]["columns"])
+        _check(session_columns.isdisjoint(_REMOVED_SESSION_COLUMNS) and set(_UPGRADE_INPUTS) <= session_columns, "a fresh install declares the three upgrade inputs and no work-model column")
+        _check(all(f"{namespace}__{table}" not in tables for table in _RETIRED_TABLES), "a fresh install creates none of the retired tables")
+        insert_managed_session(state, ManagedSessionSpec(agent_instance_id="agi-fresh", host="headless", session_origin="spawned", label="fresh"))
+        row = read_managed_session(state, "agi-fresh")
+        _check((row["label"], row["session_origin"]) == ("fresh", "spawned"), "the store writes a session into the fresh schema")
+        _check(session_origin_backfill.backfill_session_origins(state) == {"status": "completed", "updated": 0}, "a fresh install has nothing to classify")
+
+
 def main() -> int:
+    test_insert_managed_session_writes_no_former_column()
     test_attempt_roundtrip()
     test_attempt_audit_failure()
     test_expected_observation_nulls()
     test_latest_attempt_and_unreadable()
-    test_native_assignment_and_historical_charter()
     test_insert_and_read()
     test_written_columns_are_declared()
     test_list_filters()
@@ -828,13 +1070,22 @@ def main() -> int:
     test_backfill_registration_fallback_noop_when_recovered_id_also_has_no_row()
     test_backfill_registration_fallback_noop_when_session_id_has_no_spawn_shape()
     test_set_host_ref()
+    test_registration_during_origin_completion()
+    test_schema_holds_no_work_model()
+    test_predecessor_update_drops_only_work_model_columns()
+    private_pg = bool(os.environ.get(MANIFEST_ENV))
+    if private_pg:
+        check_private_pg_upgrade()
+        check_private_pg_fresh_install()
 
     print()
     print(f"PASSED: {_passed}")
     print(f"FAILED: {len(_failed)}")
     for label in _failed:
         print(f"  - {label}")
-    return 1 if _failed else 0
+    if _failed:
+        return 1
+    return 0 if private_pg else skip_fixture()
 
 
 if __name__ == "__main__":

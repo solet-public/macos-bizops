@@ -178,7 +178,7 @@ def _load_plugin_class(catalog: ProcessCatalog, provider: str, target: str) -> t
 def build_plugin_catalog(root: Path) -> ProcessCatalog:
     """Project every declared plugin class the tree imports, keyed at the overlay's JSON path.
 
-    The tree's own import roots go first on ``sys.path``: a lane worktree's
+    The tree's own import roots go first on ``sys.path``: a linked worktree's
     shared ``.venv`` points its editable installs at a different checkout.
     """
     from ananta.core.process_registry.registration_census import class_registration_census, plugin_process_key

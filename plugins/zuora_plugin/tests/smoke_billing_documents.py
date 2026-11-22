@@ -41,7 +41,7 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "zuora_plugin" / "src"))
 
 from ananta.core.plugins.action_discovery import discover_actions  # noqa: E402
 from ananta.core.process_registry.plugin_registration_validator import PluginRegistrationValidator  # noqa: E402
-from finish_support import finished  # noqa: E402  # pyright: ignore[reportMissingImports]
+from finish_support import finished  # noqa: E402
 from zuora_plugin import async_jobs, bill_run_usage_actions, billing_actions, billing_document_actions, typed_verbs  # noqa: E402
 from zuora_plugin.app_config import ZuoraTenantConfig  # noqa: E402
 from zuora_plugin.errors import ZuoraServiceError  # noqa: E402

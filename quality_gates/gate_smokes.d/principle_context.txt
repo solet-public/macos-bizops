@@ -1,0 +1,3 @@
+# Checkout-only marker for the principle-context smoke. The development
+# checkout surfaces are intentionally absent from born-seed products.
+# not shipped: quality_gates/tests/principle_context_smoke.py requires .claude/hooks/session_start_context.py; the smoke guards development session-start surfaces, while seed templates carry the adopter statement (fleet_tooling)

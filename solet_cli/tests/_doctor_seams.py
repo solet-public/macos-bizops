@@ -1,6 +1,6 @@
 """Run the real ``InstallationDoctor.run`` with only its seed-unrelated collaborators held still (r61).
 
-The installation doctor loads the create's contract bundle, runs its completion probes and calls sixteen
+The installation doctor loads the create's contract bundle, runs its completion probes and calls seventeen
 advisory collectors, several of which reach launchctl or the installed keg.  The seed-tree smokes
 (iss_a81b79e3, iss_9cd4359a) need the real ``run`` -- which record it reads, which verification it
 reports, what it hands the vintage and release-identity censuses -- and none of the rest.  So:
@@ -14,7 +14,7 @@ reports, what it hands the vintage and release-identity censuses -- and none of 
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -42,6 +42,7 @@ _QUIET_COLLECTORS = (
     "collect_plugin_version_skew_advisories",
     "collect_lm_studio_advisories",
     "collect_terminal_return_key_advisories",
+    "collect_fleet_launcher_advisories",
     "collect_inference_qualification_advisories",
     "collect_inference_probe_advisories",
 )
@@ -52,7 +53,7 @@ def no_advisories(*_args: object, **_kwargs: object) -> list[JsonValue]:
 
 
 @contextmanager
-def doctor_seams(vintage_records: list[InstanceRecord], release_identity: Collector = no_advisories) -> Iterator[None]:
+def doctor_seams(vintage_records: list[InstanceRecord], release_identity: Collector = no_advisories) -> Generator[None]:
     def context(paths: ManagerPaths, name: str, _record: InstanceRecord, _target: Path) -> tuple[Transaction, None, None]:
         transaction = load_transaction(paths.transaction_path(name))
         if transaction is None:

@@ -129,27 +129,28 @@ def _pyright_json(diagnostics: list[dict[str, Any]]) -> str:
 
 
 def _check_pyright_parse() -> None:
-    payload = _pyright_json([
-        {"file": "/t/src/a.py", "severity": "error", "rule": "reportGeneralTypeIssues", "message": "bad\nassign", "range": {"start": {"line": 4, "character": 0}}},
-        {"file": "/t/src/a.py", "severity": "warning", "rule": "reportUnusedVariable", "message": "unused", "range": {"start": {"line": 9, "character": 0}}},
-        {"file": "/t/.venv/lib/x.py", "severity": "error", "rule": "reportX", "message": "env", "range": {"start": {"line": 0, "character": 0}}},
-    ])
+    payload = _pyright_json(
+        [
+            {"file": "/t/src/a.py", "severity": "error", "rule": "reportGeneralTypeIssues", "message": "bad\nassign", "range": {"start": {"line": 4, "character": 0}}},
+            {"file": "/t/src/a.py", "severity": "warning", "rule": "reportUnusedVariable", "message": "unused", "range": {"start": {"line": 9, "character": 0}}},
+            {"file": "/t/.venv/lib/x.py", "severity": "error", "rule": "reportX", "message": "env", "range": {"start": {"line": 0, "character": 0}}},
+        ]
+    )
     findings, dropped = _pyright_findings(payload, Path("/t"), ".venv", "vr", "pyright 1.1.409")
     _check("pyright parse: 2 target findings (env-anchored dropped)", len(findings) == 2, str(findings))
     _check("pyright parse: env-anchored drop counted", dropped == 1, str(dropped))
     by_rule = {f.constraint_violated: f for f in findings}
-    _check("pyright: error → MEDIUM, 0-indexed line +1, message newline-flattened", by_rule["pyright:reportGeneralTypeIssues"].severity is Severity.MEDIUM and by_rule["pyright:reportGeneralTypeIssues"].line == 5 and "\n" not in by_rule["pyright:reportGeneralTypeIssues"].evidence, str(by_rule["pyright:reportGeneralTypeIssues"]))
+    _check(
+        "pyright: error → MEDIUM, 0-indexed line +1, message newline-flattened",
+        by_rule["pyright:reportGeneralTypeIssues"].severity is Severity.MEDIUM and by_rule["pyright:reportGeneralTypeIssues"].line == 5 and "\n" not in by_rule["pyright:reportGeneralTypeIssues"].evidence,
+        str(by_rule["pyright:reportGeneralTypeIssues"]),
+    )
     _check("pyright: warning → LOW", by_rule["pyright:reportUnusedVariable"].severity is Severity.LOW, "")
     _check("pyright: TYPE_COVERAGE dim + version provenance", all(f.dimension is Dimension.TYPE_COVERAGE for f in findings) and by_rule["pyright:reportGeneralTypeIssues"].provenance.tool_version == "pyright 1.1.409", "")
 
 
 def _check_mypy_parse() -> None:
-    stdout = (
-        "src/a.py:5: error: Incompatible types in assignment [assignment]\n"
-        "src/a.py:9: note: revealed type is X [misc]\n"
-        ".venv/lib/x.py:1: error: env error [foo]\n"
-        "not a diagnostic line\n"
-    )
+    stdout = "src/a.py:5: error: Incompatible types in assignment [assignment]\nsrc/a.py:9: note: revealed type is X [misc]\n.venv/lib/x.py:1: error: env error [foo]\nnot a diagnostic line\n"
     findings, dropped = _mypy_findings(stdout, Path("/t"), ".venv", "vr", "mypy 2.1.0")
     _check("mypy parse: 2 target findings (env-anchored dropped)", len(findings) == 2, str(findings))
     _check("mypy parse: env-anchored drop counted", dropped == 1, str(dropped))
@@ -160,10 +161,7 @@ def _check_mypy_parse() -> None:
 
 
 def _check_flood_cap() -> None:
-    diagnostics = [
-        {"file": f"/t/src/f{i}.py", "severity": "error", "rule": "reportX", "message": "m", "range": {"start": {"line": i, "character": 0}}}
-        for i in range(_MAX_TOOL_FINDINGS + 5)
-    ]
+    diagnostics = [{"file": f"/t/src/f{i}.py", "severity": "error", "rule": "reportX", "message": "m", "range": {"start": {"line": i, "character": 0}}} for i in range(_MAX_TOOL_FINDINGS + 5)]
     findings, _ = _pyright_findings(_pyright_json(diagnostics), Path("/t"), ".venv", "vr", "v")
     _check("flood cap: parse yields all, the slice bounds to _MAX_TOOL_FINDINGS", len(findings) == _MAX_TOOL_FINDINGS + 5 and len(findings[:_MAX_TOOL_FINDINGS]) == _MAX_TOOL_FINDINGS, str(len(findings)))
 
@@ -188,13 +186,7 @@ def _check_failed_shim_is_gap(base: Path) -> None:
     (target / "src" / "bad.py").write_text("x: str = 1\n", encoding="utf-8")
     _write_executable(
         fake_bin / "mypy",
-        "#!/bin/sh\n"
-        'if [ "$1" = "--version" ]; then\n'
-        "  printf '%s\\n' 'mypy 9.9.9'\n"
-        "  exit 0\n"
-        "fi\n"
-        "printf '%s\\n' 'mypy: internal error: corrupt cache' >&2\n"
-        "exit 127\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' 'mypy 9.9.9'\n  exit 0\nfi\nprintf '%s\\n' 'mypy: internal error: corrupt cache' >&2\nexit 127\n",
     )
     prior_path = os.environ.get("PATH", "")
     os.environ["PATH"] = f"{fake_bin}:{prior_path}"
@@ -222,24 +214,20 @@ def _check_diagnostic_exit_is_valid(base: Path) -> None:
     local_bin.mkdir(parents=True)
     (target / "pyproject.toml").write_text('[tool.pyright]\ninclude = ["src"]\n', encoding="utf-8")
     (target / "src" / "bad.py").write_text("x: str = 1\n", encoding="utf-8")
-    payload = _pyright_json([
-        {
-            "file": str(target / "src" / "bad.py"),
-            "severity": "error",
-            "rule": "reportAssignmentType",
-            "message": "Type int is not assignable to str",
-            "range": {"start": {"line": 0, "character": 0}},
-        }
-    ])
+    payload = _pyright_json(
+        [
+            {
+                "file": str(target / "src" / "bad.py"),
+                "severity": "error",
+                "rule": "reportAssignmentType",
+                "message": "Type int is not assignable to str",
+                "range": {"start": {"line": 0, "character": 0}},
+            }
+        ]
+    )
     _write_executable(
         local_bin / "pyright",
-        "#!/bin/sh\n"
-        'if [ "$1" = "--version" ]; then\n'
-        "  printf '%s\\n' 'pyright 9.9.9'\n"
-        "  exit 0\n"
-        "fi\n"
-        f"printf '%s\\n' '{payload}'\n"
-        "exit 1\n",
+        f"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' 'pyright 9.9.9'\n  exit 0\nfi\nprintf '%s\\n' '{payload}'\nexit 1\n",
     )
     result = scan(TargetTree.from_walk(target), "vr-diagnostic", execute_target_toolchain=True)
     _check("diagnostic exit 1 completes coverage", result.coverage.ran is True, str(result.coverage))
@@ -262,7 +250,7 @@ def _check_self_vs_foreign(base: Path) -> None:
         _check("FOREIGN: emits TYPE_COVERAGE findings when a host checker is present", any(f.dimension is Dimension.TYPE_COVERAGE for f in foreign.findings), str([f.constraint_violated for f in foreign.findings]))
         _check("FOREIGN: coverage discloses the env + per-checker version", "env=.venv" in (foreign.coverage.gap_reason or ""), foreign.coverage.gap_reason or "")
     else:
-        print("  SKIP  FOREIGN checks: neither pyright nor mypy on PATH (self-suppress check above still ran)")
+        print(f"  SKIP  FOREIGN checks: {toolrun.tool_unavailable_reason('pyright')}; {toolrun.tool_unavailable_reason('mypy')} (self-suppress check above still ran)")
         _type_check_coverage_skipped = True
 
 
@@ -271,7 +259,7 @@ def _filesless_scope_tree(base: Path) -> TargetTree:
     filesless = base / "fl"
     (filesless / "src").mkdir(parents=True)
     (filesless / "src" / "bad.py").write_text("x: str = 1\n", encoding="utf-8")
-    (filesless / "pyproject.toml").write_text("[tool.pyright]\ninclude = [\"src\"]\n\n[tool.mypy]\nignore_missing_imports = true\n", encoding="utf-8")
+    (filesless / "pyproject.toml").write_text('[tool.pyright]\ninclude = ["src"]\n\n[tool.mypy]\nignore_missing_imports = true\n', encoding="utf-8")
     (filesless / ".venv" / "bin").mkdir(parents=True)
     return TargetTree.from_walk(filesless)
 
@@ -280,7 +268,7 @@ def _check_mypy_scope_live(fl_tree: TargetTree) -> None:
     """RIDER-2 live probe (absence-tolerant): a files-less config + host mypy catches the planted error."""
     global _type_check_coverage_skipped
     if not tool_available("mypy"):
-        print("  SKIP  RIDER-2 live probe: mypy not on PATH (pyright presence is not a substitute)")
+        print(f"  SKIP  RIDER-2 live probe: {toolrun.tool_unavailable_reason('mypy')} (pyright presence is not a substitute)")
         _type_check_coverage_skipped = True
         return
     result = scan(fl_tree, "vr-rider", execute_target_toolchain=True)
@@ -298,7 +286,7 @@ def _check_mypy_scope_rider(base: Path) -> None:
     _check("RIDER-2: the enumerated set excludes the .venv env dir", not any(".venv" in arg for arg in args), str(args))
     declared = base / "dc"
     (declared / "src").mkdir(parents=True)
-    (declared / "pyproject.toml").write_text("[tool.mypy]\nfiles = [\"src\"]\n", encoding="utf-8")
+    (declared / "pyproject.toml").write_text('[tool.mypy]\nfiles = ["src"]\n', encoding="utf-8")
     dargs, dnote = _mypy_scope_args(TargetTree.from_walk(declared))
     _check("RIDER-2: a DECLARED scope WINS (no enumeration)", dargs == [] and dnote == "scope: config-declared", dnote)
     _check_mypy_scope_live(fl_tree)
@@ -326,11 +314,7 @@ def main() -> int:
         return 1
     print(f"python_type_check_smoke OK: {len(_CHECKS_RUN)} checks passed")
     if _type_check_coverage_skipped:
-        print(
-            "SKIP: at least one host type-checker was absent -- some live "
-            "coverage disclosed a gap rather than running; every other "
-            "check ran and passed."
-        )
+        print("SKIP: at least one host type-checker was not usable (reason above) -- some live coverage disclosed a gap rather than running; every other check ran and passed.")
         return _SKIP_EXIT_CODE
     return 0
 

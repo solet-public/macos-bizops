@@ -83,8 +83,9 @@ def _entries(
 
 
 def _fake_address_book(entries: list[dict[str, str]]) -> MagicMock:
+    # The pre-build-6 entry holds no secret, so it is read with ordinary resolve.
     service = MagicMock()
-    service.resolve_with_secrets.return_value = {
+    service.resolve.return_value = {
         "action_status": "completed",
         "data": {"entries": entries},
     }
@@ -330,7 +331,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 25 verbs discovered", len(actions) == 25, str(len(actions)))
+    _assert("all 32 verbs discovered", len(actions) == 32, str(len(actions)))
 
 
 def test_cli_provisioning() -> None:

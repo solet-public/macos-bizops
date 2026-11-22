@@ -32,7 +32,6 @@ from .session_lifecycle_store import (
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
-OPERATOR_CHECKOUT_MODE = "operator_existing_checkout"
 _HOST_PATTERN = re.compile(r"operator-codex-[a-f0-9]{32}")
 
 
@@ -69,7 +68,11 @@ class OperatorClaudeRegistration:
 def _output(argv: list[str]) -> str:
     try:
         result = subprocess.run(
-            argv, capture_output=True, text=True, timeout=3, check=False,
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise OperatorHostQualificationError(f"host probe failed: {argv[0]}") from exc
@@ -90,11 +93,13 @@ def _tmux_environment_value(tmux: str, target: str, key: str) -> str:
     prefix = f"{key}="
     if not output.startswith(prefix):
         raise OperatorHostQualificationError(f"operator host environment value unavailable: {key}")
-    return output[len(prefix):]
+    return output[len(prefix) :]
 
 
 def _verify_watcher_ancestry(
-    watcher_pid: int, pane_pid: int, expected_executable: str,
+    watcher_pid: int,
+    pane_pid: int,
+    expected_executable: str,
 ) -> None:
     """Require the registering watcher to descend from the actual runtime pane."""
     _, executable = _same_owner_process(pane_pid)
@@ -115,16 +120,7 @@ def _verify_watcher_ancestry(
 
 
 def _verify_declaration(request: OperatorCodexRegistration) -> None:
-    valid = (
-        request.agent_id == "codex"
-        and request.watcher_declared
-        and request.parent_pid is not None
-        and request.parent_pid > 1
-        and _HOST_PATTERN.fullmatch(request.host_ref)
-        and re.fullmatch(r"agi-[a-f0-9]{32}", request.agent_instance_id)
-        and request.agent_session_id.startswith("ases-")
-        and request.session_label
-    )
+    valid = request.agent_id == "codex" and request.watcher_declared and request.parent_pid is not None and request.parent_pid > 1 and _HOST_PATTERN.fullmatch(request.host_ref) and re.fullmatch(r"agi-[a-f0-9]{32}", request.agent_instance_id) and request.agent_session_id.startswith("ases-") and request.session_label
     if not valid:
         raise OperatorHostQualificationError("incomplete operator Codex watcher declaration")
 
@@ -163,10 +159,17 @@ def _probe_pane(request: OperatorCodexRegistration | OperatorClaudeRegistration)
     tmux = shutil.which("tmux")
     if tmux is None:
         raise OperatorHostQualificationError("tmux is unavailable to the service")
-    panes = _output([
-        tmux, "list-panes", "-s", "-t", "=" + request.host_ref,
-        "-F", "#{pane_pid}\t#{pane_dead}\t#{pane_current_path}",
-    ]).splitlines()
+    panes = _output(
+        [
+            tmux,
+            "list-panes",
+            "-s",
+            "-t",
+            "=" + request.host_ref,
+            "-F",
+            "#{pane_pid}\t#{pane_dead}\t#{pane_current_path}",
+        ]
+    ).splitlines()
     if len(panes) != 1:
         raise OperatorHostQualificationError("operator host must contain exactly one pane")
     pane = panes[0].split("\t", maxsplit=2)
@@ -214,9 +217,15 @@ def prepare_operator_host_probe(request: OperatorCodexRegistration | OperatorCla
         keys += ("AGENT_INSTANCE_ID",)
     identity = _capture_environment(tmux, "=" + request.host_ref, keys)
     if isinstance(request, OperatorCodexRegistration) and not any(value.error for _, value in identity):
-        metadata = _capture_environment(tmux, "=" + request.host_ref, (
-            "OPERATOR_CODEX_MODEL", "OPERATOR_CODEX_EFFORT", "OPERATOR_CODEX_CWD",
-        ))
+        metadata = _capture_environment(
+            tmux,
+            "=" + request.host_ref,
+            (
+                "OPERATOR_CODEX_MODEL",
+                "OPERATOR_CODEX_EFFORT",
+                "OPERATOR_CODEX_CWD",
+            ),
+        )
     return OperatorHostProbe(request, HostProbeValue(value=cwd), identity, metadata)
 
 
@@ -241,13 +250,14 @@ def _qualify_prepared_host(request: OperatorCodexRegistration | OperatorClaudeRe
     cwd = probe.pane.read()
     _validate_probe_identity(request, probe)
     if isinstance(request, OperatorClaudeRegistration):
-        return {"model": "", "effort": "", "lane_repo_root": cwd}
+        return {"model": "", "effort": "", "workspace": cwd}
     values = {key: value.read() for key, value in probe.metadata}
     metadata = {
-        "model": values["OPERATOR_CODEX_MODEL"], "effort": values["OPERATOR_CODEX_EFFORT"],
-        "lane_repo_root": values["OPERATOR_CODEX_CWD"],
+        "model": values["OPERATOR_CODEX_MODEL"],
+        "effort": values["OPERATOR_CODEX_EFFORT"],
+        "workspace": values["OPERATOR_CODEX_CWD"],
     }
-    if not all(metadata.values()) or Path(metadata["lane_repo_root"]).resolve() != Path(cwd).resolve():
+    if not all(metadata.values()) or Path(metadata["workspace"]).resolve() != Path(cwd).resolve():
         raise OperatorHostQualificationError("operator host model, effort or cwd could not be verified")
     return metadata
 
@@ -285,19 +295,21 @@ def _host_metadata(tmux: str, target: str, pane_cwd: str) -> dict[str, str]:
     metadata = {
         key: _tmux_environment_value(tmux, target, env_key)
         for key, env_key in {
-            "model": "OPERATOR_CODEX_MODEL", "effort": "OPERATOR_CODEX_EFFORT",
-            "lane_repo_root": "OPERATOR_CODEX_CWD",
+            "model": "OPERATOR_CODEX_MODEL",
+            "effort": "OPERATOR_CODEX_EFFORT",
+            "workspace": "OPERATOR_CODEX_CWD",
         }.items()
     }
-    if not all(metadata.values()) or Path(metadata["lane_repo_root"]).resolve() != Path(pane_cwd).resolve():
+    if not all(metadata.values()) or Path(metadata["workspace"]).resolve() != Path(pane_cwd).resolve():
         raise OperatorHostQualificationError("operator host model, effort or cwd could not be verified")
     return metadata
+
 
 def _qualify_operator_claude_direct(request: OperatorClaudeRegistration) -> dict[str, str]:
     _verify_claude_declaration(request)
     tmux, cwd = _probe_pane(request)
     _verify_tmux_identity(tmux, "=" + request.host_ref, request, verify_instance_id=False)
-    return {"model": "", "effort": "", "lane_repo_root": cwd}
+    return {"model": "", "effort": "", "workspace": cwd}
 
 
 def qualify_operator_codex_host(request: OperatorCodexRegistration, *, prepared: OperatorHostProbe | None = None) -> dict[str, str]:
@@ -317,24 +329,33 @@ def _operator_row(
     try:
         row = read_managed_session(state, request.agent_instance_id)
     except SessionNotFoundError:
-        insert_managed_session(state, ManagedSessionSpec(
-            agent_instance_id=request.agent_instance_id, lane_id="", assignment=None,
-            work_class="", budget_line="", host=OPERATOR_HOST, agent_runtime=agent_runtime,
-            local_name=request.session_label, model=metadata["model"], effort=metadata["effort"],
-            provisioning_mode=OPERATOR_CHECKOUT_MODE,
-            lane_repo_root=metadata["lane_repo_root"], directed_by="operator_registration",
-            visibility=SESSION_VISIBILITY_VISIBLE,
-        ))
+        insert_managed_session(
+            state,
+            ManagedSessionSpec(
+                agent_instance_id=request.agent_instance_id,
+                host=OPERATOR_HOST,
+                agent_runtime=agent_runtime,
+                local_name=request.session_label,
+                model=metadata["model"],
+                effort=metadata["effort"],
+                session_origin="registered",
+                workspace=metadata["workspace"],
+                directed_by="operator_registration",
+                visibility=SESSION_VISIBILITY_VISIBLE,
+            ),
+        )
         backfill_registration(
-            state, agent_instance_id=request.agent_instance_id,
-            agent_id=request.agent_id, agent_session_id=request.agent_session_id,
+            state,
+            agent_instance_id=request.agent_instance_id,
+            agent_id=request.agent_id,
+            agent_session_id=request.agent_session_id,
         )
         row = read_managed_session(state, request.agent_instance_id)
     same_session = row.get("agent_session_id") == request.agent_session_id
-    same_mode = row.get("provisioning_mode") == OPERATOR_CHECKOUT_MODE
+    registered = row.get("session_origin") == "registered"
     same_host = row.get("host") == "tmux" and row.get("host_ref") == request.host_ref
     unbound = row.get("host") == OPERATOR_HOST and not row.get("host_ref")
-    if not (same_session and same_mode and (same_host or unbound)):
+    if not (same_session and registered and (same_host or unbound)):
         raise OperatorHostQualificationError("refusing to adopt an existing or differently bound session")
     if row.get("lifecycle_state") not in {"live", "idle", "parked"}:
         raise OperatorHostQualificationError("operator session is no longer eligible for registration")
@@ -359,19 +380,25 @@ def _register_operator_host(
     filters = {
         "agent_instance_id": request.agent_instance_id,
         "agent_session_id": request.agent_session_id,
-        "provisioning_mode": OPERATOR_CHECKOUT_MODE,
-        "host": row["host"], "host_ref": row.get("host_ref") or {"op": "is_null"},
-        "lifecycle_state": row["lifecycle_state"], "is_deleted": 0,
+        "session_origin": "registered",
+        "host": row["host"],
+        "host_ref": {"op": "is_null"} if row.get("host_ref") is None else row["host_ref"],
+        "lifecycle_state": row["lifecycle_state"],
+        "is_deleted": 0,
     }
     updates = {
         "host": "tmux",
         "host_ref": request.host_ref,
         "agent_runtime": agent_runtime,
+        "workspace": metadata["workspace"],
     }
-    changed = require_updated(state.update_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {"table": TABLE_MANAGED_SESSION, "filters": filters}, dict[str, object](updates),
-    ))
+    changed = require_updated(
+        state.update_state(
+            AGENT_ROLE_BINDING_NAMESPACE,
+            {"table": TABLE_MANAGED_SESSION, "filters": filters},
+            dict[str, object](updates),
+        )
+    )
     if changed != 1:
         raise OperatorHostQualificationError("operator host registration lost its state predicate")
     persisted = read_managed_session(state, request.agent_instance_id)
@@ -381,16 +408,17 @@ def _register_operator_host(
 
 
 def register_operator_codex_host(
-    state: StateManagementInterface | None, request: OperatorCodexRegistration,
-    *, prepared: OperatorHostProbe | None = None,
+    state: StateManagementInterface | None,
+    request: OperatorCodexRegistration,
+    *,
+    prepared: OperatorHostProbe | None = None,
 ) -> dict[str, str]:
     """Bind a verified Codex driver and return its exact readback."""
     return _register_operator_host(
         state,
         request,
         agent_runtime="codex",
-        metadata=(qualify_operator_codex_host(request) if prepared is None
-                  else qualify_operator_codex_host(request, prepared=prepared)),
+        metadata=(qualify_operator_codex_host(request) if prepared is None else qualify_operator_codex_host(request, prepared=prepared)),
     )
 
 
@@ -445,14 +473,15 @@ def qualify_operator_claude_host(request: OperatorClaudeRegistration, *, prepare
 
 
 def register_operator_claude_host(
-    state: StateManagementInterface | None, request: OperatorClaudeRegistration,
-    *, prepared: OperatorHostProbe | None = None,
+    state: StateManagementInterface | None,
+    request: OperatorClaudeRegistration,
+    *,
+    prepared: OperatorHostProbe | None = None,
 ) -> dict[str, str]:
     """Bind a verified Claude launcher pane and return its exact readback."""
     return _register_operator_host(
         state,
         request,
         agent_runtime="claude_code",
-        metadata=(qualify_operator_claude_host(request) if prepared is None
-                  else qualify_operator_claude_host(request, prepared=prepared)),
+        metadata=(qualify_operator_claude_host(request) if prepared is None else qualify_operator_claude_host(request, prepared=prepared)),
     )

@@ -1,0 +1,3 @@
+# Checkout-only marker for the session-start drift smoke. The development
+# checkout surfaces are intentionally absent from born-seed products.
+# not shipped: quality_gates/tests/session_start_principles_smoke.py requires .claude/seat_prompts/main_seat_decision_contract.md; the smoke guards development session-start surfaces, while seed templates carry the adopter statement (fleet_tooling)

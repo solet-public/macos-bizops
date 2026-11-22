@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::list_orgs",
+  "display_name": "Salesforce: List Bound Orgs",
+  "description": "List every Salesforce org bound to this solet, read from the plugin's vault index (<solet>.salesforce_plugin.orgs_index): alias, org_id (18 characters), username, target_org (what the sf CLI is called with), pinned instance_host, org_type (production, sandbox or scratch), is_dev_hub, login_method (cli, web, jwt, sfdx_url, access_token, scratch_create or sandbox_create), dev_hub_org_id for a scratch org, the names (never the values) of the vault secrets its login uses, and which org is the default. Also reports whether the single salesforce_org address-book entry that predates multi-org support still awaits migration (it is migrated by the first call of any verb). No Salesforce call is made. Returns job_id/status queued.",
+  "embedding_description": "See which Salesforce orgs this solet is connected to: production orgs, sandboxes, scratch orgs and Dev Hubs, with each org's alias, org id, username, instance host and how it logged in, plus which org is the default when a request does not name one. Use before choosing an org for any Salesforce request.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce bound orgs listing queued",
+    "result_type": "salesforce_list_orgs_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: orgs (each with org_id, alias, target_org, username, instance_host, org_type, is_dev_hub, login_method, dev_hub_org_id, jwt_key_secret, secret_names, migrated_from_legacy and default), count, default_org (the default org's alias, or empty), legacy_pending_migration (true, false, or null when the address book could not be read) and advisories when something could not be read.",
+    "presentation_guidance": "Show each org by alias with its type, username and whether it is the default or a Dev Hub. Secret names identify vault entries the operator stored; they are not secrets themselves, and their values are never shown."
+  },
+  "error_processor_customizations": {
+    "action_context": "Read the bound Salesforce orgs from the vault index.",
+    "error_interpretation": "vault_service_not_available: the plugin has no vault proxy. sf.org_registry_failed: the vault could not say whether the index exists, or the index could not be read or is not valid JSON.",
+    "recovery_guidance": "A vault failure is a platform problem: check the vault service status. An empty list means no org is bound yet: bind one with bind_org (an org the sf CLI is logged in to) or log in with login."
+  }
+}

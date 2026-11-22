@@ -8,7 +8,7 @@ Proves the contract that makes the catalog safe to consult:
   and serves the operator's verdict once cells are accepted; age and unknown quota
   are advisories with a refresh request, never refusals (rul_becb4bed);
 * re-seeding never downgrades an accepted cell (idempotent, start-up safe);
-* the selected answer carries the current dispatch-policy version;
+* the selector's surface and answer contain no retired dispatch policy;
 * the default billing objective is derived from the economics profiles;
 * every seeded record names only declared schema columns (the drift class
   the real-shape fake exists to catch);
@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
+from dispatch_pin_smoke import objective_contract, selector_policy_contract  # noqa: E402
 
 from agent_messaging_plugin import model_capability_verbs as verbs  # noqa: E402
 from agent_messaging_plugin import model_catalog_policy as policy  # noqa: E402
@@ -60,8 +61,10 @@ from agent_messaging_plugin.model_capability_store import (  # noqa: E402
     reconcile_discovery,
     seed_catalog,
 )
+from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     CELL_ACCEPTANCE_ACCEPTED,
+    CELL_ACCEPTANCE_CROSSCHECK_CONFLICT,
     CELL_ACCEPTANCE_PENDING_CROSSCHECK,
     TABLE_MODEL_CAPABILITY_CELL,
     TABLE_MODEL_CAPABILITY_OBSERVATION,
@@ -182,73 +185,63 @@ def test_seeded_records_name_only_declared_columns() -> None:
 def test_selector_refuses_until_accepted_then_serves() -> None:
     state = _policy_state()
     seed_catalog(_typed(state), seed=load_seed_table())
-    params = {"required_score": 38, "billing_objective": "metered_usd", "dispatch_kind": "review"}
+    params = {"required_score": 38}
     _check(_code(lambda: verbs.select_dispatch_tier(_typed(state), params, now=_NOW)) == "catalog_unaccepted", "pending cells are never served: catalog_unaccepted")
     _accept_all(state, measured_at=_NOW - timedelta(hours=1))
     picked = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)
     _check(picked["selected"]["model"] == "gpt-5.6-sol" and picked["selected"]["effort"] == "medium", "review kind, score 38: sol medium (39, $0.50) beats terra xhigh (38, $0.63)")
     _check("quota_unknown" not in picked["excluded"] and "stale" not in picked["excluded"], "neither unknown quota nor age is an exclusion class")
     _check(picked["advisories"]["stale_reading_used"] == 0 and picked["stale_readings"] == [] and "refresh_request" not in picked, "fresh readings raise no stale advisory and no refresh request")
-    _check(picked["policy_version"] == "model-dispatch-policy-v3", "policy version reported when a kind was consulted")
     _check(picked["catalog_run_id"] == "mcr-test-accepted", "the accepting run id rides the answer")
-    _check(
-        picked["selection_receipt"]["selected"] == {"runtime": "codex", "model": "gpt-5.6-sol", "effort": "medium"},
-        "selector returns a spawn-verifiable receipt for its cheapest answer",
-    )
-    receipt = picked["selection_receipt"]
-    _check(
-        verbs.verify_selection_receipt(
-            _typed(state),
-            difficulty_score=38,
-            selection_receipt=receipt,
-            dispatch_kind="review",
-            scope_tags=(),
-            agent_runtime="codex",
-            model="gpt-5.6-sol",
-            effort="medium",
-            now=_NOW,
-        )
-        == receipt,
-        "spawn receipt replays to the current cheapest-clearing tuple",
-    )
-    _check(
-        _code(
-            lambda: verbs.verify_selection_receipt(
-                _typed(state),
-                difficulty_score=38,
-                selection_receipt=receipt,
-                dispatch_kind="review",
-                scope_tags=(),
-                agent_runtime="codex",
-                model="gpt-5.6-sol",
-                effort="high",
-                now=_NOW,
-            )
-        )
-        == "selection_receipt_mismatch",
-        "a spawn tuple not selected by the receipt fails closed",
-    )
-    unconstrained = verbs.select_dispatch_tier(_typed(state), {"required_score": 45, "billing_objective": "metered_usd"}, now=_NOW)
+    _check({key: picked["selected"][key] for key in ("runtime", "model", "effort")} == {"runtime": "codex", "model": "gpt-5.6-sol", "effort": "medium"}, "selector returns its cheapest tuple")
+    unconstrained = verbs.select_dispatch_tier(_typed(state), {"required_score": 45}, now=_NOW)
     _check(unconstrained["selected"]["model"] == "gpt-6-astra" and unconstrained["selected"]["effort"] == "low", "no kind, score 45: astra low -- the operator's example")
-    _check(unconstrained["policy_version"] is None, "policy version is null when no kind was consulted")
     relative = verbs.select_dispatch_tier(_typed(state), {"required_score": 45}, now=_NOW)
     _check(relative["billing_objective"] == "relative" and relative["selected"]["model"] == "gpt-6-astra", "default objective on this checkout is relative (flat-rate plan declared) and agrees")
 
 
+def test_selector_has_no_dispatch_policy() -> None:
+    result = selector_policy_contract(_typed(_accepted_state(measured_hours_ago=1)), _NOW)
+    for key, description in (
+        ("inputs_absent", "selector declares neither retired input"),
+        ("kind_refused", "surface refuses dispatch kind as unknown"),
+        ("tags_refused", "surface refuses scope tags as unknown"),
+        ("result_absent", "answer omits retired policy fields"),
+        ("schema_absent", "return declaration omits retired policy fields"),
+        ("module_absent", "retired policy module is absent"),
+        ("file_absent", "retired policy file is absent"),
+        ("still_selects", "score 38 still selects"),
+    ):
+        _check(result[key], description)
+
+
+def test_selector_has_no_replay_receipt() -> None:
+    state = _accepted_state(measured_hours_ago=100)
+    selected = verbs.select_dispatch_tier(_typed(state), {"required_score": 38}, now=_NOW)
+    metadata = cast(Any, AgentMessagingPlugin.select_dispatch_tier)._platform_process_metadata
+    receipt_key = "selection" + "_receipt"
+    verifier_name = "verify_" + receipt_key
+    _check(receipt_key not in selected, "selector result has no receipt")
+    _check(not hasattr(verbs, verifier_name) and verifier_name not in verbs.__all__, "selector module has no replay verifier")
+    _check(receipt_key not in metadata.return_value_schema.properties, "selector return schema has no receipt")
+    _check({"selected", "required_score", "effective_required_score", "excluded", "frontier", "warnings"} <= selected.keys(), "selector retains the choice and advisory fields")
+
+
 def test_aged_readings_still_select_and_a_tighter_window_changes_only_the_advisory() -> None:
     state = _accepted_state(measured_hours_ago=1)
-    params = {"required_score": 38, "billing_objective": "metered_usd", "dispatch_kind": "review"}
-    receipt = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)["selection_receipt"]
+    params = {"required_score": 38}
+    selected = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)["selected"]
+    tuple_before = {key: selected[key] for key in ("runtime", "model", "effort")}
     _accept_all(state, measured_at=_NOW - timedelta(hours=100))
     aged = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)
-    _check(aged["selection_receipt"] == receipt and aged["advisories"]["stale_reading_used"] > 0, "past the 72h window still selects the same cell, with a stale advisory (rul_becb4bed)")
+    _check({key: aged["selected"][key] for key in tuple_before} == tuple_before and aged["advisories"]["stale_reading_used"] > 0, "past the 72h window still selects the same cell, with a stale advisory (rul_becb4bed)")
     _check(
         all(row["servable"] and not row["is_fresh"] for row in verbs.read_model_capability_catalog(_typed(state), runtime=None, model=None, include_unaccepted=False, now=_NOW)["cells"]),
         "age never makes an accepted cell unservable; is_fresh only reports it",
     )
     _accept_all(state, measured_at=_NOW - timedelta(hours=10))
     tightened = verbs.select_dispatch_tier(_typed(state), {**params, "max_staleness_hours": 6}, now=_NOW)
-    _check(tightened["selection_receipt"]["selected"] == receipt["selected"] and tightened["advisories"]["stale_reading_used"] > 0, "a caller-tightened window only changes the advisory")
+    _check({key: tightened["selected"][key] for key in tuple_before} == tuple_before and tightened["advisories"]["stale_reading_used"] > 0, "a caller-tightened window only changes the advisory")
     loosened = verbs.select_dispatch_tier(_typed(state), {**params, "max_staleness_hours": 500}, now=_NOW)
     _check(loosened["advisories"]["stale_reading_used"] == 0, "a caller cannot loosen the window (500h clamps to stored 72h; fresh at 10h)")
 
@@ -262,7 +255,7 @@ def _accepted_state(*, measured_hours_ago: int) -> RealShapeState:
 
 def test_stale_selection_reports_readings_and_requests_one_refresh() -> None:
     """rul_becb4bed: with every reading past the window the best cell is selected, the ages are reported and a refresh is requested once."""
-    params = {"required_score": 38, "billing_objective": "metered_usd", "dispatch_kind": "review"}
+    params = {"required_score": 38}
     fresh = verbs.select_dispatch_tier(_typed(_accepted_state(measured_hours_ago=1)), params, now=_NOW)
     state = _accepted_state(measured_hours_ago=100)
     stale = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)
@@ -274,10 +267,6 @@ def test_stale_selection_reports_readings_and_requests_one_refresh() -> None:
         "each stale reading carries its measured_at, age_hours and window_hours",
     )
     _check(sum(1 for reading in readings if reading["selected"]) == 1, "exactly one stale reading is the selected cell's")
-    _check(
-        set(stale["selection_receipt"]) == {"required_score", "billing_objective", "score_margin", "cost_tolerance", "max_staleness_hours", "runtime_constraint", "selected", "effort_ceiling", "exclude_model_prefixes", "exclude_runtimes", "pin", "pin_basis"},
-        "the receipt keeps its seven keys; stale readings ride beside it",
-    )
     request = stale["refresh_request"]
     _check(
         request == {"process_key": "plugin::agent_messaging_plugin::refresh_model_capability_catalog", "arguments": {"trigger": "selector_stale"}},
@@ -288,7 +277,7 @@ def test_stale_selection_reports_readings_and_requests_one_refresh() -> None:
 
 
 def test_refresh_request_is_deduplicated_against_recent_runs() -> None:
-    params = {"required_score": 38, "billing_objective": "metered_usd"}
+    params = {"required_score": 38}
     state = _accepted_state(measured_hours_ago=100)
     seed_runs = len(state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_REFRESH_RUN))
     _check(seed_runs >= 1 and "refresh_request" in verbs.select_dispatch_tier(_typed(state), params, now=_NOW), "a recent seed run does not suppress the request")
@@ -304,38 +293,6 @@ def test_refresh_request_is_deduplicated_against_recent_runs() -> None:
         if row.get("id") == run_id:
             row["started_at"] = (_NOW - timedelta(hours=13)).isoformat()
     _check("refresh_request" in verbs.select_dispatch_tier(_typed(state), params, now=_NOW), "a run older than the 12h dedupe window no longer suppresses")
-
-
-def test_receipts_verify_after_readings_cross_the_window() -> None:
-    """A spawn is never refused because a reading aged between select and spawn, nor because it was stale when selected."""
-    params = {"required_score": 38, "billing_objective": "metered_usd", "dispatch_kind": "review"}
-    state = _accepted_state(measured_hours_ago=1)
-    receipt = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)["selection_receipt"]
-    later = _NOW + timedelta(hours=100)
-    replay = verbs.select_dispatch_tier(_typed(state), params, now=later)
-    _check(replay["advisories"]["stale_reading_used"] > 0, "by spawn time every reading has crossed its window")
-    spawn = {"difficulty_score": 38, "dispatch_kind": "review", "scope_tags": (), "agent_runtime": "codex", "model": "gpt-5.6-sol", "effort": "medium"}
-    _check(verbs.verify_selection_receipt(_typed(state), selection_receipt=receipt, now=later, **spawn) == receipt, "a receipt issued from fresh readings still verifies after they go stale")
-    stale_receipt = verbs.select_dispatch_tier(_typed(state), params, now=later)["selection_receipt"]
-    _check(verbs.verify_selection_receipt(_typed(state), selection_receipt=stale_receipt, now=later, **spawn) == stale_receipt, "a receipt issued from stale readings verifies")
-    _check(
-        _code(lambda: verbs.verify_selection_receipt(_typed(state), selection_receipt={**stale_receipt, "stale_readings": []}, now=later, **spawn)) == "selection_receipt_invalid",
-        "verification stays strict: an extra receipt field is still refused",
-    )
-
-
-def test_unreadable_quota_profile_is_a_warning_not_a_refusal() -> None:
-    state = _accepted_state(measured_hours_ago=1)
-    params = {"required_score": 38, "billing_objective": "metered_usd"}
-    expected = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)["selected"]
-    original = verbs._USAGE_ECONOMICS_PROFILE_PATH
-    verbs._USAGE_ECONOMICS_PROFILE_PATH = original.with_name("usage_economics.missing.json")
-    try:
-        picked = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)
-    finally:
-        verbs._USAGE_ECONOMICS_PROFILE_PATH = original
-    _check(picked["selected"] == expected and "quota_unknown_used" not in picked["advisories"], "quota profile is not read for explicit unconstrained metered selection")
-    _check(not any("quota" in line for line in picked.get("warnings", [])), "independent quota warnings do not enter selection")
 
 
 def test_reseed_preserves_accepted_cells() -> None:
@@ -361,7 +318,6 @@ def test_read_verb_and_refusals() -> None:
     shown = verbs.read_model_capability_catalog(_typed(state), runtime="codex", model="gpt-6-astra", include_unaccepted=True, now=_NOW)
     _check(len(shown["cells"]) == 5 and all(not row["servable"] for row in shown["cells"]), "read filters by runtime/model and marks pending cells unservable")
     _check(_code(lambda: verbs.select_dispatch_tier(_typed(state), {}, now=_NOW)) == "parameter_invalid", "missing required_score refuses")
-    _check(_code(lambda: verbs.select_dispatch_tier(_typed(state), {"required_score": 1, "billing_objective": "tokens"}, now=_NOW)) == "parameter_invalid", "unknown objective refuses")
     _check(_code(lambda: verbs.select_dispatch_tier(_typed(state), {"required_score": 1, "max_staleness_hours": 0}, now=_NOW)) == "parameter_invalid", "non-positive window refuses")
     _check(_code(lambda: verbs.select_dispatch_tier(_typed(_policy_state()), {"required_score": 1}, now=_NOW)) == "catalog_empty", "an unseeded catalog refuses as empty")
 
@@ -369,6 +325,16 @@ def test_read_verb_and_refusals() -> None:
 def test_billing_objective_is_derived() -> None:
     _check(default_billing_objective("claude_code", now=_NOW) == "relative", "claude_code on this checkout: flat-rate plan -> relative")
     _check(default_billing_objective("codex", now=_NOW) == "metered_usd", "codex on this checkout: no flat-rate profile -> metered_usd")
+
+
+def test_selector_objective_is_plan_owned() -> None:
+    result = objective_contract(_typed(_accepted_state(measured_hours_ago=1)), _NOW)
+    key = "billing_" + "objective"
+    _check(not result["declared"], "selector declares no caller objective")
+    _check(result["refused"], "surface refuses a caller objective")
+    _check(result["weighted"][key] == "allowance_weighted" and result["relative"][key] == "relative", "covering weighted plan and unconstrained flat plan select their own objectives")
+    _check(result["unweighted"][key] == "relative" and any("declares no dispatch_weights" in warning for warning in result["unweighted"].get("warnings", [])), "covering unweighted plan reports relative and warns")
+    _check(result["metered"][key] == "metered_usd", "one patched profile path controls the default objective")
 
 
 def test_provider_fault_is_loud() -> None:
@@ -413,7 +379,7 @@ def _check_record_evidence_and_selection(state: RealShapeState) -> None:
     )
     runs = state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_REFRESH_RUN)
     _check(len(runs) == 1 and runs[0]["trigger"] == "manual" and runs[0]["status"] == "completed" and runs[0]["cells_accepted"] == 1, "one completed manual run row")
-    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 40, "billing_objective": "metered_usd"}, now=datetime.now(UTC))
+    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 40}, now=datetime.now(UTC))
     _check(picked["selected"]["model"] == "gpt-6-sol" and picked["selected"]["effort"] == "high", "the recorded cell is servable to select_dispatch_tier at once")
 
 
@@ -433,12 +399,15 @@ def test_manual_relative_costs_follow_the_whole_table() -> None:
         )
     rows = read_cells(_typed(state))
     _check(_cell(rows, "gpt-6-sol", "high")["relative_cost_multiplier"] == 10.0, "prior manual cell is rebased to the current price floor")
-    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 35, "billing_objective": "relative"}, now=datetime.now(UTC))
+    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 35}, now=datetime.now(UTC))
     _check(picked["selected"]["model"] == "gpt-6-luna", "relative selector chooses the cheaper eligible cell")
 
 
-def _live_run(cell: DiscoveredCell, *, score: float, cost: float) -> DiscoveryRun:
-    """A discovery run whose two live sources both report `score` and `cost` for one cell."""
+def _live_run(cell: DiscoveredCell, *, score: float, cost: float, detail_score: float | None = None) -> DiscoveryRun:
+    """A discovery run whose two live sources both report `score` and `cost` for one cell.
+
+    `detail_score` makes the detail page report a different score, so the two pages disagree with each other."""
+    reported = {SOURCE_LEADERBOARD_HTML: score, SOURCE_MODEL_DETAIL_HTML: score if detail_score is None else detail_score}
     readings = tuple(
         Reading(
             source_id=source,
@@ -453,8 +422,8 @@ def _live_run(cell: DiscoveredCell, *, score: float, cost: float) -> DiscoveryRu
             fetch_status="ok",
             fetched_at=datetime.now(UTC).isoformat(),
         )
-        for source in (SOURCE_LEADERBOARD_HTML, SOURCE_MODEL_DETAIL_HTML)
-        for metric, value in (("intelligence_index", score), ("cost_per_task_usd", cost))
+        for source, source_score in reported.items()
+        for metric, value in (("intelligence_index", source_score), ("cost_per_task_usd", cost))
     )
     return DiscoveryRun(
         readings=readings,
@@ -493,9 +462,47 @@ def test_manual_reading_that_disagrees_with_live_readings_is_an_advisory() -> No
     note = str(held["disagreement_note"])
     _check("manual versus live" in note and "(manual value kept)" in note, "the cell names the manual/live boundary and that the manual value was kept")
     _check(report.result_fields["manual_conflicts"] == ["codex/gpt-6-sol@high"], "the run result lists it under manual_conflicts")
-    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 80, "billing_objective": "metered_usd"}, now=datetime.now(UTC))
+    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 80}, now=datetime.now(UTC))
     _check(picked["selected"]["model"] == "gpt-6-sol" and picked["selected"]["effort"] == "high", "the selector still serves the manual cell")
     _check(len(state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_OBSERVATION)) == 6, "the live readings are kept as evidence (2 manual + 4 live observations)")
+
+
+def test_manual_reading_survives_a_crosscheck_conflict_but_a_live_cell_does_not() -> None:
+    """The 2026-11-14 11:15Z refresh (run mcr-2rlrwct70204z) overwrote operator-recorded cells: the two live pages
+    disagreed with each other, the outcome was `crosscheck_conflict`, and `_settle_cell` wrote it over the manual cell,
+    which the selector then excluded as `not_accepted`. `record_model_capability_cell` promises the opposite: a manual
+    reading the live pages disagree with stays served with a loud note. A conflict outcome carries no score, so it is
+    the pages disagreeing with each other, not with the manual value, that the note names.
+
+    Pass condition for the exclusion that is gone: none is needed (rul_becb4bed). The control is the other half of the
+    contract: a conflict on a cell no operator recorded is real signal and still overwrites it."""
+    state = _policy_state()
+    verbs.record_model_capability_cell(_typed(state), {**_GPT6_SOL_HIGH, "capability_score": 42, "cost_per_task_usd": 1.64})
+    manual = DiscoveredCell("codex", "openai", "gpt-6-sol", "high", LeaderboardRow("GPT-6 Sol (high)", "GPT-6 Sol", "high", "openai", "42", "$1.64", "gpt-6-sol-high", "fixture"), None)
+    live = DiscoveredCell("codex", "openai", "gpt-6-luna", "high", LeaderboardRow("GPT-6 Luna (high)", "GPT-6 Luna", "high", "openai", "33", "$0.03", "gpt-6-luna-high", "fixture"), None)
+    before = _cell(read_cells(_typed(state)), "gpt-6-sol", "high")
+    created = reconcile_discovery(_typed(state), open_refresh_run(_typed(state), trigger="manual"), _live_run(live, score=33.0, cost=0.03))
+    _check(created.counts["cells_accepted"] == 1 and _cell(read_cells(_typed(state)), "gpt-6-luna", "high")["acceptance"] == CELL_ACCEPTANCE_ACCEPTED, "setup: two agreeing live pages accept a cell no operator recorded")
+
+    report = reconcile_discovery(_typed(state), open_refresh_run(_typed(state), trigger="manual"), _live_run(manual, score=42.0, cost=1.64, detail_score=55.0))
+    held = _cell(read_cells(_typed(state)), "gpt-6-sol", "high")
+    _check(report.counts["cells_conflicted"] == 0 and report.counts["cells_unchanged"] == 1, "a manual cell whose live pages disagree with each other is counted unchanged, not conflicted")
+    _check(held["acceptance"] == CELL_ACCEPTANCE_ACCEPTED and held["capability_score"] == 42.0 and held["cost_per_task_usd"] == 1.64, "the manual values stay accepted and served")
+    _check(held["agreeing_observation_ids"] == before["agreeing_observation_ids"], "and it stays a manual cell: its evidence is still the recorded reading, so the next refresh holds it again")
+    note = str(held["disagreement_note"])
+    _check("manual versus live" in note and "(manual value kept)" in note and "intelligence_index" in note and "55.0" in note, "the note names the manual/live boundary, that the manual value was kept, and the two live readings that disagree")
+    _check(report.result_fields["manual_conflicts"] == ["codex/gpt-6-sol@high"], "the run result lists it under manual_conflicts")
+    try:
+        picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 40}, now=datetime.now(UTC))
+        served = (picked["selected"]["model"], picked["selected"]["effort"]) == ("gpt-6-sol", "high")
+    except TierSelectionError:  # the overwritten cell is `not_accepted`: nothing is left to serve at this score
+        served = False
+    _check(served, "the selector still serves the manual cell")
+
+    control = reconcile_discovery(_typed(state), open_refresh_run(_typed(state), trigger="manual"), _live_run(live, score=33.0, cost=0.03, detail_score=50.0))
+    overwritten = _cell(read_cells(_typed(state)), "gpt-6-luna", "high")
+    _check(control.counts["cells_conflicted"] == 1 and overwritten["acceptance"] == CELL_ACCEPTANCE_CROSSCHECK_CONFLICT, "control: the same conflict on a cell no operator recorded still overwrites it")
+    _check(control.result_fields["manual_conflicts"] == [], "and it is not reported as a manual conflict")
 
 
 def test_record_overwrites_and_reports_previous() -> None:
@@ -651,12 +658,12 @@ def _check_correct_clear_retire_reopen(state: RealShapeState) -> None:
     corrected = _policy_change(state, "correct", 1, values={"staleness_window_hours": 2})
     second = _catalog_view(state)
     _check(all(row["is_fresh"] is True for row in second["cells"]) and second["freshness_window"]["hours"] == 2, "policy correction changes next catalog read without rewriting cells")
-    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 38, "billing_objective": "metered_usd"}, now=_NOW)
+    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 38}, now=_NOW)
     _check(picked["freshness_window"]["hours"] == 2 and picked["advisories"]["stale_reading_used"] == 0, "next selection reads corrected policy")
-    explicit = verbs.select_dispatch_tier(_typed(state), {"required_score": 38, "billing_objective": "metered_usd", "max_staleness_hours": 0.25}, now=_NOW)
+    explicit = verbs.select_dispatch_tier(_typed(state), {"required_score": 38, "max_staleness_hours": 0.25}, now=_NOW)
     _check(explicit["freshness_window"]["source"] == "request" and explicit["freshness_window"]["hours"] == 0.25 and explicit["advisories"]["stale_reading_used"] > 0, "explicit request wins without a cached policy ceiling")
     _policy_change(state, "clear", corrected["provenance"]["revision"], clear_fields=["staleness_window_hours"])
-    cleared = verbs.select_dispatch_tier(_typed(state), {"required_score": 38, "billing_objective": "metered_usd"}, now=_NOW)
+    cleared = verbs.select_dispatch_tier(_typed(state), {"required_score": 38}, now=_NOW)
     _check(cleared["freshness_window"]["hours"] is None and cleared["advisories"]["unknown_freshness_window"] > 0, "clear changes next selection to unknown with accepted result")
     _check(any("cleared" in text for text in cleared["warnings"]), "cleared policy is an explicit advisory")
     _check_integral_and_retired(state)
@@ -679,7 +686,7 @@ def test_absent_policy_empty_catalog_and_other_identity() -> None:
     empty = _catalog_view(state)
     _check(empty["freshness_window"]["hours"] is None and empty["freshness_window"]["source"] == "unknown", "empty catalog and unrelated policy never invent a window")
     manual = verbs.record_model_capability_cell(_typed(state), _GPT6_SOL_HIGH)
-    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 40, "billing_objective": "metered_usd"}, now=datetime.now(UTC))
+    picked = verbs.select_dispatch_tier(_typed(state), {"required_score": 40}, now=datetime.now(UTC))
     _check(manual["freshness_window"]["hours"] is None and picked["selected"]["model"] == "gpt-6-sol" and picked["freshness_window"]["hours"] is None, "unconfigured policy still records and selects accepted facts")
     _check(_catalog_view(state)["cells"][0]["is_fresh"] is None and any("unknown" in text for text in picked["warnings"]), "unknown freshness stays null with advisory")
     _policy_change(state, "set", None, values={"staleness_window_hours": 0.5})
@@ -696,6 +703,8 @@ def test_absent_policy_empty_catalog_and_other_identity() -> None:
 
 
 if __name__ == "__main__":
+    test_selector_has_no_dispatch_policy()
+    test_selector_has_no_replay_receipt()
     test_live_window_lifecycle_and_fractional_storage()
     test_absent_policy_empty_catalog_and_other_identity()
     test_seed_writes_pending_never_accepted()
@@ -705,15 +714,15 @@ if __name__ == "__main__":
     test_aged_readings_still_select_and_a_tighter_window_changes_only_the_advisory()
     test_stale_selection_reports_readings_and_requests_one_refresh()
     test_refresh_request_is_deduplicated_against_recent_runs()
-    test_receipts_verify_after_readings_cross_the_window()
-    test_unreadable_quota_profile_is_a_warning_not_a_refusal()
     test_reseed_preserves_accepted_cells()
     test_read_verb_and_refusals()
     test_billing_objective_is_derived()
+    test_selector_objective_is_plan_owned()
     test_provider_fault_is_loud()
     test_record_verb_accepts_and_serves_a_new_model()
     test_manual_relative_costs_follow_the_whole_table()
     test_manual_reading_that_disagrees_with_live_readings_is_an_advisory()
+    test_manual_reading_survives_a_crosscheck_conflict_but_a_live_cell_does_not()
     test_record_overwrites_and_reports_previous()
     test_record_refusals()
     test_recorded_rows_name_only_declared_columns()

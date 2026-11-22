@@ -409,7 +409,7 @@ def _assert_runner_imports_and_lists_without_identity_smoke() -> int:
         # one of them: the runner resolves the effective register (gate_smokes.txt
         # plus its gate_smokes.d/ fragments) through it (prb_ae6d81ea), so a
         # born-seed tree that omitted it could not import the runner at all.
-        for filename in ("run_smokes.py", "battery_admission.py", "battery_summary.py", "contention_signal.py", "host_load.py", "gate_smoke_register.py"):
+        for filename in ("run_smokes.py", "battery_admission.py", "battery_summary.py", "contention_signal.py", "host_load.py", "host_compute_budget.py", "gate_smoke_register.py"):
             shutil.copyfile(
                 _REPO_ROOT / "quality_gates" / filename,
                 quality_gates / filename,

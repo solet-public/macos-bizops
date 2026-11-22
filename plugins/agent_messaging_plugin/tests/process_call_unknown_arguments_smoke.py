@@ -9,6 +9,7 @@ former filter from silently dropping a bypassed queued argument.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -20,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 if TYPE_CHECKING:
+    from ananta.core.actions.action_factory import StateService
     from ananta.core.actions.action_processor import QueuedActionProtocol
 
     from agent_messaging_plugin.bridge_sessions import BridgeSessionManager
@@ -32,6 +34,7 @@ from ananta.core.actions.action_metadata import ActionMetadata  # noqa: E402
 from ananta.core.actions.action_processor import ActionProcessor  # noqa: E402
 from ananta.error_handling import FrameworkError  # noqa: E402
 
+from agent_messaging_plugin.http_routes import _bridge_error_response  # noqa: E402
 from agent_messaging_plugin.models import BridgeSessionState  # noqa: E402
 from agent_messaging_plugin.platform_surface import (  # noqa: E402
     BridgeError,
@@ -42,11 +45,7 @@ from agent_messaging_plugin.process_exposure import ProcessExportPolicy  # noqa:
 
 _SERVICE_KEY = "service_interface::knowledge_service::search"
 _PLUGIN_KEY = "plugin::agent_messaging_plugin::peer_identity"
-_SESSION_START_KEYS = (
-    "plugin::agent_messaging_plugin::spawn_session",
-    "plugin::agent_messaging_plugin::dispatch_managed_work",
-    "plugin::agent_messaging_plugin::provision_role_session",
-)
+_SESSION_START_KEYS = ("plugin::agent_messaging_plugin::spawn_session",)
 _FLOW_ID = "flow-unknown-arguments-smoke"
 _passed = 0
 _failed: list[str] = []
@@ -64,7 +63,9 @@ def _check(condition: object, label: str) -> None:
 
 class _TemplateEngine:
     def resolve_templates(
-        self, action_def: dict[str, object], context: dict[str, object],
+        self,
+        action_def: dict[str, object],
+        context: dict[str, object],
     ) -> dict[str, object]:
         del context
         return action_def
@@ -117,9 +118,7 @@ def _registry() -> dict[str, object]:
         method = getattr(AgentMessagingPlugin, f"{process_key.rsplit('::', 1)[1]}_action")
         metadata = cast(ActionMetadata, getattr(method, "_platform_process_metadata"))  # noqa: B009
         session_processes[process_key] = {
-            "parameters": {
-                name: parameter.to_dict() for name, parameter in metadata.parameters.items()
-            },
+            "parameters": {name: parameter.to_dict() for name, parameter in metadata.parameters.items()},
         }
     return {
         "processes": {
@@ -135,13 +134,16 @@ def _registry() -> dict[str, object]:
     }
 
 
-def _factory() -> tuple[ActionFactory, _Recorder]:
-    recorder = _Recorder()
+def _factory(
+    registry: dict[str, object] | None = None,
+    recorder: _Recorder | None = None,
+) -> tuple[ActionFactory, _Recorder]:
+    recorder = recorder if recorder is not None else _Recorder()
     return (
         ActionFactory(
-            process_registry=_registry(),
+            process_registry=registry if registry is not None else _registry(),
             template_engine=_TemplateEngine(),
-            state_service=_StateService(),
+            state_service=cast("StateService", _StateService()),
             action_event_recorder=recorder,
         ),
         recorder,
@@ -241,7 +243,9 @@ def test_service_processor_rejects_a_bypassed_undeclared_argument() -> None:
 
 
 def _assert_bridge_argument_error(
-    process_key: str, arguments: dict[str, object], expected_code: str,
+    process_key: str,
+    arguments: dict[str, object],
+    expected_code: str,
 ) -> None:
     factory, recorder = _factory()
     surface, flows = _surface(factory)
@@ -266,14 +270,20 @@ def test_retired_session_arguments_survive_the_public_bridge_boundary() -> None:
         for field in ("ttl_seconds", "expires_at"):
             for value in (None, 0, "", "not-a-lifetime", {"malformed": True}):
                 _assert_bridge_argument_error(
-                    process_key, {field: value}, "retired_session_ttl_argument",
+                    process_key,
+                    {field: value},
+                    "retired_session_ttl_argument",
                 )
         _assert_bridge_argument_error(
-            process_key, {"unrelated": 1}, "action.unknown_arguments",
+            process_key,
+            {"unrelated": 1},
+            "action.unknown_arguments",
         )
     for field in ("ttl_seconds", "expires_at"):
         _assert_bridge_argument_error(
-            _PLUGIN_KEY, {field: None}, "action.unknown_arguments",
+            _PLUGIN_KEY,
+            {field: None},
+            "action.unknown_arguments",
         )
 
 
@@ -310,6 +320,98 @@ def test_declared_arguments_still_pass_and_missing_required_keeps_its_code() -> 
         _check(False, "missing required argument is refused at bridge boundary")
 
 
+_UNKNOWN_PROCESS_KEY = "plugin::agent_messaging_plugin::no_such_process"  # wint:negative-fixture: deliberately unregistered, the refusal under test
+_BROKEN_ENTRY_KEY = "plugin::agent_messaging_plugin::broken_entry"  # wint:negative-fixture: deliberately a malformed registry entry, never a real process
+
+
+def _refusal_over_http(
+    process_key: str,
+    arguments: dict[str, object],
+    registry: dict[str, object] | None = None,
+) -> tuple[BridgeError, int, dict[str, object]]:
+    """Dispatch through the real surface, then render the refusal as the route does."""
+    factory, _recorder = _factory(registry)
+    surface, _flows = _surface(factory)
+    try:
+        surface.process_call(
+            process_key,
+            arguments,
+            trigger_data={"bridge_id": "agc-unknown-arguments", "session_id": "sess-smoke"},
+            deliver_to_bridge=False,
+        )
+    except BridgeError as exc:
+        response = _bridge_error_response(exc)
+        body = json.loads(bytes(response.body))
+        return exc, response.status_code, body
+    raise AssertionError(f"{process_key} was not refused")
+
+
+def test_a_callers_mistake_is_a_4xx_and_the_body_is_unchanged() -> None:
+    """The unknown process / missing argument answer 4xx under the SAME code and message.
+
+    Mutation: map ``bridge.process_call_failed`` to 404 in the table, or drop the
+    status, and the 500 / body assertions below turn red.
+    """
+    exc, status, body = _refusal_over_http(_UNKNOWN_PROCESS_KEY, {})
+    _check(status == 404, f"unknown process is a 404 (got {status})")
+    _check(
+        body
+        == {
+            "code": "bridge.process_call_failed",
+            "message": f"Process '{_UNKNOWN_PROCESS_KEY}' not found or malformed in registry",
+        },
+        f"unknown process body keeps its code and message (got {body})",
+    )
+    _check(exc.code == "bridge.process_call_failed", "unknown process keeps the bridge code")
+
+    exc, status, body = _refusal_over_http(_SERVICE_KEY, {"top_k": 1})
+    _check(status == 400, f"missing required argument is a 400 (got {status})")
+    _check(
+        body["code"] == "bridge.process_call_failed" and "Missing required arguments" in str(body["message"]),
+        f"missing required argument body keeps its code and message (got {body})",
+    )
+
+    exc, status, body = _refusal_over_http(_PLUGIN_KEY, {"message": "wrong name"})
+    _check(status == 400, f"unknown argument is a 400 (got {status})")
+    _check(body["code"] == UNKNOWN_ARGUMENTS_ERROR_CODE, f"unknown argument keeps its own code (got {body['code']})")
+    _check(exc.status is None, "unknown argument relies on the table, not a carried status")
+
+
+def test_true_server_faults_stay_500() -> None:
+    """A malformed registry or a fault inside submission is not the caller's mistake.
+
+    Mutation: answer every ACTION_PROCESS_NOT_FOUND with 404 (skip the registry
+    check) and the malformed-entry assertion turns red.
+    """
+    registry = _registry()
+    processes = cast("dict[str, object]", registry["processes"])
+    processes[_BROKEN_ENTRY_KEY] = "not-a-process-definition"
+    _exc, status, body = _refusal_over_http(_BROKEN_ENTRY_KEY, {}, registry)
+    _check(status == 500, f"a malformed registry entry is a server fault, 500 (got {status})")
+    _check(body["code"] == "bridge.process_call_failed", "malformed entry keeps the bridge code")
+
+    _exc, status, _body = _refusal_over_http(_UNKNOWN_PROCESS_KEY, {}, {"processes": ["not", "a", "dict"]})
+    _check(status == 500, f"a registry whose processes is not a dict is a server fault, 500 (got {status})")
+
+    class _FailingRecorder(_Recorder):
+        def store_action_event(self, action: dict[str, object]) -> str:
+            raise RuntimeError("action store unavailable")
+
+    factory, _recorder = _factory(recorder=_FailingRecorder())
+    surface, _flows = _surface(factory)
+    try:
+        surface.process_call(
+            _PLUGIN_KEY,
+            {},
+            trigger_data={"bridge_id": "agc-unknown-arguments", "session_id": "sess-smoke"},
+            deliver_to_bridge=False,
+        )
+    except BridgeError as exc:
+        _check(_bridge_error_response(exc).status_code == 500, "a fault inside submission stays a 500")
+    else:
+        _check(False, "a fault inside submission is refused")
+
+
 def main() -> int:
     logging.getLogger("agent_messaging_plugin.platform_surface").setLevel(logging.CRITICAL)
     print("process-call undeclared argument refusal smoke")
@@ -317,6 +419,8 @@ def main() -> int:
     test_service_processor_rejects_a_bypassed_undeclared_argument()
     test_retired_session_arguments_survive_the_public_bridge_boundary()
     test_declared_arguments_still_pass_and_missing_required_keeps_its_code()
+    test_a_callers_mistake_is_a_4xx_and_the_body_is_unchanged()
+    test_true_server_faults_stay_500()
     if _failed:
         print(f"\nFAIL: {len(_failed)} check(s) failed")
         return 1

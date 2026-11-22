@@ -1,0 +1,18 @@
+{
+  "process_key": "service_interface::lifecycle_management_service::record_deployment",
+  "display_name": "Record Deployment",
+  "description": "Record in the solet's own database that a release went live: which solet, release id, full git sha, the instant it went live, what triggered it (landing or tick), the manifest sha256, and which agent instance, model and effort recorded it. Use this at the end of a deploy so that 'what is deployed and since when' has an answer inside the solet. The call is idempotent on (solet_name, git_sha, release_id): a repeat returns the same row with created False and writes nothing, so a deploy command that runs twice records once. The sha must be 40 lowercase hex characters, deployed_at must be ISO-8601 with a UTC offset, and trigger must be 'landing' or 'tick'. A new row starts in state 'recorded' at version 1 and appends one history event. The actor is stored for the history only; the call never refuses by who is asking.",
+  "embedding_description": "Record that a release was deployed: solet name, release id, git sha, deploy time, trigger landing or tick, manifest hash. Writes one deployment record to the solet's own database, safe to repeat. Use after a deploy completes to log what went live and when.",
+  "result_processor_customizations": {
+    "action_label": "Deployment recorded",
+    "result_type": "deployment_record",
+    "result_description": "Deployment row with keys deployment_id (dpr-<hex>), solet_name, release_id, git_sha, deployed_at (ISO-8601, UTC, +00:00 offset), trigger (landing|tick), state (recorded|withdrawn), version (int, starts at 1) and created (bool: True when this call wrote the row, False when the same solet, sha and release already existed).",
+    "presentation_guidance": "State the release id, short sha and deployed_at. If created is False say the deployment was already recorded and nothing changed; that is success, not an error.",
+    "output_action_guidance": "Keep deployment_id and version if the record may later need set_deployment_state. Do not call record_deployment again to verify; read_deployments mode current answers what is deployed."
+  },
+  "error_processor_customizations": {
+    "action_context": "Writing one deployment record to the solet's own database through the state service",
+    "error_interpretation": "invalid_sha: git_sha is not 40 lowercase hex characters. invalid_trigger: trigger is not 'landing' or 'tick'. invalid_deployed_at: deployed_at is not ISO-8601 or has no UTC offset. state_service_unavailable: the state service is not bound, so nothing was written. The error carries its code in data.error_code and as the prefix of the error text.",
+    "recovery_guidance": "For invalid_sha, invalid_trigger or invalid_deployed_at, correct the argument and call again. For state_service_unavailable, do not retry in a loop: confirm the solet finished starting (list_plugins shows the state plugin ready) and retry once it has."
+  }
+}

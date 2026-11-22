@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 sys.path.insert(0, str(ROOT / "ananta" / "tests" / "core" / "actions"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from async_job_fixture_support import JobState  # noqa: E402  # pyright: ignore[reportMissingImports] - resolved at runtime by the sys.path.insert calls above; plugins/<X>/tests is not a pyright extraPath
+from async_job_fixture_support import JobState  # noqa: E402 - resolved at runtime by the sys.path.insert calls above; plugins/<X>/tests is not a pyright extraPath
 from session_launch_fixture_support import (  # noqa: E402
     authority_patches,
     dispatch,
@@ -33,7 +33,7 @@ from session_launch_fixture_support import (  # noqa: E402
 
 from agent_messaging_plugin.session_launch_adapters import submit_launch  # noqa: E402
 
-VERBS = ("spawn_session", "dispatch_managed_work", "provision_role_session", "resolve_managed_dispatch", "qualify_fleet")
+VERBS = ("spawn_session", "qualify_fleet")
 
 
 ENVELOPE_KEYS = {"action_status", "data", "actions", "error", "timestamp"}
@@ -62,7 +62,7 @@ def prove_submission_envelope() -> None:
         return manager.create_job()
 
     bound = plugin_fixture(JobState())
-    plugin = SimpleNamespace(_get_state_service=bound._get_state_service, _dispatch_actor_from_state=bound._dispatch_actor_from_state, _register_unit_client=bound._register_unit_client, _try_acquire_async_job_manager=lambda: manager, _launch_jobs=SimpleNamespace(submit=submit), qualify_fleet=lambda *_args: None)
+    plugin = SimpleNamespace(_get_state_service=bound._get_state_service, _dispatch_actor_from_state=bound._dispatch_actor_from_state, _try_acquire_async_job_manager=lambda: manager, _launch_jobs=SimpleNamespace(submit=submit), qualify_fleet=lambda *_args: None)
     context = {"session_id": "session-fixture", "flow_id": "flow-fixture"}
     result = submit_launch(cast(Any, plugin), "qualify_fleet", parameters("qualify_fleet"), context)
     assert_envelope(result)
@@ -81,18 +81,10 @@ def prove_submission_envelope() -> None:
     print("PASS launch_submission_envelope: complete keys, flat full receipt data, loud invalid receipt")
 
 
-def _seed_for_verb(verb: str, plugin: Any, state: JobState) -> None:
-    if verb == "resolve_managed_dispatch":
-        from session_launch_fixture_support import seed_retry_dispatch
-
-        seed_retry_dispatch(plugin, state)
-
-
 async def prove_progress(verb: str) -> None:
     state = JobState()
     plugin = plugin_fixture(state)
     other_color = plugin_fixture(state)
-    _seed_for_verb(verb, plugin, state)
     entered, release, cheap = threading.Event(), threading.Event(), threading.Event()
     calls: list[str] = []
     results: list[dict[str, Any]] = []

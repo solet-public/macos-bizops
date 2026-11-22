@@ -13,6 +13,24 @@ from unittest.mock import patch
 
 from recovery_test_support import RecoveryBase, git, recovery, run_tests  # pyright: ignore[reportMissingImports] - retained sibling fixtures
 
+recovery_capture = sys.modules["recovery_capture"]
+recovery_lifecycle = sys.modules["recovery_lifecycle"]
+recovery_packets = sys.modules["recovery_packets"]
+
+
+class TestClock:
+    def __init__(self) -> None:
+        self.current = 1000.0
+
+    def time(self) -> float:
+        return self.current
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def advance(self, seconds: float) -> None:
+        self.current += seconds
+
 
 class RecoveryTests(RecoveryBase):
     def test_stash_journal_uses_classifier_identity_and_owns_ref_paths(self) -> None:
@@ -64,24 +82,36 @@ class RecoveryTests(RecoveryBase):
 
     def test_lifecycle_correction_stale_reversal_terminal_pool(self) -> None:
         f = self.fixture
-        f.configure(trash_seconds=0.03)
-        f.write("f", b"hold\n")
-        original = f.manual()
-        successor = f.cli("correct", original, "--note", "corrected label")["save_id"]
-        self.assertEqual(f.manifest(successor)["predecessor"], original)
-        self.assertEqual(f.cli("show", original)["state"], "present")
-        f.cli("forget", original, "--expected-state", "present")
-        self.assertIn("recovery_stale_state", f.cli("forget", original, "--expected-state", "present", code=1))
-        f.cli("unforget", original, "--expected-state", "trashed")
-        f.cli("forget", original, "--expected-state", "present")
-        time.sleep(0.04)
-        f.cli("purge", original)
-        self.assertIn("save_missing", f.cli("show", original, code=1))
-        self.assertTrue(any((f.store / "pool").iterdir()), "successor still keeps shared payload")
-        f.cli("forget", successor, "--expected-state", "present")
-        time.sleep(0.04)
-        f.cli("purge", successor)
-        self.assertEqual(list((f.store / "pool").iterdir()), [])
+        f.configure(trash_seconds=0.25)
+        clock = TestClock()
+        with (
+            patch.object(recovery_capture, "time", clock),
+            patch.object(recovery_lifecycle, "time", clock),
+            patch.object(recovery_packets, "time", clock),
+        ):
+            f.write("f", b"hold\n")
+            original = f.manual()
+            successor = f.cli("correct", original, "--note", "corrected label")["save_id"]
+            self.assertEqual(f.manifest(successor)["predecessor"], original)
+            self.assertEqual(f.cli("show", original)["state"], "present")
+            f.cli("forget", original, "--expected-state", "present")
+            self.assertIn("recovery_stale_state", f.cli("forget", original, "--expected-state", "present", code=1))
+            clock.advance(0.125)
+            f.cli("unforget", original, "--expected-state", "trashed")
+            f.cli("forget", original, "--expected-state", "present")
+            self.assertIn("trash_grace_active", f.cli("purge", original, code=1))
+            clock.advance(0.25)
+            self.assertIn("trash_grace_expired", f.cli("unforget", original, "--expected-state", "trashed", code=1))
+            clock.advance(0.125)
+            self.assertIn("trash_grace_expired", f.cli("unforget", original, "--expected-state", "trashed", code=1))
+            f.cli("purge", original)
+            self.assertIn("save_missing", f.cli("show", original, code=1))
+            self.assertTrue(any((f.store / "pool").iterdir()), "successor still keeps shared payload")
+            f.cli("forget", successor, "--expected-state", "present")
+            self.assertIn("trash_grace_active", f.cli("purge", successor, code=1))
+            clock.advance(0.375)
+            f.cli("purge", successor)
+            self.assertEqual(list((f.store / "pool").iterdir()), [])
 
     def test_prune_undelivered_never_pruned_and_newest_turn_protected(self) -> None:
         f = self.fixture

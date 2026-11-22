@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::list_session_limits",
+  "display_name": "List session limits",
+  "description": "Read the limits on how many sessions this solet runs at once: every active limit, oldest first, and the newest revisions of every state, newest first. A limit is a selector, a whole number of sessions at once, the user's words and an optional end time; every limit that matches a session must hold before the solet starts it. A limit of 0 starts nothing new while running work finishes. A limit past its ends_at does not apply and reads as lapsed: true, but it stays among the active limits until someone retires it. Only sessions the solet itself started are counted, so a session a person started by hand is never counted and never refused. A limit counts sessions at once and nothing else, and it names no asker and no project. history_limit is a whole number from 1 to 100, default 20, and bounds only the history. Each row carries limit_id, revision, selector, sessions, words, ends_at, state (active, replaced or retired), reason, set_by, the end fields of a replaced or retired revision, lapsed and set_at. Use it before set_session_limit to get the limit_id and revision a correction or retirement needs. Reading changes nothing and needs no role.",
+  "embedding_description": "See which caps on concurrent sessions are in force right now, which have lapsed past their end time, and the history of how each cap was set, corrected or retired, with the user's words for each and the revision number to correct from.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "List session limits",
+    "result_type": "list_session_limits_result",
+    "result_description": "limits, every active limit oldest first with lapsed; history, the newest revisions of every state newest first, bounded by history_limit; now, the time lapsed was read against.",
+    "presentation_guidance": "Show each active limit as the user's words and its number, and mark lapsed ones as not applying. A limit of 0 means nothing new starts. Keep the history for evidence and show it on request.",
+    "output_action_guidance": "Take limit_id and revision from a row as limit_id and expected_revision for set_session_limit correct or retire."
+  },
+  "error_processor_customizations": {
+    "action_context": "Typed StateManagementInterface read of the session limit table; nothing is written and no session is started, stopped or counted.",
+    "error_interpretation": "parameter_invalid: history_limit must be a whole number from 1 to 100; supply one or omit it for the default of 20. state_service_unavailable: the state service is not bound on this solet; restore the binding and repeat the call. stale_limit is not returned by a read; it belongs to set_session_limit.",
+    "recovery_guidance": "parameter_invalid: supply an integer history_limit from 1 to 100, or omit it. state_service_unavailable: restore the state service binding and repeat the call; a read is safe to repeat."
+  }
+}

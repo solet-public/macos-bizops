@@ -1,4 +1,4 @@
-"""Typed Salesforce API families over the pinned-org request transport.
+"""Typed Salesforce API families over the request transport of the bound org a call names.
 
 Each family is one verb with an ``operation`` parameter, and every operation is
 one documented vendor method and path relative to ``/services/data/v{version}``:
@@ -43,7 +43,7 @@ report instance delete and sObject relationship update and delete.
 
 Input checks mirror those documents: path identifiers, documented query
 parameter names and value types, required body members and enumerated body
-values. Nothing here classifies reads against writes: the registered user's
+values. Nothing here classifies reads against writes: the bound user's
 Salesforce permissions decide every operation, including deletes. Transport
 and the audit line are ``request_actions.forward``'s, the same call the
 generic verb makes, so a typed verb can never return or log what the generic

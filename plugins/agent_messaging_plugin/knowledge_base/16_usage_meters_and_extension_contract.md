@@ -21,10 +21,12 @@ The dated profile `anthropic-max-20x-2026-08-22` is an example of an accepted
 profile identifier; it is not an undated catalog name. The priced result is a catalog-based estimate unless the provider supplied a
 metered amount, and always carries its pricing basis.
 
-`read_unit_usage` is the per-Unit snapshot: it joins managed sessions, reads
-bounded S1 totals, and reports coverage, advisories, observed model/effort,
-pricing, and the latest allowance reading. It is cumulative for the Unit as of
-the read's bounds. `read_session_usage_window(since, until, vendor, priced)`
+`read_label_usage` is the per-label snapshot: it joins the managed sessions of
+one label (or one worker, by `agent_instance_id`), reads bounded S1 totals, and
+reports coverage, advisories, observed model/effort, pricing, and the latest
+allowance reading. A label is the opaque text a session stored at spawn and is
+matched exactly as stored. The snapshot is cumulative for the label as of the
+read's bounds. `read_session_usage_window(since, until, vendor, priced)`
 answers an event-time window. Raw mode is exactly S1; priced mode adds
 `pricing_by_model`, `unpriced_token_count`, and `unpriced_models`. The wrapper
 passes the window and vendor unchanged once per signal and does not fan out by
@@ -85,12 +87,12 @@ catalog: measure a provider rate first. The landed fixture/provider evidence
 proves the join and profile lookup path; it is not a live reindex or deployment
 claim.
 
-## Selection, receipts, and review boundaries
+## Selection and review boundaries
 
-Dispatch pins and constraints remain the KB14 contract. Absent added receipt
-keys replay as null/empty defaults, preserving saved tiers; unknown receipt
-keys still refuse. A pin can override threshold and constraints but not
-operator enablement. For a separate-session review, record the exact candidate
+Dispatch pins and constraints remain the KB14 contract. The selector resolves
+its cost objective from the solet's usage plan and returns its alternatives and
+notices. A pin can override threshold and constraints but not operator
+enablement. For a separate-session review, record the exact candidate
 identity and cited source readbacks, then capture a typed outcome separately
 from physical evidence. An inert or unknown flow-policy reading is advisory;
 the operator inspects wired status before treating it as active. Landing/watch
@@ -110,8 +112,8 @@ this article does not claim a live reindex, deployment, or retrieval pass.
 
 ## References
 
-- [Model Dispatch Policy](14_model_dispatch_policy.md), especially “Usage and the two meters,” “Constraints,” and “Pin and receipt replay”
-- `plugin::agent_messaging_plugin::read_unit_usage`
+- [Model Dispatch Policy](14_model_dispatch_policy.md), especially “Usage and the two meters,” “Constraints,” and “Pin”
+- `plugin::agent_messaging_plugin::read_label_usage`
 - `plugin::agent_messaging_plugin::read_session_usage_window`
-- Project Solet flow-policy create, flow release, and policy revoke verbs
+- The dispatching engine’s flow-policy create, flow release, and policy revoke verbs
 - canonical Change Close-Out Checklist (issue disposition, documentation impact, reviewer follow-ups, and lane retirement)

@@ -9,13 +9,11 @@ backing are real.
 from __future__ import annotations
 
 import ast
-import asyncio
 import hashlib
 import importlib
 import importlib.util
 import json
 import os
-import shlex
 import shutil
 import sys
 import tempfile
@@ -31,18 +29,15 @@ from uuid import uuid4
 REPO_ROOT = Path(__file__).resolve().parents[4]
 PLUGIN_SOURCE_ROOTS = sorted((REPO_ROOT / "plugins").glob("*_session_source_plugin/src"))
 sys.path[:0] = [
+    str(REPO_ROOT),
     str(REPO_ROOT / "ananta/src"),
     str(REPO_ROOT / "plugins/postgres_state_management_plugin/src"),
     *(str(path) for path in PLUGIN_SOURCE_ROOTS),
 ]
 
-from ananta.core.config.config_manager import initialize_config  # noqa: E402
-from ananta.core.domain.types import ActionResult  # noqa: E402
 from ananta.interfaces.state_management_interface import StateManagementInterface  # noqa: E402
-from ananta.interfaces.vault_service_interface import VaultServiceInterface  # noqa: E402
 from ananta.llm.session_ledger.ingest import _EVENT_SHAPE_VALIDATORS  # noqa: E402
 from ananta.llm.session_ledger.repository import SessionLedgerRepository  # noqa: E402
-from ananta.llm.session_ledger.schema import get_session_ledger_schema  # noqa: E402
 from ananta.llm.session_ledger.types import (  # noqa: E402
     EventType,
     IngestSourceKind,
@@ -52,11 +47,8 @@ from ananta.llm.session_ledger.types import (  # noqa: E402
     SourceVendor,
 )
 from ananta.llm.session_ledger.vendor import claude_code, claude_code_tasks, codex, codex_ambient, codex_cloud, codex_goals, codex_state  # noqa: E402
-from ananta.services.schema_manager import SchemaManager  # noqa: E402
-from ananta.services.state_service import StateService  # noqa: E402
-from postgres_state_management_plugin.plugin import (  # noqa: E402
-    PostgresStatePlugin,
-)
+
+from quality_gates.private_test_pg import MANIFEST_ENV, ledger_fixture, skip_fixture  # noqa: E402
 
 TOKEN_COUNT_ASSERTION = "SYSTEM_TOKEN_COUNT_INGESTS_THROUGH_REAL_PATH"
 STATE_ASSERTION = "CODEX_STATE_SYSTEM_INGESTS"
@@ -170,109 +162,11 @@ OPTIONAL_SOURCE_PLUGIN_FIXTURES: tuple[tuple[str, str, str, str, str, dict[str, 
 )
 
 
-class _FixtureVault:
-    """Return the private fixture's trust-auth password through the plugin seam."""
-
-    def __init__(self, password: str) -> None:
-        self._password = password
-
-    def retrieve(self, key: str) -> ActionResult:
-        del key
-        return {
-            "action_status": "completed",
-            "data": {"value": self._password},
-            "actions": [],
-            "error": None,
-            "timestamp": datetime.now(UTC).isoformat(),
-        }
-
-
-class _FixturePluginManager:
-    """Expose the real state plugin to StateService without starting the application."""
-
-    def __init__(self, plugin: PostgresStatePlugin) -> None:
-        self._plugin = plugin
-
-    def get_plugin(self, plugin_name: str) -> object:
-        if plugin_name != self._plugin.name:
-            raise AssertionError(f"unexpected state plugin lookup: {plugin_name}")
-        return self._plugin
-
-    def execute_action(
-        self,
-        plugin_name: str,
-        params: dict[str, object],
-        state: dict[str, object],
-        APP_HOME: str,
-        plugin_config: dict[str, object],
-    ) -> dict[str, object]:
-        del plugin_name, params, state, APP_HOME, plugin_config
-        raise AssertionError("the StateService fixture must not dispatch plugin actions")
-
-
-@contextmanager
-def _running_private_state_plugin(
-    raw_app_home: str,
-    address: dict[str, str],
-) -> Generator[PostgresStatePlugin]:
-    """Run the native PostgreSQL plugin against the provisioned private DB."""
-    plugin = PostgresStatePlugin()
-    config = initialize_config(raw_app_home)
-    saved = config.save_plugin_config(
-        plugin.name,
-        {
-            "host": address["host"],
-            "port": int(address["port"]),
-            "user": address["user"],
-            "database": address["dbname"],
-            "pg_schema": f"um05_system_role_{uuid4().hex[:12]}",
-            "pool_size": 2,
-            "connection_timeout": 10,
-        },
-    )
-    if not saved:
-        raise RuntimeError("could not save the private state-plugin fixture config")
-    plugin.set_vault_service(cast("VaultServiceInterface", _FixtureVault(address.get("password", ""))))
-    services_started = False
-    try:
-        plugin.prepare_for_readiness()
-        result = asyncio.run(plugin.start_services())
-        if result.get("action_status") != "completed":
-            raise RuntimeError(f"private state plugin failed to start: {result!r}")
-        services_started = True
-        yield plugin
-    finally:
-        if services_started:
-            stopped = asyncio.run(plugin.stop_services())
-            if stopped.get("action_status") != "completed":
-                raise RuntimeError(f"private state plugin failed to stop: {stopped!r}")
-
-
-def _private_database_address() -> dict[str, str]:
-    dsn = os.environ.get("PROJECT_SOLET_DESK_TEST_DSN")
-    if not dsn:
-        raise RuntimeError("PROJECT_SOLET_DESK_TEST_DSN is absent")
-    address = dict(part.split("=", 1) for part in shlex.split(dsn) if "=" in part)
-    if address.get("host") != "127.0.0.1" or address.get("dbname") != "project_solet_desk_test" or int(address.get("port", "5432")) == 5432:
-        raise RuntimeError("private PostgreSQL DSN failed its host, database, or port guard")
-    return address
-
-
 @contextmanager
 def _private_ledger() -> Generator[SessionLedgerRepository]:
-    """Build the native StateService/schema lifecycle on the provisioned private DB."""
-    address = _private_database_address()
-    with tempfile.TemporaryDirectory(prefix="um05-system-role-app-") as raw_app_home:
-        with _running_private_state_plugin(raw_app_home, address) as plugin:
-            state_service = StateService(
-                _FixturePluginManager(plugin),
-                app_home=raw_app_home,
-                state_plugin_name=plugin.name,
-            )
-            schema_manager = SchemaManager(state_service, plugin)
-            schema_manager.initialize_schemas([get_session_ledger_schema()])
-            state_service.set_schema_manager(schema_manager)
-            yield SessionLedgerRepository(cast("StateManagementInterface", state_service))
+    """Build the native StateService/schema lifecycle on the repository's private fixture."""
+    with ledger_fixture("ledger_ingest", schema=f"um05_system_role_{uuid4().hex[:12]}") as fixture:
+        yield SessionLedgerRepository(cast("StateManagementInterface", fixture.state))
 
 
 def _raw_event(
@@ -794,10 +688,8 @@ def _run_candidate_mode(
 
 
 def _run_database_mode(mode: str, scan_root: Path) -> int:
-    if not os.environ.get("PROJECT_SOLET_DESK_TEST_DSN"):
-        print("SKIP private PostgreSQL fixture absent: PROJECT_SOLET_DESK_TEST_DSN; run under project-solet/scripts/provision_test_pg.py --exec")
-        print('BORN_CLONE_SKIP_WITNESS={"reason":"local_postgres_fixture_unreachable"}')
-        return 77
+    if not os.environ.get(MANIFEST_ENV):
+        return skip_fixture()
 
     try:
         with _private_ledger() as repository:

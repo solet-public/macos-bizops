@@ -1,0 +1,2 @@
+# The run_smokes candidate digest hashes source only: nothing under workbench/.scratch.
+quality_gates/tests/run_smokes_digest_scratch_smoke.py

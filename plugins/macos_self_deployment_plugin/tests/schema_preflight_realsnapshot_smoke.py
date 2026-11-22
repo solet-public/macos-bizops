@@ -77,6 +77,7 @@ from macos_self_deployment_plugin.schema_snapshot_collector import (  # noqa: E4
     _assert_completeness,
     _assert_provenance,
     _reduce_to_snapshot,
+    build_snapshot,
 )
 from macos_self_deployment_plugin.schema_snapshot_producer import (  # noqa: E402
     build_schema_snapshot_fn,
@@ -91,10 +92,13 @@ _Snapshot = dict[str, dict[str, dict[str, dict[str, object]]]]
 def _candidate(schema_snapshot: _Snapshot | None, *, code_root: Path | None = None) -> CandidatePaths:
     base = Path("/nonexistent/rel-b1")
     return CandidatePaths(
-        release_id="rel-b1", release_dir=base,
+        release_id="rel-b1",
+        release_dir=base,
         code_root=code_root if code_root is not None else base / "code",
-        venv_python=base / "venv" / "bin" / "python3", version_file=base / "VERSION",
-        missing_pth_targets=(), schema_snapshot=cast("dict[str, object] | None", schema_snapshot),
+        venv_python=base / "venv" / "bin" / "python3",
+        version_file=base / "VERSION",
+        missing_pth_targets=(),
+        schema_snapshot=cast("dict[str, object] | None", schema_snapshot),
     )
 
 
@@ -118,8 +122,10 @@ def _make_plugin() -> MacosSelfDeploymentPlugin:
 
 
 def _preflight(
-    plugin: MacosSelfDeploymentPlugin, candidate_snapshot: _Snapshot | None,
-    current_snapshot: _Snapshot | None, current_release_exists: bool,
+    plugin: MacosSelfDeploymentPlugin,
+    candidate_snapshot: _Snapshot | None,
+    current_snapshot: _Snapshot | None,
+    current_release_exists: bool,
 ) -> Any:
     """Call the pure gate, casting the nested snapshot dicts at the trust boundary."""
     return plugin._schema_preflight(  # noqa: SLF001
@@ -137,7 +143,10 @@ class _FakeRM:
     """
 
     def __init__(
-        self, *, current_snapshot: _Snapshot | None, current_release: str | None,
+        self,
+        *,
+        current_snapshot: _Snapshot | None,
+        current_release: str | None,
         old_code_root: Path | None = None,
     ) -> None:
         self._current_snapshot = current_snapshot
@@ -181,6 +190,25 @@ def test_drift_guard(rec: SmokeRecorder) -> None:
     canonical = schemas_to_snapshot({"demo_plugin": schema})
     inlined = _reduce_to_snapshot({"demo_plugin": schema})
     rec.check(inlined == canonical, "collector reduce is byte-identical to the classifier reduce")
+    retiring = SchemaDefinition(
+        namespace="demo_plugin",
+        tables=schema.tables,
+        retired_tables=("old_widget", "older_widget"),
+    )
+    rec.check(
+        _reduce_to_snapshot({"demo_plugin": retiring}) == schemas_to_snapshot({"demo_plugin": retiring}),
+        "collector reduce carries the retired-tables key identically to the classifier reduce",
+    )
+    merged = build_snapshot(
+        [
+            SchemaDefinition(namespace="demo_plugin", tables=schema.tables, retired_tables=("b",)),
+            SchemaDefinition(namespace="demo_plugin", tables={}, retired_tables=("a", "b")),
+        ]
+    )
+    rec.check(
+        schemas_to_snapshot({"demo_plugin": retiring})["__retired_tables__"] == {"demo_plugin": ["old_widget", "older_widget"]} and merged["__retired_tables__"] == {"demo_plugin": ["a", "b"]},
+        "retired names are sorted and merged per namespace across definitions",
+    )
 
 
 def test_fail_closed_asserts(rec: SmokeRecorder) -> None:
@@ -292,8 +320,10 @@ def test_baseline_derive(rec: SmokeRecorder, real: _Snapshot) -> None:
         rec.check(False, "derive against an un-introspectable old tree FAILS CLOSED")
     except ReleaseManagerError:
         rec.check(True, "derive against an un-introspectable old tree raises ReleaseManagerError")
+
     # present current snapshot → NEVER calls the collector (no derive).
-    def _tripwire(_code_root: Path) -> dict[str, object]:
+    def _tripwire(code_root: Path, manifest_override: tuple[str, ...] | None = None) -> dict[str, object]:
+        del code_root, manifest_override
         msg = "collector must not run when the current snapshot is already present"
         raise AssertionError(msg)
 

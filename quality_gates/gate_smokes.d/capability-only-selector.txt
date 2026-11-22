@@ -1,0 +1,1 @@
+plugins/agent_messaging_plugin/tests/capability_only_selector_smoke.py

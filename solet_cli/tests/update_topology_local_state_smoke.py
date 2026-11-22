@@ -68,12 +68,12 @@ from solet_manager.update_topology import (  # noqa: E402
 
 from bootstrap_adapter.dependency import REQUIRED_DISTRIBUTIONS as ADAPTER_REQUIRED  # noqa: E402
 
-_CHECKS = 0
+_checks_run = 0
 
 
 def _check(condition: object, label: str) -> None:
-    global _CHECKS
-    _CHECKS += 1
+    global _checks_run
+    _checks_run += 1
     if not condition:
         raise AssertionError(label)
 
@@ -242,7 +242,7 @@ def _assert_rebaseline_crash_window(root: Path) -> None:
     report = verify_local_state(target, after_facts, cast(Any, crashed), None)
     rederived = rebaseline_revision(cast(Any, crashed), after, None, "op_x", frozenset({"NOTICE"}), "fixture", target)
     recorded = [first_revision]
-    rederived_rows = [item for item, _ in rederived or ()]
+    rederived_rows: list[Any] = [item for item, _ in rederived or ()]
     rederived_rows += [{"service_writes": {"committed_additions": list(report.additions)}}] if report.additions else []
     _check(any("operation_id" in item and item.get("paths") == ["NOTICE"] for item in [*recorded, *rederived_rows]), "after the crash the operation's revision is recorded or re-derivable")
     _check(any("service_writes" in item and [add["path"] for add in item["service_writes"]["committed_additions"]] == ["knowledge_bases/new_kb"] for item in [*recorded, *rederived_rows]), "after the crash the solet's creation is recorded or re-derivable")
@@ -302,12 +302,31 @@ def _assert_instance_rows(seams: RuntimeSeams, target: Path, bridge: Path) -> No
 
 
 def _journal() -> dict[str, Any]:
-    return cast(dict[str, Any], create_update_journal(
-        operation_id="opr_" + "a" * 32, instance_id="ins_" + "b" * 32, fingerprint="sha256:" + "c" * 64, baseline_commit="1" * 40, baseline_tree="2" * 40, branch="main",
-        candidate_descriptor_digest="sha256:" + "d" * 64, candidate_commit="e" * 40, candidate_tree="f" * 40, candidate_tag="r2", candidate_contract_digest="sha256:" + "9" * 64, receipt_digest="sha256:" + "0" * 64,
-        planned_actions=("target.fetch_exact_candidate", "target.fast_forward_exact_candidate"), timestamp="2026-09-19T00:00:00Z",
-        local_state={"preserved_tracked_paths": [{"path": "NOTICE", "sha256": "a" * 64, "size": 3}], "committed_inventory": [{"path": ".gitignore", "kind": "file", "mode": "0644", "size": 9}], "local_state_commitment": "sha256:" + "b" * 64, "preserved_surface": [{"path": "profile/config/identity.json", "kind": "file", "mode": "0644", "size": 2}]},
-    ))
+    return cast(
+        dict[str, Any],
+        create_update_journal(
+            operation_id="opr_" + "a" * 32,
+            instance_id="ins_" + "b" * 32,
+            fingerprint="sha256:" + "c" * 64,
+            baseline_commit="1" * 40,
+            baseline_tree="2" * 40,
+            branch="main",
+            candidate_descriptor_digest="sha256:" + "d" * 64,
+            candidate_commit="e" * 40,
+            candidate_tree="f" * 40,
+            candidate_tag="r2",
+            candidate_contract_digest="sha256:" + "9" * 64,
+            receipt_digest="sha256:" + "0" * 64,
+            planned_actions=("target.fetch_exact_candidate", "target.fast_forward_exact_candidate"),
+            timestamp="2026-09-19T00:00:00Z",
+            local_state={
+                "preserved_tracked_paths": [{"path": "NOTICE", "sha256": "a" * 64, "size": 3}],
+                "committed_inventory": [{"path": ".gitignore", "kind": "file", "mode": "0644", "size": 9}],
+                "local_state_commitment": "sha256:" + "b" * 64,
+                "preserved_surface": [{"path": "profile/config/identity.json", "kind": "file", "mode": "0644", "size": 2}],
+            },
+        ),
+    )
 
 
 def _assert_journal_revisions(root: Path) -> None:
@@ -315,10 +334,13 @@ def _assert_journal_revisions(root: Path) -> None:
     _check(value["schema_version"] == UPDATE_JOURNAL_SCHEMA_VERSION == 5 and value["local_state"]["baseline"] == value["local_state"]["current"] and value["local_state"]["revisions"] == [], "a v5 journal starts with current == baseline and no revisions")
     current = dict(value["local_state"]["current"])
     current["preserved_tracked_paths"] = [{"path": "NOTICE", "sha256": "c" * 64, "size": 4}]
-    rebaselined = record_local_state_revision(value, revision={"operation_id": "migration_solet_rename", "paths": ["NOTICE"], "before": {"NOTICE": "a" * 64}, "after": {"NOTICE": "c" * 64}}, current=current, timestamp="2026-09-19T00:00:01Z")
+    rebaselined = cast(dict[str, Any], record_local_state_revision(value, revision={"operation_id": "migration_solet_rename", "paths": ["NOTICE"], "before": {"NOTICE": "a" * 64}, "after": {"NOTICE": "c" * 64}}, current=current, timestamp="2026-09-19T00:00:01Z"))
     _check(rebaselined["local_state"]["current"] == current and rebaselined["local_state"]["baseline"] == value["local_state"]["baseline"] and len(rebaselined["local_state"]["revisions"]) == 1, "a re-baseline moves current, never baseline")
     surface = record_local_state_revision(rebaselined, revision={"operation_id": "migration_export_root_containment", "preserved_surface_delta": ["profile/config/plugins/jira_plugin.json"]}, current=current, timestamp="2026-09-19T00:00:02Z")
-    lifecycle = record_local_state_revision(surface, revision={"stage": "lifecycle", "service_writes": {"committed_additions": [{"path": "knowledge_bases/new_plugin", "kind": "symlink", "mode": "0755", "size": 34, "target_digest": "d" * 64}], "preserved_surface_delta": []}}, current=current, timestamp="2026-09-19T00:00:03Z")
+    lifecycle = cast(
+        dict[str, Any],
+        record_local_state_revision(surface, revision={"stage": "lifecycle", "service_writes": {"committed_additions": [{"path": "knowledge_bases/new_plugin", "kind": "symlink", "mode": "0755", "size": 34, "target_digest": "d" * 64}], "preserved_surface_delta": []}}, current=current, timestamp="2026-09-19T00:00:03Z"),
+    )
     _check(len(lifecycle["local_state"]["revisions"]) == 3, "the three closed revision shapes are accepted")
     _expect(StateError, lambda: record_local_state_revision(lifecycle, revision={"stage": "nowhere", "service_writes": {"committed_additions": [], "preserved_surface_delta": []}}, current=current), "an unknown stage is refused")
     _expect(StateError, lambda: record_local_state_revision(lifecycle, revision={"operation_id": "x", "paths": ["a"]}, current=current), "a revision outside the closed shapes is refused")
@@ -336,7 +358,23 @@ def _assert_journal_revisions(root: Path) -> None:
 
 
 _RETIRED_NAMES = ("tracked_state_present", "_EXECUTED_CODE_PREFIXES", "DISJOINT_LOCAL_TRACKED_CHANGES")
-_STEP7_REASONS = {"colour_outside_launchagent", "executed_code_modified", "git_metadata_present", "host_requirement_missing", "host_requirement_unknown", "hydration_block_uncarriable", "instance_requirement_missing", "local_state_unobserved", "preservation_violated", "preserved_surface_in_transition", "service_offline_before_transition", "staged_changes_present", "tracked_overlap_present", "tracked_shape_changed"}
+_STEP7_REASONS = {
+    "colour_outside_launchagent",
+    "executed_code_modified",
+    "git_metadata_present",
+    "host_requirement_missing",
+    "host_requirement_unknown",
+    "hydration_block_uncarriable",
+    "instance_requirement_missing",
+    "local_state_unobserved",
+    "preservation_violated",
+    "preserved_surface_in_transition",
+    "service_offline_before_transition",
+    "staged_changes_present",
+    "supervisor_launch_needs_hand_route",
+    "tracked_overlap_present",
+    "tracked_shape_changed",
+}
 
 
 def _manager_sources() -> dict[str, str]:
@@ -372,7 +410,7 @@ def main() -> int:
         _assert_host_rows(root)
         _assert_journal_revisions(root)
         _assert_vocabulary()
-    print(f"update_topology_local_state_smoke OK: {_CHECKS} checks passed")
+    print(f"update_topology_local_state_smoke OK: {_checks_run} checks passed")
     return 0
 
 

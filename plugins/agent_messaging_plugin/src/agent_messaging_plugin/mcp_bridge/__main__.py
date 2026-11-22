@@ -35,6 +35,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
 from ..bridge_diagnostics import BridgeDiagnostics, ClientReason
+from ..channel_support import bridge_wake_capable
 from ..env_contract import (
     AGENT_IDENTITY_ENV,
     AGENT_INSTANCE_ID_ENV,
@@ -853,20 +854,15 @@ async def _run() -> None:
     # (forwarder._notification_method_for), so a codex holder would be
     # deaf — organism turns would park until the serve-timeout sweep.
     provides_inference = agent_id == DEFAULT_AGENT_ID
-    # codex-watch-migration wake_capable design (2026-08-06): declared here,
-    # never probed — true only for the agent kind with a registered native
-    # wake adapter (Claude Code). Codex's bridge has no turn-injection
-    # surface once the patched build retires, so it declares false. A Codex
-    # delivery still reaches the recipient through the watch/durable-inbox
-    # path (durable + observable regardless of wake_capable): an unmanaged
-    # Codex session drains it on its own next user turn (no live Stop-hook
-    # notice exists — codex-0147-async-hook-regression, 2026-08-13, removed
-    # the async Stop binding because stock Codex does not execute async
-    # command hooks), while a spawn_session-managed worker gets an
-    # independent driver-channel nudge from drive_on_delivery, unaffected by
-    # wake_capable or the Stop-hook removal. See models.py's
-    # BridgeBinding.wake_capable for the full rationale.
-    wake_capable = agent_id == DEFAULT_AGENT_ID
+    # wake_capable is declared from this bridge's own environment, never probed
+    # from another process: false for Codex (no native wake path once the
+    # patched build retires; a Codex delivery still reaches the recipient
+    # through the watch/durable-inbox path) and false for Claude Code on a
+    # provider that ignores development channels (it never surfaces channel
+    # events, so the pane notice is that session's only wake). The delivery
+    # drive reads it to decide whether a delivery-waiting pane notice is typed.
+    # See models.py's BridgeBinding.wake_capable for the full rationale.
+    wake_capable = bridge_wake_capable(is_claude_code=agent_id == DEFAULT_AGENT_ID, env=os.environ)
     forwarder = Forwarder(
         base_url=base_url,
         solet_name=solet_name,

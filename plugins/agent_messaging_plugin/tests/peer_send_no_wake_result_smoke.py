@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -126,14 +124,14 @@ def _call_peer_send_by_name(
         return plugin.peer_send_by_name({"name": "Target", "content": "hello"}, {})
 
 
-def _call_send_peer_message(drive: DriveOnDeliveryOutcome) -> dict[str, object]:
+def _call_peer_send(drive: DriveOnDeliveryOutcome) -> dict[str, object]:
     plugin = _plugin()
     with (
         patch.object(plugin_module, "_resolve_role_send_sender", return_value=SENDER),
         patch.object(plugin_module, "sole_role_for_reply_address", return_value=""),
         patch.object(plugin_module, "dispatch_peer_send", return_value=_peer_outcome(drive)),
     ):
-        return plugin.send_peer_message(
+        return plugin.peer_send_action(
             {"peer_id": "codex", "peer_agent_instance_id": "agi-target", "content": "hello"},
             {},
         )
@@ -259,31 +257,48 @@ def _real_process_envelope(
         return surface.process_result(action.id)
 
 
+def _not_delivered_yet(data: object) -> bool:
+    """A receipt the drive has not reached yet: its status, its outcome read and the notice that says so."""
+    return (
+        isinstance(data, dict)
+        and data.get("send_status") == "stored_not_delivered_yet"
+        and data.get("outcome_read") == {"process": "plugin::agent_messaging_plugin::peer_send_outcome", "parameters": {"message_id": MESSAGE_ID}}
+        and all(text in str(data.get("sender_notice")) for text in ("NOT DELIVERED YET", "peer_send_outcome", "Do NOT resend"))
+    )
+
+
 def test_peer_send_by_name_action() -> None:
     result = _call_peer_send_by_name("driver_unavailable")
     _check(_stored_receipt(result), "peer_send_by_name stored receipt, status stays completed, no-resend notice")
     scheduled = _call_peer_send_by_name("driver_scheduled")
     scheduled_data = scheduled.get("data")
-    _check(scheduled.get("action_status") == "completed" and isinstance(scheduled_data, dict) and scheduled_data.get("send_status") == "stored_wake_pending", "WAKE_SCHEDULED_NOT_CONFIRMED completed scheduled role send")
+    _check(scheduled.get("action_status") == "completed" and _not_delivered_yet(scheduled_data), "WAKE_SCHEDULED_NOT_CONFIRMED completed scheduled role send")
 
 
 def test_scheduled_receipts_are_unconfirmed() -> None:
-    for name, invoke in (("direct", _call_send_peer_message), ("role", _call_peer_send_by_name)):
-        result = invoke("driver_scheduled")
-        data = result.get("data")
-        _check(
-            result.get("action_status") == "completed"
-            and isinstance(data, dict)
-            and data.get("message_id") == MESSAGE_ID
-            and data.get("send_status") == "stored_wake_pending"
-            and all(text in str(data.get("sender_notice")) for text in ("already stored", "merely scheduled", "turn start is unconfirmed", "Do NOT resend")),
-            f"WAKE_SCHEDULED_NOT_CONFIRMED {name}",
-        )
+    for name, invoke in (("direct", _call_peer_send), ("role", _call_peer_send_by_name)):
+        for drive in ("driver_scheduled", "driver_pending"):
+            result = invoke(drive)
+            data = result.get("data")
+            _check(
+                result.get("action_status") == "completed" and isinstance(data, dict) and data.get("message_id") == MESSAGE_ID and _not_delivered_yet(data),
+                f"WAKE_SCHEDULED_NOT_CONFIRMED {name} {drive}",
+            )
 
 
-def test_send_peer_message_action() -> None:
-    result = _call_send_peer_message("driver_unavailable")
-    _check(_stored_receipt(result), "send_peer_message stored receipt, status stays completed, no-resend notice")
+def test_peer_send_action() -> None:
+    result = _call_peer_send("driver_unavailable")
+    _check(_stored_receipt(result), "peer_send stored receipt, status stays completed, no-resend notice")
+
+
+def test_one_name_for_the_send_verb() -> None:
+    """The CLI process, its KB article and the MCP tool share one name, with no alias left."""
+    metadata = getattr(plugin_module.AgentMessagingPlugin.peer_send_action, "_platform_process_metadata", None)
+    _check(getattr(metadata, "name", None) == "peer_send", "the verb's process name is peer_send, the MCP tool's name")
+    _check(not hasattr(plugin_module.AgentMessagingPlugin, "send_peer_message"), "the old verb name is gone, no alias")
+    article = json.loads((REPO_ROOT / "plugins" / "agent_messaging_plugin" / "knowledge_base" / "processes" / "peer_send.json").read_text())
+    _check(article["process_key"] == "plugin::agent_messaging_plugin::peer_send", "the KB article is keyed by the one name")
+    _check(callable(stream_dispatch._tool_peer_send), "the MCP peer_send tool entry is wired")  # noqa: SLF001
 
 
 def test_streamable_send_tools() -> None:
@@ -338,112 +353,6 @@ def test_local_cli_prints_receipt_and_warns_without_failing() -> None:
     _check_cli_output(response)
 
 
-def _load_rotation_hook() -> dict[str, Any]:
-    hook_path = REPO_ROOT / "plugins" / "github_midwife_plugin" / "claude_plugin" / "coordination-hooks" / "hooks" / "rotation_due_watch.py"
-    print(f"LOADED frozen_rotation_hook={hook_path}")
-    namespace: dict[str, Any] = {
-        "__name__": "_frozen_rotation_due_watch_under_test",
-        "__file__": str(hook_path),
-    }
-    source = hook_path.read_text(encoding="utf-8")
-    exec(compile(source, str(hook_path), "exec"), namespace)  # noqa: S102
-    return namespace
-
-
-def _exercise_hook_ticks(*, unwritable_fallback: bool) -> tuple[int, bool, int]:
-    hook = _load_rotation_hook()
-    identity_root = Path(tempfile.mkdtemp(prefix="stored-no-wake-hook-"))
-    marker_dir = identity_root / "markers"
-    latch_path = marker_dir / "context_watch" / "test.latch"
-    fallback_path = marker_dir / "context_watch" / "fallback.json"
-    thresholds = SimpleNamespace(
-        rotation_due_verdict=lambda **_kwargs: SimpleNamespace(
-            due=True,
-            band="warm_immediate",
-            band_actionable=True,
-            fraction_crossed=True,
-        ),
-        resolve_ceiling=lambda _model: 100,
-        ROTATION_THRESHOLD_FRACTION=0.8,
-    )
-    hook["_verified_identity_directory"] = lambda: identity_root
-    hook["_is_designated_gauge_reporter"] = lambda: True
-    hook["_resolve_firing_context"] = lambda _identity: (
-        marker_dir,
-        "agi-hook-test",
-        "unused-transcript",
-        "claude-session-test",
-    )
-    hook["is_throttled"] = lambda *_args, **_kwargs: False
-    hook["_resolve_usage"] = lambda _path: ("fixture-model", 99, None, thresholds)
-    hook["_cache_arguments"] = lambda *_args: {}
-    hook["_report_context_status"] = lambda **_kwargs: False
-    hook["_resolve_steward_role"] = lambda _instance: "Steward"
-    hook["_latch_marker_path"] = lambda *_args: latch_path
-    hook["_fallback_marker_path"] = lambda *_args: fallback_path
-
-    action_result = _call_peer_send_by_name("driver_unavailable")
-    cli_envelope = _real_process_envelope(action_result)
-    # Produce exactly the receipt the local CLI prints, with its service call mocked.
-    from click.testing import CliRunner
-
-    with patch.object(cli_module, "_run", side_effect=lambda callback: callback(SimpleNamespace(call_and_wait=lambda *_args, **_kwargs: cli_envelope))):
-        cli_response = CliRunner().invoke(
-            cli_module.cli,
-            ["call", "plugin::agent_messaging_plugin::peer_send_by_name", "{}"],
-        )
-    peer_sends: list[str] = []
-
-    def mocked_subprocess_run(
-        args: list[str],
-        *,
-        capture_output: bool,
-        text: bool,
-        timeout: int,
-        check: bool,
-        env: dict[str, str],
-    ) -> subprocess.CompletedProcess[str]:
-        del capture_output, text, timeout, check, env
-        if len(args) > 2 and args[2] == hook["_PEER_SEND_PROCESS_KEY"]:
-            peer_sends.append(args[2])
-            return subprocess.CompletedProcess(
-                args,
-                0,
-                cli_response.stdout,
-                cli_response.stderr,
-            )
-        raise AssertionError(f"unexpected subprocess command: {args!r}")
-
-    original_write_text = Path.write_text
-    fallback_attempts = 0
-
-    def guard_fallback_write(path: Path, data: str, *args: Any, **kwargs: Any) -> int:
-        nonlocal fallback_attempts
-        if path == fallback_path:
-            fallback_attempts += 1
-            if unwritable_fallback:
-                raise OSError("injected unwritable fallback marker")
-        return original_write_text(path, data, *args, **kwargs)
-
-    main = hook["main"]
-    with (
-        patch.object(subprocess, "run", side_effect=mocked_subprocess_run),
-        patch.object(Path, "write_text", new=guard_fallback_write),
-    ):
-        first = main()
-        second = main()
-    _check(first == 0 and second == 0, "frozen hook returns zero on both eligible ticks")
-    _check(len(peer_sends) == 1, "frozen hook sends stored receipt once across two ticks")
-    _check(latch_path.is_file(), "frozen hook writes its per-session latch")
-    _check(fallback_attempts == 0, "successful CLI receipt bypasses fallback marker write")
-    return len(peer_sends), latch_path.is_file(), fallback_attempts
-
-
-def test_frozen_rotation_hook_latches_even_if_fallback_marker_is_unwritable() -> None:
-    _exercise_hook_ticks(unwritable_fallback=False)
-    _exercise_hook_ticks(unwritable_fallback=True)
-
-
 def _identity_notice_mutant(
     payload: dict[str, Any],
     *,
@@ -464,7 +373,7 @@ def test_no_notice_mutant_is_red_for_each_sender_path() -> None:
     print(f"LOADED local_cli={cli_module.__file__}")
     mutant_paths: tuple[tuple[str, Any], ...] = (
         ("peer_send_by_name action mapping", lambda: _call_peer_send_by_name("driver_unavailable")),
-        ("send_peer_message action mapping", lambda: _call_send_peer_message("driver_unavailable")),
+        ("peer_send action mapping", lambda: _call_peer_send("driver_unavailable")),
         ("MCP peer_send payload", lambda: _call_streamable_peer_send("driver_unavailable")),
         ("MCP peer_send_by_name payload", lambda: _call_streamable_role_send("driver_unavailable")),
     )
@@ -488,6 +397,11 @@ def test_no_notice_mutant_is_red_for_each_sender_path() -> None:
     )
 
 
+def _stored_no_wake_without_outcome_read(result: dict[str, object]) -> bool:
+    data = result.get("data")
+    return result.get("action_status") == "completed" and isinstance(data, dict) and data.get("send_status") == "stored_no_wake" and "outcome_read" not in data
+
+
 def test_other_drive_outcomes_and_delivery_classes() -> None:
     for drive in ("not_managed", "ineligible_state", "driver_queue_full", "driver_error"):
         result = _call_peer_send_by_name(drive)
@@ -496,6 +410,8 @@ def test_other_drive_outcomes_and_delivery_classes() -> None:
             result.get("action_status") == "completed" and isinstance(data, dict) and data.get("drive_on_delivery") == drive and data.get("send_status") == "stored_no_wake",
             f"no-drive sibling {drive} is marked stored_no_wake and stays completed",
         )
+    watcher = _call_peer_send_by_name("driver_unavailable", "queued_watcher")
+    _check(_stored_no_wake_without_outcome_read(watcher), "T3: queued_watcher with driver_unavailable is stored_no_wake and carries no outcome_read")
     replay = _call_peer_send_by_name("driver_unavailable", "queued_for_replay")
     replay_data = replay.get("data")
     _check(
@@ -510,11 +426,11 @@ def test_other_drive_outcomes_and_delivery_classes() -> None:
 def main() -> int:
     tests = (
         test_peer_send_by_name_action,
-        test_send_peer_message_action,
+        test_peer_send_action,
+        test_one_name_for_the_send_verb,
         test_scheduled_receipts_are_unconfirmed,
         test_streamable_send_tools,
         test_local_cli_prints_receipt_and_warns_without_failing,
-        test_frozen_rotation_hook_latches_even_if_fallback_marker_is_unwritable,
         test_other_drive_outcomes_and_delivery_classes,
         test_no_notice_mutant_is_red_for_each_sender_path,
     )

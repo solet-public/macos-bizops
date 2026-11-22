@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "plugins/marketo_plugin/src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from lead_database_objects_smoke import STATE, _VendorTranscriptCase  # noqa: E402  # pyright: ignore[reportMissingImports]
+from lead_database_objects_smoke import STATE, _VendorTranscriptCase  # noqa: E402
 from marketo_plugin import bulk_api, completion_templates, file_api, transfer_metadata  # noqa: E402
 from marketo_plugin.constants import CHECK_SETUP_UNVERIFIED_WRITE_VERBS  # noqa: E402
 from marketo_plugin.multipart import decode_files, prepare_files  # noqa: E402

@@ -1,0 +1,2 @@
+# prb_e03ec2bb (chg_1f9fa4db): a lane spawned in tmux could not run a bare solet-bridge, because tmux hands the pane the client PATH and ignores `new-session -e PATH`. This smoke proves the pane resolves the CLI on a private tmux server.
+plugins/agent_messaging_plugin/tests/lane_path_resolves_cli_smoke.py

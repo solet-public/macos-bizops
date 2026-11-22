@@ -1,0 +1,4 @@
+# Checkout-only marker for the shipped session-start hooks' fit smoke: after a compaction the host sends source compact, both
+# plugin hooks answer it, and what they deliver for every source stays within the host's 10,000 UTF-16 units. Offline, stubbed
+# boundary; the live delivery is the separate --live-shipped mode and is not run by the gate.
+# not shipped: quality_gates/tests/principle_context_shipped_smoke.py imports quality_gates/tests/principle_context_smoke.py, itself checkout-only (fleet_tooling)

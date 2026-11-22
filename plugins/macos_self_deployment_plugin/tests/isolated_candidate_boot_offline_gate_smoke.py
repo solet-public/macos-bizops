@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import shutil
 import socket
 import sys
@@ -52,9 +53,7 @@ def _expect(condition: object, label: str) -> None:
 
 
 def _private_scratch() -> Path:
-    root = Path.home() / ".ananta" / "offline-boot-gate"
-    root.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix="run-", dir=root))
+    return Path(tempfile.mkdtemp(prefix="obg-")).resolve()
 
 
 def _free_port() -> int:
@@ -115,6 +114,7 @@ class _RouterHarness:
             return
 
         def _finish() -> None:
+            assert self._stop is not None
             if not self._stop.done():
                 self._stop.set_result(None)
 
@@ -208,12 +208,7 @@ def _start_heartbeat(
 
 def _registered(client: RouterClient, instance_id: str, port: int) -> bool:
     colors = client.status().get("colors")
-    return isinstance(colors, list) and any(
-        isinstance(entry, dict)
-        and entry.get("instance_id") == instance_id
-        and entry.get("port") == port
-        for entry in colors
-    )
+    return isinstance(colors, list) and any(isinstance(entry, dict) and entry.get("instance_id") == instance_id and entry.get("port") == port for entry in colors)
 
 
 def _scenario_candidate_registers() -> None:
@@ -224,11 +219,15 @@ def _scenario_candidate_registers() -> None:
     stop: threading.Event | None = None
     heartbeat: threading.Thread | None = None
     try:
+        _expect(
+            not scratch.is_relative_to(Path.home().resolve() / ".ananta" / "offline-boot-gate"),
+            "scratch is outside the real ~/.ananta/offline-boot-gate",
+        )
         router.start()
+        _expect(len(os.fsencode(router.socket_path)) < 104, "router socket path fits the macOS limit")
         _expect(router.socket_path.is_socket(), "router socket is inside private runtime")
         _expect(
-            (scratch / "candidate.bridge.port").is_file()
-            and (scratch / "candidate.router.port").is_file(),
+            (scratch / "candidate.bridge.port").is_file() and (scratch / "candidate.router.port").is_file(),
             "router discovery files are inside private runtime",
         )
         _expect(
@@ -245,17 +244,14 @@ def _scenario_candidate_registers() -> None:
             bridge_listener.listen()
             port_cell["value"] = int(bridge_listener.getsockname()[1])
 
-        poller = _PollerHarness(
-            [SimpleNamespace(id="start", process_key=_START_INTERFACE)], _start_interface
-        )
+        poller = _PollerHarness([SimpleNamespace(id="start", process_key=_START_INTERFACE)], _start_interface)
         client = RouterClient(router.socket_path)
         instance_id = "offline-candidate-green"
-        stop, tokens, heartbeat = _start_heartbeat(
-            client, lambda: port_cell["value"], instance_id
-        )
+        stop, tokens, heartbeat = _start_heartbeat(client, lambda: port_cell["value"], instance_id)
         asyncio.run(poller.run_once())
         port = port_cell["value"]
         _expect(isinstance(port, int), "candidate start_interface bound a bridge port")
+        assert port is not None
         deadline = time.monotonic() + _SMOKE_BUDGET_SECONDS + _SMOKE_SLACK_SECONDS
         while time.monotonic() < deadline and not _registered(client, instance_id, port):
             time.sleep(0.05)
@@ -304,16 +300,15 @@ async def _run_stalled_action_scenario() -> tuple[list[str], list[str], list[str
         poller = _PollerHarness(
             [
                 SimpleNamespace(
-                    id="earlier-stalled", process_key="plugin::fixture::stall"  # wint:negative-fixture
+                    id="earlier-stalled",
+                    process_key="plugin::fixture::stall",  # wint:negative-fixture
                 ),
                 SimpleNamespace(id="start", process_key=_START_INTERFACE),
             ],
             _dispatch,
         )
         client = RouterClient(router.socket_path)
-        stop, tokens, heartbeat = _start_heartbeat(
-            client, lambda: None, "offline-stranded-green"
-        )
+        stop, tokens, heartbeat = _start_heartbeat(client, lambda: None, "offline-stranded-green")
         started_at = time.monotonic()
         task = asyncio.create_task(poller.run_once())
         await asyncio.wait_for(stalled_entered.wait(), timeout=1.0)
@@ -325,9 +320,7 @@ async def _run_stalled_action_scenario() -> tuple[list[str], list[str], list[str
             poller.dispatched == ["earlier-stalled"],
             "earlier stall leaves start_interface unclaimed for a healthy poller",
         )
-        fired = await asyncio.to_thread(
-            _wait_for_tokens, tokens, _SMOKE_BUDGET_SECONDS + _SMOKE_SLACK_SECONDS
-        )
+        fired = await asyncio.to_thread(_wait_for_tokens, tokens, _SMOKE_BUDGET_SECONDS + _SMOKE_SLACK_SECONDS)
         elapsed = time.monotonic() - started_at
         _expect(fired, "stranded candidate fails closed inside bounded window")
         _expect(
@@ -365,6 +358,7 @@ def main() -> int:
     print("=== isolated_candidate_boot_offline_gate_smoke ===")
     defaults = heartbeat_lifecycle.run.__kwdefaults__
     _expect(defaults is not None, "heartbeat exposes keyword defaults")
+    assert defaults is not None
     _expect(
         defaults["budget_seconds"] == DEFAULT_TRANSIENT_STATE_BUDGET_SECONDS,
         "heartbeat default remains the live swap transient-state budget",

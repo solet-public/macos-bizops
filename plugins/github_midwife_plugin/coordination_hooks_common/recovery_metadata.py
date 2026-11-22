@@ -158,7 +158,8 @@ def _provision_root(candidate: Path) -> None:
 
 
 def prepare_root(requested: Path | None, cwd: Path, deadline: float, *, read_only: bool = False) -> tuple[Path, tuple[str, ...]]:
-    candidate = requested or Path(os.environ.get("SOLET_RECOVERY_ROOT", str(_default_root())))
+    configured = os.environ.get("SOLET_RECOVERY_ROOT", "").strip()
+    candidate = requested or Path(configured or str(_default_root()))
     candidate = candidate.expanduser().resolve()
     advisory: tuple[str, ...] = ()
     if read_only:

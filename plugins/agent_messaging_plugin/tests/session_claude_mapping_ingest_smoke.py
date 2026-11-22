@@ -15,13 +15,8 @@ host_adapter_liveness_smoke.py's ``test_a_real_consumer_is_wired_to_the_interfac
 — the REAL ``AgentMessagingPlugin._run_session_lifecycle_sweep`` genuinely
 reaches this drain, not just that the function exists unwired.
 
-Also covers ``detect_hook_absent_sessions`` (S2c, named T1 follow-up): a
-``managed_session`` row past the grace window with NO ``hook:startup``
-mapping row fires a WARNING (the genuinely-broken-hook case the cross-check
-alone cannot see); a row still inside the grace window, one that already
-has its hook:startup row, and rows in terminal/too-early lifecycle states
-are all NOT flagged; an old operator row is included; and the same wired-consumer
-proof for the sweep tick.
+Also asserts the sweep riders no longer run a hook-absence check: a hookless
+live row past the old grace window is neither warned about nor marked checked.
 
 Run:
     .venv/bin/python3 \
@@ -38,7 +33,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT))
@@ -50,22 +44,16 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import RegisterUnitDouble, fixture_assignment  # noqa: E402
 
+from agent_messaging_plugin import plugin as plugin_module  # noqa: E402
 from agent_messaging_plugin import session_claude_mapping_ingest  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.schema import (  # noqa: E402
     LIFECYCLE_LIVE,
     LIFECYCLE_SPAWNING,
-    LIFECYCLE_TERMINATED,
     SESSION_HOST_HEADLESS,
-    SESSION_HOST_OPERATOR,
-    SESSION_HOST_TMUX,
-    WORK_CLASS_READ_ONLY,
 )
 from agent_messaging_plugin.session_claude_mapping_ingest import (  # noqa: E402
-    DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S,
-    detect_hook_absent_sessions,
     drain_session_claude_mapping_spool,
 )
 from agent_messaging_plugin.session_claude_mapping_store import (  # noqa: E402
@@ -74,12 +62,17 @@ from agent_messaging_plugin.session_claude_mapping_store import (  # noqa: E402
 )
 from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
     ManagedSessionSpec,
-    backfill_registration,
     insert_managed_session,
+    read_managed_session,
     transition_lifecycle_state,
 )
 
 _T0 = datetime(2026, 8, 5, 18, 0, 0, tzinfo=UTC)
+
+
+def _new_state() -> StateManagementInterface:
+    return cast("StateManagementInterface", RealShapeState())
+
 
 _passed = 0
 _failed: list[str] = []
@@ -130,7 +123,7 @@ def test_missing_spool_dir_returns_zero_processed() -> None:
     orig = os.environ.pop(_SPOOL_ENV, None)
     orig_app_home = os.environ.pop("APP_HOME", None)
     try:
-        state = RealShapeState()
+        state = _new_state()
         result = drain_session_claude_mapping_spool(state)
         _check(
             result == {"files_seen": 0, "upserted": 0, "skipped_malformed": 0},
@@ -161,7 +154,7 @@ def test_app_home_fallback_drains_platform_side() -> None:
         orig_app_home = os.environ.get("APP_HOME")
         os.environ["APP_HOME"] = tmp
         try:
-            state = RealShapeState()
+            state = _new_state()
             result = drain_session_claude_mapping_spool(state)
         finally:
             if orig is not None:
@@ -199,7 +192,7 @@ def test_explicit_spool_env_wins_over_app_home() -> None:
         os.environ[_SPOOL_ENV] = str(env_spool)
         os.environ["APP_HOME"] = str(Path(tmp) / "home")
         try:
-            state = RealShapeState()
+            state = _new_state()
             result = drain_session_claude_mapping_spool(state)
         finally:
             if orig is None:
@@ -223,7 +216,7 @@ def test_nonexistent_spool_dir_returns_zero_processed() -> None:
         orig = os.environ.get(_SPOOL_ENV)
         os.environ[_SPOOL_ENV] = str(Path(tmp) / "never-created")
         try:
-            state = RealShapeState()
+            state = _new_state()
             result = drain_session_claude_mapping_spool(state)
             _check(
                 result == {"files_seen": 0, "upserted": 0, "skipped_malformed": 0},
@@ -246,7 +239,7 @@ def test_fresh_file_ingested_and_deleted() -> None:
         )
         os.environ[_SPOOL_ENV] = str(spool_dir)
         try:
-            state = RealShapeState()
+            state = _new_state()
             result = drain_session_claude_mapping_spool(state)
         finally:
             os.environ.pop(_SPOOL_ENV, None)
@@ -269,7 +262,7 @@ def test_rerun_after_deletion_is_clean_noop() -> None:
         _write_spool_file(spool_dir, agent_instance_id="agi-ingest-2", claude_session_id="cs-a")
         os.environ[_SPOOL_ENV] = str(spool_dir)
         try:
-            state = RealShapeState()
+            state = _new_state()
             first = drain_session_claude_mapping_spool(state)
             second = drain_session_claude_mapping_spool(state)
         finally:
@@ -294,7 +287,7 @@ def test_malformed_file_skipped_not_deleted() -> None:
         missing_field_path.write_text(json.dumps({"agent_instance_id": "agi-bad-2"}))
         os.environ[_SPOOL_ENV] = str(spool_dir)
         try:
-            state = RealShapeState()
+            state = _new_state()
             result = drain_session_claude_mapping_spool(state)
         finally:
             os.environ.pop(_SPOOL_ENV, None)
@@ -325,7 +318,7 @@ def test_crash_before_delete_reingests_idempotently() -> None:
         )
         os.environ[_SPOOL_ENV] = str(spool_dir)
         try:
-            state = RealShapeState()
+            state = _new_state()
             original_unlink = Path.unlink
             calls: list[int] = []
 
@@ -393,10 +386,8 @@ def _spawn_managed_session(
         state,
         ManagedSessionSpec(
             agent_instance_id=agent_instance_id,
-            lane_id="lane-hook-absence",
-            assignment=fixture_assignment(),
-            work_class=WORK_CLASS_READ_ONLY,
-            budget_line="b1",
+            label="hook-absence",
+            session_origin="spawned",
             host=host,
             agent_runtime=agent_runtime,
         ),
@@ -420,189 +411,27 @@ def _spawn_managed_session(
         )
 
 
-def test_hook_absence_fires_past_grace_window() -> None:
-    """RED-FIRST core case: a headless, LIVE managed_session row older than
-    the grace window with NO hook:startup mapping row -> exactly one
-    WARNING, naming the agent_instance_id -- the genuinely-broken-hook
-    signal the cross-check alone cannot produce (its both-exist condition
-    silently no-ops on a missing side, by design)."""
-    state = cast("StateManagementInterface", RealShapeState())
-    _spawn_managed_session(state, agent_instance_id="agi-hookless-1", host=SESSION_HOST_HEADLESS)
-    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
-    records, original = _capture_warnings()
-    try:
-        warned = detect_hook_absent_sessions(state, now=past_grace)
-    finally:
-        session_claude_mapping_ingest.logger.warning = original
-    _check(warned == 1, f"exactly one hook-absent row is flagged (got {warned})")
-    _check(
-        records and "agi-hookless-1" in records[0],
-        "the WARNING names the agent_instance_id",
-    )
-
-
-def test_hook_absence_no_warning_within_grace_window() -> None:
-    """The false-positive-prevention leg: the SAME setup as the fires-case
-    above, but ``now`` is still inside the grace window -- ordinary spawn ->
-    hook-fires -> spool-write -> next-drain-tick latency is not absence."""
-    state = cast("StateManagementInterface", RealShapeState())
-    _spawn_managed_session(state, agent_instance_id="agi-hookless-2", host=SESSION_HOST_HEADLESS)
-    still_within_grace = _T0 + timedelta(seconds=10)
-    warned = detect_hook_absent_sessions(state, now=still_within_grace)
-    _check(warned == 0, "a row still inside the grace window is never flagged")
-
-
-def test_hook_absence_no_warning_when_hook_present() -> None:
-    """GREEN companion: the hook DID fire (a hook:startup row exists) ->
-    no warning, even well past the grace window."""
-    state = cast("StateManagementInterface", RealShapeState())
-    _spawn_managed_session(state, agent_instance_id="agi-hookful-1", host=SESSION_HOST_TMUX)
-    upsert_session_claude_mapping(
-        state,
-        agent_instance_id="agi-hookful-1",
-        claude_session_id="cs-present",
-        captured_at=_T0.isoformat(),
-        capture_source="hook:startup",
-    )
-    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
-    warned = detect_hook_absent_sessions(state, now=past_grace)
-    _check(warned == 0, "a row whose hook already fired is never flagged")
-
-
-def test_hook_absence_includes_operator_host() -> None:
-    """CATCHES: retaining the false operator-host exclusion after C1."""
-    state = cast("StateManagementInterface", RealShapeState())
-    _spawn_managed_session(state, agent_instance_id="agi-operator-1", host=SESSION_HOST_OPERATOR)
-    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
-    warned = detect_hook_absent_sessions(state, now=past_grace)
-    _check(warned == 1, "an old hookless operator-host row is flagged")
-
-
-def test_hook_absence_excludes_terminal_and_spawning_states() -> None:
-    """terminated rows are no longer actionable (the worker is gone --
-    warning forever would be noise); spawning rows are too early by
-    construction (the grace window alone does not gate this -- the state
-    itself is out of scope)."""
-    state = cast("StateManagementInterface", RealShapeState())
+def test_sweep_riders_do_not_check_hook_absence() -> None:
+    """The sweep riders drain the spool and nothing else: a hookless live
+    row past the grace window gets no warning and is never marked checked."""
+    state = _new_state()
+    long_ago = datetime.now(UTC) - timedelta(days=1)
     _spawn_managed_session(
         state,
-        agent_instance_id="agi-terminated-1",
-        host=SESSION_HOST_HEADLESS,
-        lifecycle_state=LIFECYCLE_TERMINATED,
-    )
-    _spawn_managed_session(
-        state,
-        agent_instance_id="agi-spawning-1",
-        host=SESSION_HOST_HEADLESS,
-        lifecycle_state=LIFECYCLE_SPAWNING,
-    )
-    far_future = _T0 + timedelta(days=365)
-    warned = detect_hook_absent_sessions(state, now=far_future)
-    _check(warned == 0, "terminated and spawning rows are excluded regardless of elapsed time")
-
-
-def test_hook_absence_counts_multiple_absent_rows() -> None:
-    """The caller's own tick-summary count must reflect every distinct
-    absent row, not just whether any fired."""
-    state = cast("StateManagementInterface", RealShapeState())
-    _spawn_managed_session(state, agent_instance_id="agi-multi-1", host=SESSION_HOST_HEADLESS)
-    _spawn_managed_session(state, agent_instance_id="agi-multi-2", host=SESSION_HOST_TMUX)
-    upsert_session_claude_mapping(
-        state,
-        agent_instance_id="agi-multi-2",
-        claude_session_id="cs-multi-2",
-        captured_at=_T0.isoformat(),
-        capture_source="hook:startup",
-    )
-    _spawn_managed_session(state, agent_instance_id="agi-multi-3", host=SESSION_HOST_HEADLESS)
-    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
-    warned = detect_hook_absent_sessions(state, now=past_grace)
-    _check(warned == 2, f"exactly the two genuinely hook-absent rows are counted (got {warned})")
-
-
-def test_hook_absence_is_once_latched_per_session() -> None:
-    """Regression: an unresolved hook absence is logged once, never once per tick."""
-    state = cast("StateManagementInterface", RealShapeState())
-    _spawn_managed_session(state, agent_instance_id="agi-latched-1")
-    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
-    records, original = _capture_warnings()
-    try:
-        first = detect_hook_absent_sessions(state, now=past_grace)
-        second = detect_hook_absent_sessions(state, now=past_grace + timedelta(minutes=5))
-    finally:
-        session_claude_mapping_ingest.logger.warning = original
-    _check(first == 1, "the first eligible sweep emits the actionable warning")
-    _check(second == 0, "the next sweep does not re-warn the same absent session")
-    _check(len(records) == 1, "one absent session produces exactly one WARNING across two ticks")
-
-
-def test_hook_absence_excludes_codex_sessions_that_cannot_fire_claude_hooks() -> None:
-    """Codex has no Claude SessionStart hook, so its absence must not be alarmed."""
-    state = cast("StateManagementInterface", RealShapeState())
-    _spawn_managed_session(
-        state,
-        agent_instance_id="agi-codex-hookless-1",
-        agent_runtime="codex",
-    )
-    backfill_registration(
-        state,
-        agent_instance_id="agi-codex-hookless-1",
-        agent_id="codex",
-        agent_session_id="ases-agi-codex-hookless-1",
-    )
-    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
-    records, original = _capture_warnings()
-    try:
-        warned = detect_hook_absent_sessions(state, now=past_grace)
-    finally:
-        session_claude_mapping_ingest.logger.warning = original
-    _check(warned == 0, "a structurally hookless Codex session is excluded")
-    _check(records == [], "Codex produces no unactionable HOOK ABSENCE warning")
-
-
-def test_hook_absence_tick_is_bounded_to_one_page() -> None:
-    """A large unresolved population is handled incrementally, never in one sweep."""
-    state = cast("StateManagementInterface", RealShapeState())
-    for number in range(30):
-        _spawn_managed_session(state, agent_instance_id=f"agi-bounded-{number:02d}")
-    past_grace = _T0 + timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 1)
-    warned = detect_hook_absent_sessions(state, now=past_grace)
-    _check(warned == 25, "one sweep handles at most the fixed 25-session page")
-
-
-def test_sweep_tick_wiring_reaches_hook_absence_detection() -> None:
-    """The 'wired consumer' proof for this capability: drives the REAL
-    ``AgentMessagingPlugin._run_session_lifecycle_sweep`` (mirrors
-    ``test_sweep_tick_wiring_reaches_the_real_drain`` below) and confirms it
-    genuinely reaches ``detect_hook_absent_sessions``, not merely that the
-    function exists unwired. The sweep tick has no injectable clock, so the
-    row's ``created_at`` is stamped far enough in the real past (well beyond
-    the grace window) that any normal test runtime cannot false-negative it."""
-    state = cast("StateManagementInterface", RealShapeState())
-    long_ago = datetime.now(UTC) - timedelta(seconds=DEFAULT_HOOK_ABSENCE_GRACE_WINDOW_S + 300)
-    _spawn_managed_session(
-        state,
-        agent_instance_id="agi-wired-hookless-1",
+        agent_instance_id="agi-no-absence-check-1",
         host=SESSION_HOST_HEADLESS,
         created_at=long_ago,
     )
     records, original = _capture_warnings()
-    register = RegisterUnitDouble()
-    fake_self = SimpleNamespace(
-        _get_state_service=lambda: state,
-        _register_unit_client=lambda: register,
-        _peer_registry=None,
-        _bridge_manager=None,
-        _session_role_claim_pruner=None,
-    )
     try:
-        with patch("agent_messaging_plugin.plugin.collect_ledger_tmux_report", return_value={"observations": [], "advisories": []}):
-            AgentMessagingPlugin._run_session_lifecycle_sweep(cast("Any", fake_self))  # noqa: SLF001
+        plugin_module._run_session_claude_mapping_riders(state)  # noqa: SLF001
     finally:
         session_claude_mapping_ingest.logger.warning = original
+    _check(records == [], "the riders log no hook-absence warning")
+    row = read_managed_session(state, "agi-no-absence-check-1")
     _check(
-        any("agi-wired-hookless-1" in r for r in records),
-        "the REAL _run_session_lifecycle_sweep genuinely reaches hook-absence detection, not just that the function exists unwired",
+        row.get("hook_absence_checked_at") is None,
+        "the riders leave hook_absence_checked_at null",
     )
 
 
@@ -610,7 +439,7 @@ def test_cross_check_mismatched_startup_pair_warns() -> None:
     """Red-first leg: a hook:startup row and an init_event row for the SAME
     agent_instance_id with DIFFERENT claude_session_id values -> WARNING
     fires, naming both session ids."""
-    state = RealShapeState()
+    state = _new_state()
     upsert_session_claude_mapping(
         state,
         agent_instance_id="agi-xcheck-1",
@@ -643,7 +472,7 @@ def test_cross_check_mismatched_startup_pair_warns() -> None:
 def test_cross_check_matching_pair_no_warning() -> None:
     """GREEN companion: the SAME claude_session_id from both sources ->
     no warning -- the pairing only fires on a genuine disagreement."""
-    state = RealShapeState()
+    state = _new_state()
     upsert_session_claude_mapping(
         state,
         agent_instance_id="agi-xcheck-2",
@@ -673,7 +502,7 @@ def test_cross_check_clear_row_never_contaminates_the_pairing() -> None:
     NOT fire a warning -- hook:clear is entirely out of the pairing's
     scope. A one-sided guard that manufactures warnings on every /clear
     would get ignored, un-guarding the real mismatch class."""
-    state = RealShapeState()
+    state = _new_state()
     upsert_session_claude_mapping(
         state,
         agent_instance_id="agi-xcheck-3",
@@ -710,7 +539,7 @@ def test_cross_check_missing_either_side_no_warning() -> None:
     """Both directions of 'missing either source -> no warning': tmux (no
     init event ever) and a headless worker whose hook hasn't fired yet
     both fall out silently, never flagged as a mismatch."""
-    state = RealShapeState()
+    state = _new_state()
     upsert_session_claude_mapping(
         state,
         agent_instance_id="agi-xcheck-4",
@@ -725,7 +554,7 @@ def test_cross_check_missing_either_side_no_warning() -> None:
         session_claude_mapping_ingest.logger.warning = original
     _check(records == [], "hook:startup with no init_event row (e.g. tmux) fires no warning")
 
-    state2 = RealShapeState()
+    state2 = _new_state()
     upsert_session_claude_mapping(
         state2,
         agent_instance_id="agi-xcheck-5",
@@ -768,7 +597,7 @@ def test_full_drain_pipeline_fires_the_cross_check() -> None:
         os.environ[_SPOOL_ENV] = str(spool_dir)
         records, original = _capture_warnings()
         try:
-            state = RealShapeState()
+            state = _new_state()
             result = drain_session_claude_mapping_spool(state)
         finally:
             os.environ.pop(_SPOOL_ENV, None)
@@ -796,18 +625,15 @@ def test_sweep_tick_wiring_reaches_the_real_drain() -> None:
             claude_session_id="cs-wired",
         )
         os.environ[_SPOOL_ENV] = str(spool_dir)
-        state = RealShapeState()
-        register = RegisterUnitDouble()
+        state = _new_state()
         fake_self = SimpleNamespace(
             _get_state_service=lambda: state,
-            _register_unit_client=lambda: register,
             _peer_registry=None,
             _bridge_manager=None,
             _session_role_claim_pruner=None,
         )
         try:
-            with patch("agent_messaging_plugin.plugin.collect_ledger_tmux_report", return_value={"observations": [], "advisories": []}):
-                AgentMessagingPlugin._run_session_lifecycle_sweep(cast("Any", fake_self))  # noqa: SLF001
+            AgentMessagingPlugin._run_session_lifecycle_sweep(cast("Any", fake_self))  # noqa: SLF001
         finally:
             os.environ.pop(_SPOOL_ENV, None)
         _check(
@@ -836,16 +662,7 @@ def main() -> int:
     test_cross_check_missing_either_side_no_warning()
     test_full_drain_pipeline_fires_the_cross_check()
     test_sweep_tick_wiring_reaches_the_real_drain()
-    test_hook_absence_fires_past_grace_window()
-    test_hook_absence_no_warning_within_grace_window()
-    test_hook_absence_no_warning_when_hook_present()
-    test_hook_absence_includes_operator_host()
-    test_hook_absence_excludes_terminal_and_spawning_states()
-    test_hook_absence_counts_multiple_absent_rows()
-    test_hook_absence_is_once_latched_per_session()
-    test_hook_absence_excludes_codex_sessions_that_cannot_fire_claude_hooks()
-    test_hook_absence_tick_is_bounded_to_one_page()
-    test_sweep_tick_wiring_reaches_hook_absence_detection()
+    test_sweep_riders_do_not_check_hook_absence()
 
     print()
     print(f"PASSED: {_passed}")

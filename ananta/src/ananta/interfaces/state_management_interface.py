@@ -19,28 +19,36 @@ class StateTransaction(ABC):
 
     @abstractmethod
     def execute(
-        self, sql: str, params: Sequence[object] | None = None,
+        self,
+        sql: str,
+        params: Sequence[object] | None = None,
     ) -> None:
         """Run a write/DDL statement.  No return value."""
         ...
 
     @abstractmethod
     def executemany(
-        self, sql: str, params_seq: Sequence[Sequence[object]],
+        self,
+        sql: str,
+        params_seq: Sequence[Sequence[object]],
     ) -> None:
         """Run a write statement once per parameter tuple."""
         ...
 
     @abstractmethod
     def fetch_one(
-        self, sql: str, params: Sequence[object] | None = None,
+        self,
+        sql: str,
+        params: Sequence[object] | None = None,
     ) -> dict[str, object] | None:
         """Run a SELECT (or ``UPDATE … RETURNING``) and return one row."""
         ...
 
     @abstractmethod
     def fetch_all(
-        self, sql: str, params: Sequence[object] | None = None,
+        self,
+        sql: str,
+        params: Sequence[object] | None = None,
     ) -> list[dict[str, object]]:
         """Run a SELECT and return every row."""
         ...
@@ -59,9 +67,7 @@ class StateTransaction(ABC):
         ...
 
     @abstractmethod
-    def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object]
-    ) -> int:
+    def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> int:
         """UPDATE … WHERE within the txn. ``query = {table, filters}``.
 
         Returns rows-affected (the compare-and-set signal). Raises on failure.
@@ -69,9 +75,7 @@ class StateTransaction(ABC):
         ...
 
     @abstractmethod
-    def query_state(
-        self, namespace: str, filters: dict[str, object]
-    ) -> list[dict[str, object]]:
+    def query_state(self, namespace: str, filters: dict[str, object]) -> list[dict[str, object]]:
         """Non-locking SELECT within the txn, ROW-BOUNDED.
 
         ``filters = {table, filters, limit?, unbounded?}``. Returns the rows.
@@ -164,9 +168,7 @@ class StateManagementInterface(ABC):
     def write_state(self, namespace: str, data: dict[str, object]) -> ActionResult: ...
 
     @abstractmethod
-    def update_state(
-        self, namespace: str, query: dict[str, object], updates: dict[str, object]
-    ) -> ActionResult: ...
+    def update_state(self, namespace: str, query: dict[str, object], updates: dict[str, object]) -> ActionResult: ...
 
     @abstractmethod
     def upsert_state(self, namespace: str, data: dict[str, object]) -> ActionResult:
@@ -357,20 +359,26 @@ class StateManagementInterface(ABC):
         ...
 
     @abstractmethod
-    def set_key_value(
-        self, namespace: str, key: str, value: object, scope: str = "GLOBAL", ttl: int | None = None
-    ) -> ActionResult: ...
+    def set_key_value(self, namespace: str, key: str, value: object, scope: str = "GLOBAL", ttl: int | None = None) -> ActionResult:
+        """Store any JSON-serializable value; a value that is not serializable is refused and writes nothing."""
+        ...
 
     @abstractmethod
-    def get_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> ActionResult: ...
+    def get_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> ActionResult:
+        """Return the value as it was written (object, list, string, number, boolean, None).
+
+        ``found`` separates an absent key from a stored None. Stored text that is
+        not valid JSON (a row written before values were JSON-encoded) is returned
+        as that string. The format is defined once in
+        ``ananta.services.key_value_operations.value_codec``.
+        """
+        ...
 
     @abstractmethod
     def delete_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> ActionResult: ...
 
     @abstractmethod
-    def clear_key_values(
-        self, namespace: str | None = None, scope: str | None = None
-    ) -> ActionResult: ...
+    def clear_key_values(self, namespace: str | None = None, scope: str | None = None) -> ActionResult: ...
 
     @abstractmethod
     def list_key_values(
@@ -378,7 +386,9 @@ class StateManagementInterface(ABC):
         namespace: str | None = None,
         scope: str | None = None,
         pattern: str | None = None,
-    ) -> ActionResult: ...
+    ) -> ActionResult:
+        """Return every matching row with its ``value`` decoded exactly as ``get_key_value`` returns it."""
+        ...
 
     @abstractmethod
     def execute_sql(self, sql_query: str, sql_params: list[object] | None = None) -> ActionResult:

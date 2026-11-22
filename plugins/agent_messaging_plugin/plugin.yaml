@@ -77,43 +77,24 @@ config:
     description: Hard ceiling on per-turn execution timeout.
 
   # --- Fleet session-management, Phase B, §6 L3 rule 1 ---------------
-  work_class_defaults:
-    type: object
+  default_allowed_tools:
+    type: list
     required: false
-    default: {}
+    default: []
     description: |
-      Per-work_class {model, effort} spawn_session defaults (fleet
-      session-management Phase B, §6 L3 rule 1: "right-size at dispatch").
-      Keyed by work_class (read_only / analysis_deliverable /
-      production_mutation); each entry is a {model, effort} mapping.
-      "Cheapest capable model per work_class" is an operator/governance
-      policy call, not this plugin's to invent (same posture as
-      FLEET_HEADLESS_PERMISSION_MODE for permission mode) -- shipped empty
-      on purpose. Only consulted when spawn_session's caller omits BOTH
-      model and effort; never overrides an explicit caller value. Example:
-        work_class_defaults:
-          read_only: {model: claude-haiku-4-5, effort: low}
-
-  work_class_tool_allowlists:
-    type: object
-    required: false
-    default: {}
-    description: |
-      Per-work_class pre-approved tool allowlist for a headless spawn's
-      PreToolUse gate (.claude/hooks/headless_tool_allowlist_gate.py) -- an
-      out-of-list tool call is DENIED WITH A CLEAN ERROR, never executed and
-      never a silent hang. Operator ruling, 2026-08-03 ("we don't have any
-      restrictions now"): the gate is UNARMED BY DEFAULT -- shipped empty
-      here means headless_adapter.py's _spawn_env does NOT set the hook's
-      env var at all, so spawned workers run unrestricted, same effective
-      access as any other fleet session. The mechanism stays landed as
-      shelf capability: populate a work_class here and the corresponding
-      spawns are gated again, whenever usage data argues for it. Keyed by
-      work_class; each entry is a list of exact tool names (e.g.
-      "mcp__<solet>__process_call" -- Claude Code's MCP tool-name pattern,
-      mcp__<server>__<tool>). Example:
-        work_class_tool_allowlists:
-          read_only: [mcp__<solet>__peer_register, mcp__<solet>__process_call]
+      Pre-approved tool allowlist for a headless spawn's PreToolUse gate
+      (.claude/hooks/headless_tool_allowlist_gate.py), used when a spawn names
+      no allowed_tools of its own -- an out-of-list tool call is DENIED WITH A
+      CLEAN ERROR, never executed and never a silent hang. Operator ruling,
+      2026-08-03 ("we don't have any restrictions now"): the gate is UNARMED BY
+      DEFAULT -- shipped empty here means headless_adapter.py's _spawn_env does
+      NOT set the hook's env var at all, so spawned workers run unrestricted,
+      same effective access as any other fleet session. The mechanism stays
+      landed as shelf capability: populate this list and every spawn that names
+      no allowed_tools of its own is gated again, whenever usage data argues
+      for it. Each entry is an exact tool name (e.g. "mcp__<solet>__process_call"
+      -- Claude Code's MCP tool-name pattern, mcp__<server>__<tool>). Example:
+        default_allowed_tools: [mcp__<solet>__peer_register, mcp__<solet>__process_call]
 
   headless_permission_mode:
     type: string
@@ -174,21 +155,10 @@ config:
       FLEET_TRANSPORT into spawn env (fleet-watch-transport-migration
       phase-2 slice 1); this value is a "shelf capability" landed ahead of
       that consumer, matching the precedent
-      work_class_tool_allowlists set (declared before every consumer reads
+      default_allowed_tools set (declared before every consumer reads
       it). Operator shell launchers that source a bare env var (not this
       config) get their own documented one-line export, not a shell-parses-
       yaml mechanism -- see the KB note this slice ships alongside it.
-
-  psolet_cli:
-    type: string
-    required: false
-    description: |
-      Path to project-solet's psolet CLI, which dispatch_managed_work calls
-      to mint or verify the register Unit before any worker spawns (design
-      unt_57725090). Empty falls back to PROJECT_SOLET_CLI, then the
-      checkout default -- the same precedence as fleet_maintenance_plugin.
-      There is no bypass: an unreachable register refuses the dispatch
-      with unit_register_unavailable.
 
   # --- Bridge / IO surface ------------------------------------------
   # Port is intentionally NOT a config field.  Port allocation is owned

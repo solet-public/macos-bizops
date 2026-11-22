@@ -199,11 +199,11 @@ loop:**
    the ordinary `queued_wake`/`queued_notification` mechanism), so the
    worst case is "no faster than before this lane existed," not "the
    message vanished."
-3. The `report_by` / `sweep_overdue_sessions` staleness contract bounds how
-   long a genuinely-stalled recipient can go unnoticed, independent of any
-   single send's success — this is the platform's actual safety mechanism
-   for silence, and it does not depend on this channel's send confirming
-   anything.
+3. Nothing on a clock watches a stalled recipient: no sweep marks a session
+   overdue and no notice tells a steward about its silence. A sender who
+   wants to know whether a recipient took up the work reads state on demand
+   (`fleet_status`, `session_context_status`),
+   which does not depend on this channel's send confirming anything.
 
 If a real Enter-loss (or any other submission-failure) incident is
 eventually confirmed with a live specimen, re-open this as a fresh

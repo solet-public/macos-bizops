@@ -18,25 +18,13 @@ from ananta.llm.agent_messaging.state_results import (
     require_updated,
 )
 
-from .lane_worktree_evidence import PacketCustody, RetirementCustodyContext, RetirementEvidenceReader
-from .lane_worktrees import (
-    LaneWorktreeError,
-    active_lane_worktree_inventory,
-    sweep_orphaned_lane_worktrees,
-)
-from .managed_dispatch import (
-    DispatchError,
-    read_managed_dispatch,
-)
 from .park_drive import (
     drive_session_channel,
     interrupt_parked_channel,
     send_delivery_notice,
 )
-from .register_unit_client import VerbError
 from .schema import (
     CONDITION_DEADLINE,
-    CONDITION_LANE_CLOSED,
     CONDITION_SESSION_TERMINAL,
     LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
@@ -69,16 +57,16 @@ from .session_lifecycle_store import (
     read_managed_session,
     transition_lifecycle_state,
 )
+from .session_runtime_files import end_session_runtime_files
+from .verb_errors import VerbError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
-    from .bridge_sessions import BridgeSessionManager
     from .composer_preservation import DrainReceipt
     from .models import BridgeBinding
-    from .peer_registry import PeerRegistry
     from .session_hosts import DriverChannel, HostDriver
 
 
@@ -310,7 +298,7 @@ def _refuse_name_collision(row: Mapping[str, Any], local_name: str, role_name: s
         f"{row.get('agent_instance_id')} retains that name "
         f"(lifecycle_state={row.get('lifecycle_state')!r}, "
         f"host={row.get('host')!r}, host_ref={row.get('host_ref')!r}, "
-        f"lane_id={row.get('lane_id')!r}, observed={observation!r}, detail={detail!r}). Two sessions answering to one "
+        f"label={row.get('label')!r}, observed={observation!r}, detail={detail!r}). Two sessions answering to one "
         "local name collide silently — the git mutation guard matches the "
         "name exactly, so both would pass it. Terminate the incumbent "
         "first (this plugin's terminate_session verb, agent_instance_id="
@@ -327,8 +315,11 @@ def _resolve_driver_channel(row: dict[str, Any]) -> DriverChannel:
     driver registered, or a registered driver with no channel for this
     host_ref, e.g. the degenerate ``operator`` driver), never a silent
     degradation."""
-    if row.get("brief_ref") and not row.get("assignment"):
-        raise VerbError("unit_assignment_historical", "This path-based session is read-only history; it cannot receive new work.")
+    origin = row.get("session_origin")
+    if origin == "historical_read_only":
+        raise VerbError("session_read_only", "This historical session is read-only.")
+    if origin not in ("spawned", "registered", "synthetic"):
+        raise VerbError("session_origin_unknown", "Driver commands require a known session origin.")
     host = str(row.get("host") or "")
     agent_runtime = str(row.get("agent_runtime") or DEFAULT_AGENT_RUNTIME)
     agent_instance_id = str(row.get("agent_instance_id") or "")
@@ -350,7 +341,9 @@ def _resolve_driver_channel(row: dict[str, Any]) -> DriverChannel:
         # session_lifecycle_verbs at load, session_lifecycle_verbs imports names
         # from this module at load (its late re-export block), and this module
         # imports session_lifecycle_verbs at its own top.
-        from .delivery_drive import OPERATOR_SEAT_MANUAL_WAKE  # noqa: PLC0415 -- lazy: see the cycle above
+        from .delivery_drive import (
+            OPERATOR_SEAT_MANUAL_WAKE,  # noqa: PLC0415 -- lazy: see the cycle above
+        )
 
         raise VerbError(
             "unsupported_on_host",
@@ -385,6 +378,7 @@ DriveOnDeliveryOutcome = Literal[
     "ineligible_state",
     "driver_unavailable",
     "driver_scheduled",
+    "driver_not_needed",
     "driver_queue_full",
     "driver_sent",
     "driver_error",
@@ -398,6 +392,11 @@ DRIVE_DRIVER_UNAVAILABLE: Final[DriveOnDeliveryOutcome] = "driver_unavailable"
 # was handed to the delivery-drive executor; it has NOT run yet. Never reported
 # as ``driver_sent``, which only a finished channel send may claim.
 DRIVE_DRIVER_SCHEDULED: Final[DriveOnDeliveryOutcome] = "driver_scheduled"
+# prb_57c118ad: the send queued the message on the recipient's live channel,
+# which surfaces it to the session, so no pane notice was scheduled or typed.
+# Not ``not_managed``: that says no managed row exists, which is false here, and
+# a sender reading it would conclude nothing reached the recipient.
+DRIVE_DRIVER_NOT_NEEDED: Final[DriveOnDeliveryOutcome] = "driver_not_needed"
 # iss_ab680764 (review D1): the delivery-drive queue was at its cap, so the
 # drive was refused rather than queued behind a backlog it would outlive.
 DRIVE_DRIVER_QUEUE_FULL: Final[DriveOnDeliveryOutcome] = "driver_queue_full"
@@ -482,6 +481,7 @@ def drive_on_delivery(
     recipient_agent_session_id: str = "",
     sender_label: str,
     detail_sink: Callable[[str], None] | None = None,
+    channel_delivered: bool = False,
 ) -> DriveOnDeliveryOutcome:
     """Best-effort waker for a managed recipient's driver channel (D2-window
     rider, drive-on-delivery lane, 2026-08-04). Called AFTER the durable
@@ -495,12 +495,12 @@ def drive_on_delivery(
 
     Returns one sender-visible discriminator without changing or failing the
     durable send: ``not_managed``, ``ineligible_state``,
-    ``driver_unavailable``, ``driver_sent``, or ``driver_error``.
+    ``driver_unavailable``, ``driver_not_needed``, ``driver_sent``, or
+    ``driver_error``.
 
     Best-effort no-ops (never raises) when: ``state`` is ``None`` (state_service
-    not yet bound — mirrors ``sweep_overdue_sessions``'s own optional-
-    collaborator convention: a best-effort side-effect skips silently rather
-    than hard-failing its caller's actual job); the recipient has no
+    not yet bound: a best-effort side-effect skips silently rather than
+    hard-failing its caller's actual job); the recipient has no
     ``managed_session`` row at all (``SessionNotFoundError`` — a registration
     gap or legacy row, not an ordinary hand-launched session). A watcher
     registration deliberately has a different ``agent_instance_id`` from its
@@ -514,7 +514,17 @@ def drive_on_delivery(
     a restart); or the channel itself raises on ``send``. A fault here must
     never fail the caller's own send result and must never mask it — the
     caller's already-computed delivery outcome is untouched either way.
+
+    ``channel_delivered`` is the caller's own fact that the event it just
+    appended reached a live channel the recipient surfaces (see
+    :func:`~agent_messaging_plugin.channel_support.channel_carries_message`),
+    so the notice would only repeat it: nothing is looked up or typed and
+    ``driver_not_needed`` is returned. It defaults to ``False`` because a caller
+    that cannot tell costs at worst one repeated turn, whereas a notice wrongly
+    skipped can strand a message (unknown data advises, it never refuses).
     """
+    if channel_delivered:
+        return DRIVE_DRIVER_NOT_NEEDED
     if state is not None:
         managed, _reason = _resolve_delivery_managed_session(
             state,
@@ -836,64 +846,6 @@ def resolve_delivery_drive(
         pickup_message_id=pickup_message_id,
         initial_delivery=initial_delivery,
     )
-
-
-def notify_steward_of_managed_dispatch(
-    state: StateManagementInterface,
-    *,
-    peer_registry: PeerRegistry | None,
-    bridge_manager: BridgeSessionManager | None,
-    dispatch_id: str,
-    condition: str,
-    next_required_action: str,
-    event_type: str,
-) -> bool:
-    """Best-effort one-shot steward wake for a durable dispatch notice."""
-    if peer_registry is None or bridge_manager is None:
-        return False
-    try:
-        row = read_managed_dispatch(state, dispatch_id)
-    except DispatchError:
-        return False
-    spawner_instance_id = str(row.get("spawned_by_instance_id") or "")
-    if not spawner_instance_id:
-        return False
-    from .steward_resolution import resolve_steward_binding
-
-    binding = resolve_steward_binding(
-        state=state,
-        peer_registry=peer_registry,
-        spawner_instance_id=spawner_instance_id,
-    )
-    if binding is None:
-        logger.warning(
-            "managed dispatch %s condition %s: steward %s is not reachable",
-            dispatch_id,
-            condition,
-            spawner_instance_id,
-        )
-        return False
-    prose = f"managed_dispatch_notice: dispatch {dispatch_id} has condition {condition!r}; next_required_action={next_required_action!r}. Read managed_dispatch_status and make the named decision."
-    try:
-        bridge_manager.append_event(
-            binding.bridge_id,
-            event_type,
-            prose,
-            {"flow_id": f"managed-dispatch-{dispatch_id}-{condition}"},
-        )
-    except Exception:  # noqa: BLE001 — durable event already exists
-        logger.warning(
-            "managed dispatch %s notice append failed",
-            dispatch_id,
-            exc_info=True,
-        )
-        return False
-    drive_on_delivery(
-        state,
-        recipient_agent_instance_id=spawner_instance_id,
-        sender_label=event_type,
-    )
-    return True
 
 
 def dispatch_event_age_seconds(value: object, now: datetime) -> float | None:
@@ -1430,7 +1382,7 @@ def terminate_session(
         host=host,
     )
     observation = _probe_host_liveness(row)
-    action = HOST_ACTION_TERMINATED if host_remedy is None else HOST_ACTION_NONE_AVAILABLE
+    action = (HOST_ACTION_NONE_AVAILABLE, HOST_ACTION_TERMINATED)[host_remedy is None]
     attempt = HostAttempt(
         agent_instance_id=agent_instance_id,
         host=host,
@@ -1453,6 +1405,20 @@ def terminate_session(
     except IllegalLifecycleTransitionError as exc:
         raise VerbError("illegal_lifecycle_transition", str(exc)) from exc
     except StaleLifecycleStateError as exc:
+        latest = read_managed_session(state, agent_instance_id)
+        latest_state = str(latest.get("lifecycle_state") or "")
+        if latest_state in _TERMINAL_STATES:
+            fired = _fire_session_terminal_dependencies(
+                state,
+                agent_instance_id=agent_instance_id,
+                fired_at=datetime.now(UTC).isoformat(),
+            )
+            return {
+                "already_terminal": True,
+                "lifecycle_state": latest_state,
+                "session_terminal_edges_fired": fired,
+                **_host_result(state, latest),
+            }
         raise VerbError("stale_lifecycle_state", str(exc)) from exc
     fired = _fire_session_terminal_dependencies(
         state,
@@ -1488,11 +1454,17 @@ def _fire_session_terminal_dependencies(
     The predicated update is checked (``require_updated``): a 0-row result
     means another caller already claimed this edge (a lost race, e.g. two
     concurrent ``terminate_session`` calls) — skipped, never counted,
-    never double-delivered. Sole caller: :func:`terminate_session`, at
+    never double-delivered. Callers: :func:`terminate_session`, at
     BOTH the state-transition success path and the already-terminal
-    catch-up path (an edge armed after the session already died) —
+    catch-up path (an edge armed after the session already died), and
+    ``session_end.end_session_record`` for an end it records —
     ``retire_session`` composes ``terminate_session`` and no longer fires
     these itself (single call site, per the coordinator seat's ruling 2026-08-04).
+
+    The session's watch and wake files in the runtime folder end here too, once the
+    edges have fired: every terminal path passes this function, so none can end a
+    session and leave them behind. A family whose watcher still holds its lock is
+    kept for the solet's next start check. A fault there never fails the terminal event.
 
     ``{"op": "is_null"}``, NEVER a bare ``None`` filter value: a bare
     ``None`` compiles to SQL ``col = NULL``, which the postgres provider's
@@ -1532,7 +1504,10 @@ def _fire_session_terminal_dependencies(
                 state,
                 recipient_agent_instance_id=waiter_instance_id,
                 sender_label="session_dependency wake",
+                # No event is appended here, so nothing reached a channel: the notice is the only wake.
+                channel_delivered=False,
             )
+    end_session_runtime_files(agent_instance_id)
     return fired
 
 
@@ -1541,37 +1516,8 @@ def retire_session(
     *,
     agent_instance_id: str,
     directed_by: str,
-    register: RetirementEvidenceReader | None = None,
-    packet: Callable[[], PacketCustody] | None = None,
 ) -> dict[str, Any]:
-    """§4 ``retire_session`` — the lane-landing verb. Five steps, fixed
-    order, each idempotent, no cross-table transaction (§4 partial-failure
-    contract): (1) adjudicate a derivable lane worktree before the irreversible
-    host termination; no worktree means no adjudication. With ``register`` the
-    adjudication may also cite exact custody recorded for the session's own
-    assigned Unit, read afresh by step (4) before removal. ``packet`` resolves
-    the caller's pinned custody packet for this call only, capturing it first
-    if asked, before step (1); that packet and the whole lane are then
-    verified afresh at both (1) and (4), and its id is recorded in the
-    transition reason and the result; (2) terminate
-    (tolerates already-terminal; OWNS firing +
-    delivering ``session_terminal`` dependency edges as of 2026-08-04 — see
-    :func:`terminate_session`, the sole call site now); (3) release this
-    session's ``session_role_claim`` row if one still names a role bound to
-    it (best-effort — a role_binding release is a SEPARATE verb/path, not
-    this one's job: retire_session cleans up the CARDINALITY row, not role
-    ownership itself); (4) record the non-fatal exact teardown outcome; (5)
-    predicated ledger write terminated -> retired with that outcome. A crash mid-retire
-    leaves the row ``terminated``-but-not-``retired``; re-running this
-    function skips completed steps (idempotent) and drives it home —
-    re-drivable by construction, never wedged (INCLUDING the firing step:
-    a re-run's ``terminate_session`` call lands on the already-terminal
-    path, which itself re-sweeps for any edge armed since the first call).
-    After (5), :func:`_sweep_terminal_lane_worktrees` does opportunistic
-    tidying only — it reclaims the terminal lane worktrees earlier
-    retirements left on disk, never this lane's own tree, and can change
-    neither the result below nor the re-drivability above.
-    """
+    """Stop the host, release its role claim, and retire its ledger row."""
     initial_row = read_managed_session(state, agent_instance_id)
     initial_state = str(initial_row.get("lifecycle_state") or "")
     if initial_state == LIFECYCLE_RETIRED:
@@ -1580,10 +1526,6 @@ def retire_session(
             fired=0,
             terminate_result=_host_result(state, initial_row),
         )
-    custody = RetirementCustodyContext.for_session(initial_row, register, packet() if packet is not None else None)
-    if initial_state != LIFECYCLE_TERMINATED:
-        spawn_lifecycle._adjudicate_retire_lane_worktree(initial_row, custody=custody)  # noqa: SLF001
-
     terminate_result = terminate_session(
         state,
         agent_instance_id=agent_instance_id,
@@ -1599,7 +1541,6 @@ def retire_session(
     current = str(terminated_row.get("lifecycle_state") or "")
     if current == LIFECYCLE_RETIRED:
         return _retire_outcome(already_retired=True, fired=fired, terminate_result=terminate_result)
-    worktree_disposition = spawn_lifecycle._retire_lane_worktree(terminated_row, custody=custody)  # noqa: SLF001
     try:
         transition_lifecycle_state(
             state,
@@ -1607,71 +1548,11 @@ def retire_session(
             from_state=LIFECYCLE_TERMINATED,
             to_state=LIFECYCLE_RETIRED,
             directed_by=directed_by,
-            reason=_retire_reason(custody.packet),
-            recorded_fields={"worktree_disposition": worktree_disposition},
+            reason="retire_session",
         )
     except StaleLifecycleStateError as exc:
         raise VerbError("stale_lifecycle_state", str(exc)) from exc
-    _sweep_terminal_lane_worktrees(state, terminated_row)
-    return _retire_outcome(already_retired=False, fired=fired, terminate_result=terminate_result, packet=(custody.packet, worktree_disposition))
-
-
-def _sweep_terminal_lane_worktrees(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-) -> None:
-    """Reclaim the terminal lane worktrees earlier retirements left on disk.
-
-    Disposal used to happen only as a side effect of the next unrelated lane
-    spawn, so with no spawn nothing was reclaimed however many terminal lane
-    trees were registered.  This reuses the sweep and the guard already proven
-    at :func:`session_lifecycle_verbs._provision_spawn_worktree`, and runs only
-    after the terminated -> retired write, so it is pure opportunistic tidying:
-    it never changes this verb's result, never affects the transition that has
-    already been recorded, and never makes a re-run fail.  A retained tree is
-    surfaced as the existing ``dirty_stale_worktree_skipped`` warning rather
-    than a new error shape.  The retiring lane's own tree has already been
-    handled, and is excluded here: step (4) adjudicated it against custody read
-    afresh, while this sweep has no custody to read, so a tree deliberately
-    retained by that decision must not be reconsidered without it.
-
-    Both skip branches are advisory, never refusals (``rul_becb4bed``): an
-    incomplete inventory logs ``lane_worktree_cleanup_skipped`` and sweeps
-    nothing rather than acting on unknown data, and a row with no derivable
-    lane root is skipped silently as the existing code already does.
-    """
-    if str(row.get("provisioning_mode") or "worktree") in {
-        "synthetic_no_worktree",
-        "operator_existing_checkout",
-    }:
-        return
-    try:
-        repo_root = spawn_lifecycle._resolve_lane_repo_root(str(row.get("lane_repo_root") or ""))  # noqa: SLF001
-        own = spawn_lifecycle._retiring_lane_worktree(row)  # noqa: SLF001
-        inventory = active_lane_worktree_inventory(state, repo_root)
-        if not inventory.cleanup_safe:
-            logger.warning(
-                "lane_worktree_cleanup_skipped: incomplete_active_inventory=%s",
-                "; ".join(inventory.incomplete_rows),
-            )
-            return
-        own_path = None if own is None else own.path.resolve()
-        sweep = sweep_orphaned_lane_worktrees(
-            repo_root,
-            terminal_paths=tuple(path for path in inventory.terminal_paths if path.resolve() != own_path),
-        )
-    except (LaneWorktreeError, VerbError, OSError) as exc:
-        logger.warning("terminal lane worktree sweep skipped after retirement: %s", exc)
-        return
-    for warning in sweep.skipped:
-        spawn_lifecycle._log_dirty_stale_worktree_skipped(warning)  # noqa: SLF001
-
-
-def _retire_reason(packet: PacketCustody | None) -> str:
-    """The audit reason; a pinned packet's id and fingerprint are its provenance, with no new column."""
-    if packet is None:
-        return "retire_session"
-    return f"retire_session custody_packet={packet.packet_id} fingerprint={packet.expected_fingerprint} captured={packet.captured}"
+    return _retire_outcome(already_retired=False, fired=fired, terminate_result=terminate_result)
 
 
 def _retire_outcome(
@@ -1679,14 +1560,11 @@ def _retire_outcome(
     already_retired: bool,
     fired: int,
     terminate_result: Mapping[str, Any],
-    packet: tuple[PacketCustody | None, str] = (None, ""),
 ) -> dict[str, Any]:
     """The retire result: the two original keys plus what happened to the host.
 
     Without a ``host_action`` from this call's terminate step the call touched
     no host, so it reports ``not_attempted`` rather than inheriting a claim.
-    A pinned packet adds ``custody_packet`` with what removal then did, so a
-    retained worktree is never read as removed.
     """
     outcome: dict[str, Any] = {
         **{key: value for key, value in terminate_result.items() if key not in {"already_terminal", "lifecycle_state", "session_terminal_edges_fired"}},
@@ -1696,9 +1574,6 @@ def _retire_outcome(
         "host_action": str(terminate_result.get("host_action") or HOST_ACTION_NOT_ATTEMPTED),
         "host_remedy": terminate_result.get("host_remedy"),
     }
-    pinned, disposition = packet
-    if pinned is not None:
-        outcome["custody_packet"] = {"packet_id": pinned.packet_id, "fingerprint": pinned.expected_fingerprint, "captured": pinned.captured, "worktree_disposition": disposition}
     return outcome
 
 
@@ -1740,7 +1615,7 @@ def report_teardown(
 
 
 _VALID_CONDITION_KINDS = frozenset(
-    {CONDITION_LANE_CLOSED, CONDITION_SESSION_TERMINAL, CONDITION_DEADLINE},
+    {CONDITION_SESSION_TERMINAL, CONDITION_DEADLINE},
 )
 
 
@@ -1760,7 +1635,7 @@ def _validate_condition_ref(condition_kind: str, condition_ref: str) -> None:
     """Per-kind shape check (§3.4) — catches an obviously wrong
     ``condition_ref`` at arm time rather than leaving a doomed-to-never-fire
     edge sitting armed forever. Deliberately light: the sweep's own fire-time
-    resolution is the authority on whether the referenced session/lane is
+    resolution is the authority on whether the referenced session is
     REAL, this only rejects a value that could not possibly be one."""
     if condition_kind == CONDITION_SESSION_TERMINAL:
         if not condition_ref.startswith("agi-"):
@@ -1776,11 +1651,6 @@ def _validate_condition_ref(condition_kind: str, condition_ref: str) -> None:
                 "invalid_condition_ref",
                 f"condition_kind='deadline' requires condition_ref to be an ISO-8601 timestamp; {condition_ref!r} does not parse: {exc}",
             ) from exc
-    elif condition_kind == CONDITION_LANE_CLOSED and not condition_ref:
-        raise VerbError(
-            "invalid_condition_ref",
-            "condition_kind='lane_closed' requires a non-empty condition_ref (the lane_id).",
-        )
 
 
 def arm_session_dependency(
@@ -1792,13 +1662,9 @@ def arm_session_dependency(
     sweep evaluation + delivery already existed; nothing armed a row until
     now — ``session_sweep.py``'s own module docstring says so).
 
-    Session-scoped ONLY in v1 (``waiter_instance_id`` required). Lane-scoped
-    arming is UNSUPPORTED BY CONSTRUCTION, not merely refused: this verb has
-    no ``waiter_lane_id`` parameter at all, so there is nothing to accept or
-    reject there — the sweep's own delivery has no lane -> current-holder
-    mapping (``session_sweep.py::_deliver_dependency_wake`` logs a no-op for
-    a lane-scoped edge today), so arming one here would create a wake nobody
-    could ever receive.
+    Session-scoped ONLY in v1 (``waiter_instance_id`` required): the sweep's
+    own delivery wakes a session, so an edge without one would create a wake
+    nobody could ever receive.
 
     No waiter-EXISTENCE check: an unmanaged waiter (no ``managed_session``
     row — an operator-launched session, e.g. the seat) is a legal arm
@@ -1816,7 +1682,7 @@ def arm_session_dependency(
     if not waiter_instance_id:
         raise VerbError(
             "invalid_waiter",
-            "arm_session_dependency requires a non-empty waiter_instance_id (session-scoped only in v1 — lane-scoped arming is unsupported by construction; this verb has no waiter_lane_id parameter).",
+            "arm_session_dependency requires a non-empty waiter_instance_id (session-scoped only in v1).",
         )
     if req.condition_kind not in _VALID_CONDITION_KINDS:
         raise VerbError(
@@ -1873,7 +1739,7 @@ def _rearm_report_by(
     was a live-measured bug: a worker spawned with ``report_by_seconds=900``
     got its deadline silently shortened to 300s on its first report/drive."""
     row = read_managed_session(state, agent_instance_id)
-    if row.get("provisioning_mode") == "operator_existing_checkout" and not report_by_seconds:
+    if row.get("session_origin") == "registered" and not report_by_seconds:
         return
     window = report_by_seconds or DEFAULT_REPORT_BY_SECONDS
     next_report_by = (datetime.now(UTC) + timedelta(seconds=window)).isoformat()

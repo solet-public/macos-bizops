@@ -39,16 +39,17 @@ from __future__ import annotations
 
 import copy
 import operator
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from ananta.llm.agent_messaging.state_results import (
     require_completed,
     require_records,
     require_updated,
 )
+from ananta.services.key_value_operations.value_codec import decode_value, encode_value
 from ananta.services.state_service.ordered_query import (
     apply_ordered_query_in_memory,
     parse_ordered_query,
@@ -188,7 +189,7 @@ class RealShapeState:
 
     def __init__(self) -> None:
         self._rows: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        self._kv: dict[tuple[str, str], object] = {}
+        self._kv: dict[tuple[str, str, str], str] = {}  # (namespace, key, scope) -> value_codec text
         self._fail: set[str] = set()
         # Standardizer parity (watcher-ack smoke fix-round): the real state
         # plugin stamps ``created_at``/``updated_at`` on EVERY insert, and
@@ -203,7 +204,7 @@ class RealShapeState:
         self._enforced_columns: dict[str, frozenset[str]] = _schema_enforcement()
 
     @contextmanager
-    def transactional(self) -> Iterator[_RealShapeTransaction]:
+    def transactional(self) -> Generator[_RealShapeTransaction]:
         """Yield transaction-shaped methods and roll back rows on exceptions."""
         saved_rows = copy.deepcopy(self._rows)
         try:
@@ -423,9 +424,10 @@ class RealShapeState:
         failed = self._maybe_fail("get_kv")
         if failed is not None:
             return failed
-        if (namespace, key) in self._kv:
-            return _ok({"key": key, "value": self._kv[(namespace, key)], "found": True})
-        return _ok({"key": key, "value": None, "found": False})
+        stored = self._kv.get((namespace, key, scope))
+        if stored is None:
+            return _ok({"namespace": namespace, "key": key, "scope": scope, "value": None, "found": False})
+        return _ok({"namespace": namespace, "key": key, "scope": scope, "value": decode_value(stored), "found": True})
 
     def set_key_value(
         self,
@@ -438,8 +440,12 @@ class RealShapeState:
         failed = self._maybe_fail("set_kv")
         if failed is not None:
             return failed
-        self._kv[(namespace, key)] = value
-        return _ok({"key": key})
+        try:
+            encoded = encode_value(value)
+        except (TypeError, ValueError) as error:
+            return _err(str(error), code="kv.set_failed", details={"namespace": namespace, "key": key})
+        self._kv[(namespace, key, scope)] = encoded
+        return _ok({"namespace": namespace, "key": key, "scope": scope})
 
     # -- assertion helper --------------------------------------------
     def rows(self, namespace: str, table: str) -> list[dict[str, Any]]:
@@ -460,7 +466,7 @@ class _RealShapeTransaction:
         if any(row.get("id") == data["record"].get("id") for row in rows):
             raise RuntimeError("duplicate primary key")
         result = require_completed(self._state.write_state(namespace, data), "transaction insert")
-        return str(result["result"]["generated_id"])
+        return str(cast(dict[str, Any], result["result"])["generated_id"])
 
     def update_state(
         self,
@@ -485,7 +491,7 @@ class CapEnforcingState:
     (``read_bounds.MAX_READ_ROWS``), and a whole-table read past it is REFUSED
     outright rather than served. A smoke on the bare fake therefore stays green
     against code that cannot run in production at all — which is exactly what
-    happened to the role_class backfill's smoke while the bridge would not start.
+    happened to the smoke for the read that blocked bridge startup.
 
     Wrap the fake in this when the code under test reads a table that can exceed
     the bound, and the smoke will fail the way production does, with the same

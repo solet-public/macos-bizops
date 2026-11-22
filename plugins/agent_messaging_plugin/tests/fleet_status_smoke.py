@@ -69,17 +69,16 @@ def _session(
     *,
     report_by: str | None,
     lifecycle_state: str = "live",
-    lane_id: str = "lane-test",
+    label: str = "lane-test",
 ) -> dict[str, Any]:
     return {
         "agent_instance_id": agent_instance_id,
-        "lane_id": lane_id,
+        "label": label,
         "host": "tmux",
         "lifecycle_state": lifecycle_state,
         "report_by": report_by,
         "report_by_seconds": 300,
         "expires_at": "2026-09-02T08:00:00+00:00",
-        "worktree_disposition": "",
     }
 
 
@@ -91,7 +90,7 @@ def _write_bulk_read_ceiling_fixture(state: RealShapeState) -> None:
             AGENT_ROLE_BINDING_NAMESPACE,
             {
                 "table": TABLE_MANAGED_SESSION,
-                "record": _session(instance_id, report_by=None, lane_id="zz-bulk"),
+                "record": _session(instance_id, report_by=None, label="zz-bulk"),
             },
         )
         if session_result.get("action_status") != "completed":
@@ -125,20 +124,22 @@ def _by_id(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def _assert_classifications(sessions: dict[str, dict[str, Any]]) -> None:
     _check(
-        sessions["agi-no-contract"]["classification"] == "no-contract"
-        and sessions["agi-no-contract"]["classification"] != "STALLED",
-        "MUTATION report_by=None classifies no-contract and never STALLED",
+        sessions["agi-no-contract"]["classification"] == "no-contract" and sessions["agi-no-contract"]["classification_reason"] == "report_by is null",
+        "MUTATION report_by=None classifies no-contract, not a verdict from silence",
     )
     _check(
-        sessions["agi-holding"]["classification"] == "holding"
-        and len(sessions["agi-holding"]["holds"]) == _OVER_OLD_FLEET_READ_CEILING + 1
-        and sessions["agi-holding"]["holds"][0]
-        == {"id": "sdp-armed-1", "kind": "session_terminal", "ref": "agi-prerequisite"},
+        sessions["agi-holding"]["classification"] == "holding" and len(sessions["agi-holding"]["holds"]) == _OVER_OLD_FLEET_READ_CEILING + 1 and sessions["agi-holding"]["holds"][0] == {"id": "sdp-armed-1", "kind": "session_terminal", "ref": "agi-prerequisite"},
         "MUTATION >1,000 armed sdp rows yields every holding id/kind/ref citation",
     )
+    past_due = sessions["agi-past-due"]
     _check(
-        sessions["agi-stalled"]["classification"] == "STALLED",
-        "MUTATION past report_by without a hold classifies STALLED",
+        past_due["classification"] == "active" and past_due["report_by"] is not None and past_due["classification_reason"] == f"report_by {past_due['report_by']} recorded; no verdict is computed from silence",
+        "MUTATION live row with a past report_by and no hold is 'active' with the recorded-fact reason",
+    )
+    in_future = sessions["agi-working"]
+    _check(
+        in_future["classification"] == "active" and in_future["classification_reason"] == f"report_by {in_future['report_by']} recorded; no verdict is computed from silence",
+        "MUTATION live row with a future report_by is 'active' with the same recorded-fact reason",
     )
 
 
@@ -148,8 +149,7 @@ def _assert_gauge_projection(result: dict[str, Any], sessions: dict[str, dict[st
         "MUTATION unresolved gauge renders no gauge rather than 0/0/false",
     )
     _check(
-        sessions["agi-working"]["gauge"]["current_tokens"] == 123
-        and sessions["agi-working"]["gauge"]["ceiling"] == 1000,
+        sessions["agi-working"]["gauge"]["current_tokens"] == 123 and sessions["agi-working"]["gauge"]["ceiling"] == 1000,
         "MUTATION resolved gauge retains its measured token values",
     )
     _check(
@@ -160,13 +160,10 @@ def _assert_gauge_projection(result: dict[str, Any], sessions: dict[str, dict[st
 
 def _assert_owed_messages(result: dict[str, Any], ordered_queries: list[dict[str, Any]]) -> None:
     _check(
-        result["legacy_direct_delivery_unknown"] is True
-        and result["owed_messages"][0]["message_id"] == "arm-owed-1",
+        result["legacy_direct_delivery_unknown"] is True and result["owed_messages"][0]["message_id"] == "arm-owed-1",
         "owed output is role-only, FIFO, and declares direct-delivery uncertainty",
     )
-    role_message_queries = [
-        query for query in ordered_queries if query.get("table") == TABLE_AGENT_ROLE_MESSAGE
-    ]
+    role_message_queries = [query for query in ordered_queries if query.get("table") == TABLE_AGENT_ROLE_MESSAGE]
     _check(
         len(result["owed_messages"]) == FLEET_STATUS_MAX_OWED_MESSAGES
         and result["owed_messages_truncated"] == 1
@@ -178,16 +175,24 @@ def _assert_owed_messages(result: dict[str, Any], ordered_queries: list[dict[str
     )
 
 
+def _assert_label_reporting(result: dict[str, Any], sessions: dict[str, dict[str, Any]]) -> None:
+    """Case (b): entries carry the label and are ordered by label."""
+    labels = [row["label"] for row in result["sessions"]]
+    _check(sessions["agi-working"].get("label") == "lane-working", "fleet_status entries are reported by label")
+    _check(labels == sorted(labels), "fleet_status entries are ordered by label")
+
+
 def test_fleet_status() -> None:
     state = RealShapeState()
     now = datetime.now(UTC)
     future = (now + timedelta(minutes=10)).isoformat()
     past = (now - timedelta(minutes=10)).isoformat()
-    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-working", report_by=future, lane_id="lane-working"))
-    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-no-contract", report_by=None, lane_id="lane-no-contract"))
-    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-holding", report_by=future, lane_id="lane-holding"))
-    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-idle", report_by=future, lifecycle_state="idle", lane_id="lane-idle"))
-    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-stalled", report_by=past, lane_id="lane-stalled"))
+    working = _session("agi-working", report_by=future, label="lane-working")
+    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, working)
+    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-no-contract", report_by=None, label="lane-no-contract"))
+    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-holding", report_by=future, label="lane-holding"))
+    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-idle", report_by=future, lifecycle_state="idle", label="lane-idle"))
+    _write(state, AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION, _session("agi-past-due", report_by=past, label="lane-past-due"))
     _write(
         state,
         AGENT_ROLE_BINDING_NAMESPACE,
@@ -278,12 +283,14 @@ def test_fleet_status() -> None:
 
     result = _result(_bare_plugin(cast("StateManagementInterface", state)))
     sessions = _by_id(result)
+    _assert_label_reporting(result, sessions)
     _check(
-        _ACTIVE_SESSION_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING
-        and _NO_CONTRACT_SESSION_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING
-        and _ARMED_DEPENDENCY_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING
-        and result["class_counts"]["no-contract"] == _OVER_OLD_FLEET_READ_CEILING + 1,
+        _ACTIVE_SESSION_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING and _NO_CONTRACT_SESSION_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING and _ARMED_DEPENDENCY_READ_CEILING > _OVER_OLD_FLEET_READ_CEILING and result["class_counts"]["no-contract"] == _OVER_OLD_FLEET_READ_CEILING + 1,
         "MUTATION >1,000 matching rows complete all three read-ceiling paths",
+    )
+    _check(
+        set(result["class_counts"]) == {"active", "no-contract", "idle", "holding"} and result["class_counts"]["active"] == 2 and result["class_counts"]["idle"] == 1 and result["class_counts"]["holding"] == 1,
+        "MUTATION class_counts carries only recorded-fact classes, with both live rows counted active",
     )
     _assert_classifications(sessions)
     _assert_gauge_projection(result, sessions)

@@ -51,7 +51,7 @@ from agent_messaging_plugin.peer_dispatch import _resolve_peer_recipient  # noqa
 from agent_messaging_plugin.peer_registry import PeerRegistry  # noqa: E402
 from agent_messaging_plugin.schema import PEER_BINDING_NAMESPACE, get_peer_binding_schema  # noqa: E402
 from plugins.agent_messaging_plugin.tests.small_plugin_job_support import CONTEXT, Ledger, execute, terminal  # noqa: E402
-from plugins.platform_health_plugin.tests.host_disk_guard_smoke import _FixtureSchedulingService  # noqa: E402
+from plugins.platform_health_plugin.tests.guard_test_support import _FixtureSchedulingService  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -162,7 +162,7 @@ def check_peer_hint() -> None:
     plugin = SchedulingPlugin()
     plugin.configure_memory_store()
     repo = plugin._memory_repository
-    value = ScheduleData.model_validate({"label": "peer hint", "type": "recurring", "cron_expression": "0 * * * *", "actions": [{"name": "plugin::agent_messaging_plugin::send_peer_message", "parameters": {"peer_id": "fixture", "peer_agent_session_id": "session-b", "content": "  original λ\ntext\r\n"}}]})
+    value = ScheduleData.model_validate({"label": "peer hint", "type": "recurring", "cron_expression": "0 * * * *", "actions": [{"name": "plugin::agent_messaging_plugin::peer_send", "parameters": {"peer_id": "fixture", "peer_agent_session_id": "session-b", "content": "  original λ\ntext\r\n"}}]})
     sid = repo.save_schedule(value)
     before = (repo.load_schedule(sid), repo.history(sid), repo.epoch())
     listed = plugin.list_schedules({}, {})["data"]["schedules"][0]

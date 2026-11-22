@@ -769,7 +769,7 @@
           },
           "fleet": {
             "label": "Managed fleet",
-            "description": "Enable explicit model, effort, work class, TTL, role, and lifecycle controls for additional sessions.",
+            "description": "Enable explicit model, effort, TTL, role, and lifecycle controls for additional sessions.",
             "availability": "supported",
             "implications": {
               "cost": "Concurrent sessions can spend more tokens; model, effort, and TTL must be explicit per dispatch.",
@@ -4957,7 +4957,7 @@
     },
     "fleet_spawn_and_receive_valid": {
       "name": "Fleet spawn and receive are valid",
-      "description": "Spawns a bounded worker with explicit runtime, model, effort, work class, budget, and TTL; verifies role claim and fresh addressed delivery; then retires it.",
+      "description": "Spawns a bounded worker with explicit runtime, model, effort, and TTL; verifies role claim and fresh addressed delivery; then retires it.",
       "probe_ref": "plugin::agent_messaging_plugin.qualify_fleet",
       "runner": "platform_process",
       "implementation_status": "adapter_required",

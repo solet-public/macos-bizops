@@ -78,16 +78,10 @@ class PluginRegistrationValidator:
             return
 
         edge_definitions = plugin_instance.get_edge_process_definitions()
-        self._validate_edge_definitions_have_methods(
-            plugin_name, edge_definitions, decorated_edge_processes
-        )
-        self._validate_edge_methods_have_definitions(
-            plugin_name, plugin_instance, edge_definitions, decorated_edge_processes
-        )
+        self._validate_edge_definitions_have_methods(plugin_name, edge_definitions, decorated_edge_processes)
+        self._validate_edge_methods_have_definitions(plugin_name, plugin_instance, edge_definitions, decorated_edge_processes)
 
-    def _get_decorated_edge_processes(
-        self, actions: list[ActionMetadata]
-    ) -> dict[str, ActionMetadata]:
+    def _get_decorated_edge_processes(self, actions: list[ActionMetadata]) -> dict[str, ActionMetadata]:
         """Extract EDGE processes from decorated actions.
 
         Args:
@@ -96,15 +90,9 @@ class PluginRegistrationValidator:
         Returns:
             Dictionary of action name to ActionMetadata for EDGE processes
         """
-        return {
-            a.name: a
-            for a in actions
-            if a.processor_policy_category == ProcessorPolicyCategory.EDGE
-        }
+        return {a.name: a for a in actions if a.processor_policy_category == ProcessorPolicyCategory.EDGE}
 
-    def _validate_non_provider_has_no_edge_processes(
-        self, plugin_name: str, decorated_edge_processes: dict[str, ActionMetadata]
-    ) -> None:
+    def _validate_non_provider_has_no_edge_processes(self, plugin_name: str, decorated_edge_processes: dict[str, ActionMetadata]) -> None:
         """Validate that a non-EdgeProcessProvider plugin has no EDGE processes.
 
         Args:
@@ -119,11 +107,7 @@ class PluginRegistrationValidator:
 
         edge_names = list(decorated_edge_processes.keys())
         raise FrameworkError(
-            message=(
-                f"Plugin '{plugin_name}' has EDGE processes {edge_names} but does not "
-                f"implement EdgeProcessProvider. All plugins with EDGE processes MUST "
-                f"implement EdgeProcessProvider to declare their customizations."
-            ),
+            message=(f"Plugin '{plugin_name}' has EDGE processes {edge_names} but does not implement EdgeProcessProvider. All plugins with EDGE processes MUST implement EdgeProcessProvider to declare their customizations."),
             error_code="process_registry.edge_process_missing_interface",
             details={
                 "plugin_name": plugin_name,
@@ -153,10 +137,7 @@ class PluginRegistrationValidator:
                 continue
 
             raise FrameworkError(
-                message=(
-                    f"Plugin '{plugin_name}' EdgeProcessProvider declares edge process "
-                    f"'{def_name}' but no @platform_process method with that name exists"
-                ),
+                message=(f"Plugin '{plugin_name}' EdgeProcessProvider declares edge process '{def_name}' but no @platform_process method with that name exists"),
                 error_code="process_registry.edge_process_mismatch",
                 details={
                     "plugin_name": plugin_name,
@@ -196,18 +177,13 @@ class PluginRegistrationValidator:
                     # sandboxed probe runs against a clean import and is the
                     # authoritative gate for this case. Log + defer.
                     logger.warning(
-                        "Plugin '%s' EDGE process '%s' missing from cached "
-                        "get_edge_process_definitions() but declared in disk "
-                        "source — likely cache poisoning; deferring to L2 probe",
+                        "Plugin '%s' EDGE process '%s' missing from cached get_edge_process_definitions() but declared in disk source — likely cache poisoning; deferring to L2 probe",
                         plugin_name,
                         action_name,
                     )
                     continue
                 raise FrameworkError(
-                    message=(
-                        f"Plugin '{plugin_name}' has EDGE process '{action_name}' decorated with "
-                        f"@platform_process but not declared in get_edge_process_definitions()"
-                    ),
+                    message=(f"Plugin '{plugin_name}' has EDGE process '{action_name}' decorated with @platform_process but not declared in get_edge_process_definitions()"),
                     error_code="process_registry.edge_process_not_declared",
                     details={
                         "plugin_name": plugin_name,
@@ -251,17 +227,10 @@ class PluginRegistrationValidator:
     def _log_embedding_description_summary(self, missing: list[str], out_of_range: list[str]) -> None:
         """Log one aggregate WARNING per finding category, DEBUG for detail."""
         if missing:
-            logger.warning(
-                f"{len(missing)} discoverable process(es) missing embedding_description "
-                "(will be required in a future release); see DEBUG log for the full list."
-            )
+            logger.warning(f"{len(missing)} discoverable process(es) missing embedding_description (will be required in a future release); see DEBUG log for the full list.")
             logger.debug("Missing embedding_description: %s", ", ".join(missing))
         if out_of_range:
-            logger.warning(
-                f"{len(out_of_range)} discoverable process(es) have an embedding_description "
-                f"outside the recommended [{EMBEDDING_DESCRIPTION_MIN_LENGTH}, "
-                f"{EMBEDDING_DESCRIPTION_MAX_LENGTH}] range; see DEBUG log for the full list."
-            )
+            logger.warning(f"{len(out_of_range)} discoverable process(es) have an embedding_description outside the recommended [{EMBEDDING_DESCRIPTION_MIN_LENGTH}, {EMBEDDING_DESCRIPTION_MAX_LENGTH}] range; see DEBUG log for the full list.")
             logger.debug("Out-of-range embedding_description: %s", ", ".join(out_of_range))
 
     def _validate_discoverable_process(
@@ -336,9 +305,7 @@ def _find_class_def_node(tree: ast.Module, class_name: str) -> ast.ClassDef | No
     return None
 
 
-def _find_method_def_node(
-    class_node: ast.ClassDef, method_name: str
-) -> ast.FunctionDef | None:
+def _find_method_def_node(class_node: ast.ClassDef, method_name: str) -> ast.FunctionDef | None:
     """Find a direct-body method node by name on ``class_node``."""
     for body_item in class_node.body:
         if isinstance(body_item, ast.FunctionDef) and body_item.name == method_name:
@@ -356,16 +323,10 @@ def _find_dict_literal_return(method: ast.FunctionDef) -> ast.Dict | None:
 
 def _extract_string_dict_keys(dict_node: ast.Dict) -> set[str]:
     """Pull string-constant keys from a dict literal; non-string keys ignored."""
-    return {
-        key_node.value
-        for key_node in dict_node.keys
-        if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)
-    }
+    return {key_node.value for key_node in dict_node.keys if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str)}
 
 
-def _disk_source_declares_edge_definition(
-    plugin_instance: PluginBase, action_name: str
-) -> bool:
+def _disk_source_declares_edge_definition(plugin_instance: PluginBase, action_name: str) -> bool:
     """AST-scan the plugin's disk source for an edge-process declaration.
 
     The L1.2 validator reads ``get_edge_process_definitions()`` from the

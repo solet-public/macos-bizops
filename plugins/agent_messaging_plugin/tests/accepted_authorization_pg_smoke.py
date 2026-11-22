@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Private-PostgreSQL proof of accepted-authorization schema, CAS and history.
 
-Run only under the shipped provisioner
-(``project-solet/scripts/provision_test_pg.py --exec``); a missing fixture
+Run only under the repository's private PostgreSQL provisioner
+(``quality_gates/provision_test_pg.py --exec``); a missing fixture
 exits 77 (UNMEASURED), which is never a pass. Two independent state services
 each own a connection pool through the PostgreSQL state plugin; the schema is
 applied by that plugin's declarative lifecycle. This module never opens a
@@ -11,16 +11,14 @@ driver connection or executes SQL, and never touches a live database.
 
 from __future__ import annotations
 
-import asyncio
 import os
-import shlex
 import sys
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from threading import Barrier, Thread
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 from uuid import uuid4
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -34,7 +32,6 @@ from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 from ananta.services.plugin_schema_service.serialization import to_json  # noqa: E402
 from ananta.services.state_service import StateService  # noqa: E402
-from postgres_state_management_plugin.plugin import PostgresStatePlugin  # noqa: E402
 
 import agent_messaging_plugin  # noqa: E402
 import ananta  # noqa: E402
@@ -47,6 +44,7 @@ from agent_messaging_plugin.schema import (  # noqa: E402
     get_accepted_authorization_schema_definition,
     get_session_lifecycle_schema_definition,
 )
+from quality_gates.private_test_pg import MANIFEST_ENV, ledger_fixture, skip_fixture  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -62,51 +60,39 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-def _private_dsn() -> dict[str, str]:
-    raw = os.environ.get("PROJECT_SOLET_DESK_TEST_DSN")
-    if not raw:
-        print("UNMEASURED: private PostgreSQL fixture is missing; run under project-solet/scripts/provision_test_pg.py --exec")
-        print('BORN_CLONE_SKIP_WITNESS={"reason":"local_postgres_fixture_unreachable"}')
-        raise SystemExit(77)
-    dsn = dict(word.split("=", 1) for word in shlex.split(raw))
-    assert dsn.get("host") == "127.0.0.1" and int(dsn.get("port", "5432")) != 5432 and dsn.get("dbname") == "project_solet_desk_test", "private_fixture_required"
+def _require_fixture() -> None:
+    if not os.environ.get(MANIFEST_ENV):
+        raise SystemExit(skip_fixture())
     for module in (ananta, agent_messaging_plugin, postgres_state_management_plugin):
         _check(Path(str(module.__file__)).resolve().is_relative_to(_ROOT), "lane_source_provenance_" + module.__name__)
-    return dsn
 
 
 class Fixture:
     """Two state services over one private schema, each with its own pool."""
 
     def __init__(self) -> None:
-        self.owners: list[PostgresStatePlugin] = []
+        self.stack = ExitStack()
         self.states: list[StateService] = []
         self.installs: list[str] = []
 
     def open(self) -> None:
-        dsn = _private_dsn()
+        _require_fixture()
         physical_schema = "accepted_authorization_test_" + uuid4().hex[:12]
         lifecycle = get_session_lifecycle_schema_definition()
         accepted = get_accepted_authorization_schema_definition()
         merged = replace(lifecycle, tables={**lifecycle.tables, **accepted.tables})
         for index in range(2):
-            owner = PostgresStatePlugin()
-            self.owners.append(owner)
-            owner.set_vault_service(SimpleNamespace(retrieve=lambda **_kw: {"action_status": "completed", "data": {"value": dsn.get("password", "")}}))  # pyright: ignore[reportArgumentType]
-            config = {"host": dsn["host"], "port": int(dsn["port"]), "database": dsn["dbname"], "user": dsn["user"], "pg_schema": physical_schema, "pool_size": 3}
-            with patch.dict(os.environ, {"SOLET_NAME": "accepted-authorization-fixture"}):
-                owner._initialize(config)  # pyright: ignore[reportArgumentType]  # noqa: SLF001
-            _check(asyncio.run(owner.start_services())["action_status"] == "completed", f"private_state_owner_{index}")  # pyright: ignore[reportTypedDictNotRequiredAccess]
+            owner = self.stack.enter_context(ledger_fixture("messaging_write", schema=physical_schema))
+            _check(owner.plugin.name == "postgres_state_management_plugin", f"private_state_owner_{index}")
             if index == 0:
                 for definition in (lifecycle, accepted, lifecycle, accepted):
-                    self.installs.append(str(owner.install_plugin_schema(definition.namespace, to_json(definition))["status"]))
-            state = StateService(plugin_manager=SimpleNamespace(get_plugin=lambda _name, current=owner: current), state_plugin_name="postgres_state_management_plugin")  # pyright: ignore[reportArgumentType]
+                    self.installs.append(str(owner.plugin.install_plugin_schema(definition.namespace, to_json(definition))["status"]))
+            state = owner.state
             state.set_schema_manager(SimpleNamespace(get_schema=lambda _namespace: merged))  # pyright: ignore[reportArgumentType]
             self.states.append(state)
 
     def close(self) -> None:
-        for owner in reversed(self.owners):
-            asyncio.run(owner.stop_services())
+        self.stack.close()
 
 
 def _record(state: StateService, message: str, predicate: str = PREDICATE_A, **extra: str) -> dict[str, Any]:

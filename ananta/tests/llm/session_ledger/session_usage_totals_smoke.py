@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """Session usage contract through real parsers, normalizers, ingest and repository.
 
-Database cases require provision_test_pg's private DESK fixture. No live DSN,
-raw SQL, handwritten DDL, or provider dependency is used by this smoke.
+Database cases require the repository's private PostgreSQL fixture
+(quality_gates/provision_test_pg.py). No live DSN, raw SQL, handwritten DDL,
+or provider dependency is used by this smoke.
 """
 
 from __future__ import annotations
 
 import argparse
-import asyncio
 import importlib
 import json
 import os
-import shlex
 import sys
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -25,7 +25,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[4]
-sys.path[:0] = [str(ROOT / "ananta/src"), str(ROOT / "plugins/agent_messaging_plugin/tests")]
+sys.path[:0] = [str(ROOT), str(ROOT / "ananta/src"), str(ROOT / "plugins/agent_messaging_plugin/tests")]
 for package in ("agent_messaging_plugin", "postgres_state_management_plugin", "claude_code_filesystem_session_source_plugin", "codex_filesystem_session_source_plugin"):
     sys.path.insert(0, str(ROOT / "plugins" / package / "src"))
 from ananta.core.actions.action_factory import ActionFactory  # noqa: E402
@@ -36,9 +36,9 @@ from ananta.llm.session_ledger.repository import SessionLedgerRepository  # noqa
 from ananta.llm.session_ledger.schema import NAMESPACE, TABLE_EVENT, TABLE_SESSION, TABLE_SOURCE, get_session_ledger_schema  # noqa: E402
 from ananta.llm.session_ledger.types import CursorScope, ImportBatchStatus, IngestSourceKind, SourceVendor  # noqa: E402
 from ananta.llm.session_ledger.vendor import claude_code, codex  # noqa: E402
-from ananta.services.plugin_schema_service.serialization import to_json  # noqa: E402
 from ananta.services.session_ledger_service.interfaces.public import SessionLedgerReadAPI  # noqa: E402
-from ananta.services.state_service import StateService  # noqa: E402
+
+from quality_gates.private_test_pg import MANIFEST_ENV, ledger_fixture, skip_fixture  # noqa: E402
 
 NOW = datetime(2026, 10, 17, 0, tzinfo=UTC)
 
@@ -70,30 +70,14 @@ def claude_line(index: int, *, identity: str | None = None, model: str | None = 
 
 class Fixture:
     def __init__(self) -> None:
-        try:
-            from postgres_state_management_plugin.plugin import PostgresStatePlugin
-        except ModuleNotFoundError as exc:
-            print(f"SKIP optional PostgreSQL plugin unavailable: {exc.name}")
-            raise SystemExit(77) from exc
-        if "PROJECT_SOLET_DESK_TEST_DSN" not in os.environ:
-            print("SKIP private PostgreSQL fixture is not provisioned")
-            print('BORN_CLONE_SKIP_WITNESS={"reason":"local_postgres_fixture_unreachable"}')
-            raise SystemExit(77)
-        dsn = dict(word.split("=", 1) for word in shlex.split(os.environ["PROJECT_SOLET_DESK_TEST_DSN"]))
-        assert dsn["host"] == "127.0.0.1" and int(dsn["port"]) != 5432 and dsn["dbname"] == "project_solet_desk_test", "private fixture required"
-        self.plugin = PostgresStatePlugin()
-        self.plugin.set_vault_service(SimpleNamespace(retrieve=lambda **_kw: {"action_status": "completed", "data": {"value": dsn.get("password", "")}}))  # pyright: ignore[reportArgumentType]
-        config = {"host": dsn["host"], "port": int(dsn["port"]), "database": dsn["dbname"], "user": dsn["user"], "pg_schema": "usage_meter_" + uuid4().hex[:12], "pool_size": 2}
-        # The launcher identity is scrubbed; only this injected fixture vault
-        # needs a synthetic namespace while the plugin builds its connection.
-        with patch.dict(os.environ, {"SOLET_NAME": "usage-fixture"}):
-            self.plugin._initialize(config)  # pyright: ignore[reportArgumentType]
-        initialized = asyncio.run(self.plugin.start_services())
-        assert initialized["action_status"] == "completed", initialized  # pyright: ignore[reportTypedDictNotRequiredAccess]
-        installed = self.plugin.install_plugin_schema(NAMESPACE, to_json(get_session_ledger_schema()))
-        assert installed["status"] in ("installed", "installed_and_adopted", "adopted"), installed
+        if not os.environ.get(MANIFEST_ENV):
+            raise SystemExit(skip_fixture())
+        self.stack = ExitStack()
+        fixture = self.stack.enter_context(ledger_fixture("ledger_ingest", schema="usage_meter_" + uuid4().hex[:12]))
+        self.plugin = fixture.plugin
+        self.state = fixture.state
+        # Dependents extend this registry (allowance_pool_reading_history_smoke installs the lifecycle schema through it).
         self.schemas = {NAMESPACE: get_session_ledger_schema()}
-        self.state = StateService(plugin_manager=SimpleNamespace(get_plugin=lambda name: self.plugin), state_plugin_name="postgres_state_management_plugin")  # pyright: ignore[reportArgumentType]
         self.state.set_schema_manager(SimpleNamespace(get_schema=lambda namespace: self.schemas[namespace]))  # pyright: ignore[reportArgumentType]
         self.repo = SessionLedgerRepository(state_service=self.state, clock=lambda: NOW)  # pyright: ignore[reportArgumentType]
         from ananta.llm.session_ledger.read import SessionUsageReader
@@ -103,8 +87,8 @@ class Fixture:
         self.temp = tempfile.TemporaryDirectory()
 
     def close(self) -> None:
-        asyncio.run(self.plugin.stop_services())
         self.temp.cleanup()
+        self.stack.close()
 
     def source(self, kind: str, label: str = "one") -> str:
         key = kind + label

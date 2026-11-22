@@ -75,12 +75,11 @@ from pathlib import Path
 from threading import RLock
 from typing import TYPE_CHECKING, Any
 
-from .authority_contract import render_authority_delegation_contract
 from .claude_hook_commands import optional_hook_command
 from .coordination_receipt import declared_receipt_path, receipt_finding
-from .lane_worktrees import LaneWorktreeError, spawn_worktree_cwd, worktree_pythonpath
-from .register_unit_client import assignment_from_record
+from .host_end_notice import notify_on_exit
 from .schema import CAPTURE_SOURCE_INIT_EVENT
+from .session_workspace import resolve_workspace
 from .solet_cli import (
     WakeCliResolver,
     expose_worker_cli,
@@ -120,21 +119,6 @@ def _resolve_default_cwd() -> Path:
     return Path.cwd()
 
 
-def _resolve_spawn_cwd(spec: Mapping[str, object], fallback: Path) -> Path:
-    """Map an explicit lane tree into a host-spawn error at the adapter edge."""
-    from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
-
-    try:
-        return spawn_worktree_cwd(spec.get("worktree_path"), fallback)
-    except LaneWorktreeError as exc:
-        raise HostCannotSpawnError(str(exc)) from exc
-
-
-def _with_worktree_pythonpath(env: dict[str, str], cwd: Path) -> dict[str, str]:
-    env["PYTHONPATH"] = worktree_pythonpath(cwd, env.get("PYTHONPATH", ""))
-    return env
-
-
 def _resolve_spawn_transport(spec: Mapping[str, object], floor: str) -> str:
     """Prefer the policy-resolved spawn value, then the driver floor."""
     return str(spec.get("transport") or "") or floor or "watch"
@@ -153,7 +137,6 @@ def _resolve_spawn_transport(spec: Mapping[str, object], floor: str) -> str:
 _WORKER_INJECTED_HOOK_FILENAMES: tuple[str, ...] = (
     "headless_tool_allowlist_gate.py",
     "capture_session_mapping.py",
-    "heartbeat_report_alive.py",
     "rotation_due_watch.py",
     "wake_waiter.py",
     "session_start_context.py",
@@ -403,7 +386,7 @@ def _mcp_config_remedy(resolved_transport: str, mcp_config_path: Path) -> str | 
         "the resolved transport is 'mcp' (a real MCP bridge config must "
         "exist and is passed verbatim to --mcp-config); 'watch' transport "
         "spawns with an inline empty MCP config and never reads this file, "
-        "so switching FLEET_SESSION_HOST/transport to 'watch' (the charter "
+        "so switching FLEET_SESSION_HOST/transport to 'watch' (the shipped "
         "default) also satisfies this remedy without creating the file."
     )
 
@@ -442,13 +425,13 @@ def _managed_policy_remedy(
 def _resolve_local_label(spec: Mapping[str, object], *, agent_instance_id: str) -> str:
     """W6 (#13 §44.3): the name the worker answers to on its own machine.
 
-    ``spawn_session`` resolves ``local_name`` (role_name for a project-class
-    role, else lane_id) and passes it down; the lane_id fallback preserves the
-    previous behaviour exactly for any caller that sends no ``local_name``.
+    ``spawn_session`` resolves ``local_name`` (the caller's name, else its
+    label) and passes it down; a caller that sends no ``local_name`` is named
+    by the spec's ``label``, else by the instance id.
     Shared by BOTH host drivers so the two can never disagree about what a
     worker is called — the tmux driver imports it from here.
     """
-    return str(spec.get("local_name") or "") or str(spec.get("lane_id") or "") or agent_instance_id
+    return str(spec.get("local_name") or "") or str(spec.get("label") or "") or agent_instance_id
 
 
 def _announce_managed_policy(
@@ -543,21 +526,6 @@ def _resolve_session_mapping_spool_dir() -> Path | None:
     return Path(app_home) / "data" / "session_claude_mapping_spool"
 
 
-def _resolve_heartbeat_marker_dir() -> Path | None:
-    """T2's PostToolUse heartbeat hook's per-worker marker directory (seat's
-    redesign ruling 2026-08-05, after the pid-32482 false-liveness defect)
-    -- same declared-not-derived, ``APP_HOME``-rooted contract as
-    :func:`_resolve_session_mapping_spool_dir` (a SEPARATE directory, not a
-    sibling file inside the mapping spool: that spool's own drain globs
-    ``*.json`` and would try to parse a stray heartbeat marker as a
-    malformed mapping record). ``None`` when ``APP_HOME`` is unset, same
-    conditional-export contract as every sibling resolver here."""
-    app_home = os.environ.get("APP_HOME", "").strip()
-    if not app_home:
-        return None
-    return Path(app_home) / "data" / "heartbeat_marker"
-
-
 def _resolve_coordination_receipt_path(solet_name: str, reporter: Path) -> Path | None:
     """The owner receipt, declared from APP_HOME (see ``coordination_receipt``).
 
@@ -575,26 +543,6 @@ def _add_coordination_receipt_env(env: dict[str, str], solet_name: str, reporter
     receipt_path = _resolve_coordination_receipt_path(solet_name, reporter)
     if receipt_path is not None:
         env["AGENT_COORDINATION_RECEIPT_PATH"] = str(receipt_path)
-
-
-def _authority_system_prompt(spec: Mapping[str, object]) -> str:
-    """T2 authority-template (seat's design ruling 2026-08-05) -- renders
-    the delegation contract for THIS spawn from the caller-supplied spec.
-    Missing fields (agent_instance_id excepted -- ``spawn()`` always sets
-    it before building the command) render as blank slots via ``.get(...,
-    "")`` rather than raising. Imported into ``tmux_adapter.py`` (same
-    convention as ``_resolve_session_mapping_spool_dir``) rather than
-    duplicated -- host-agnostic, no headless-specific behavior."""
-    return render_authority_delegation_contract(
-        agent_instance_id=str(spec.get("agent_instance_id") or ""),
-        role_class=str(spec.get("role_class") or ""),
-        lane_id=str(spec.get("lane_id") or ""),
-        assignment=assignment_from_record(spec),
-        spawned_by_role=str(spec.get("spawned_by_role") or ""),
-        repository_root=str(
-            spec.get("repository_root") or spec.get("worktree_path") or "",
-        ),
-    )
 
 
 def _coerce_allowed_tools(spec: Mapping[str, object]) -> tuple[str, ...]:
@@ -898,6 +846,7 @@ class HeadlessHostDriver:
         python_executable: str | None = None,
         popen_fn: Callable[..., subprocess.Popen[str]] = subprocess.Popen,
         grace_seconds: float = DEFAULT_TERMINATE_GRACE_SECONDS,
+        end_notice: bool = False,
     ) -> None:
         # ``is not None`` throughout (never ``or``): an explicit empty string
         # means "explicitly blank," distinct from "not provided, resolve
@@ -922,13 +871,14 @@ class HeadlessHostDriver:
         # spawn_session entirely. Unlike permission_mode, transport is
         # never a fail-closed gate -- there is no "refuse to spawn without
         # an explicit value" posture, so an unset floor resolves to the
-        # charter's own safe default ("watch") in _spawn_env/_spawn_command
+        # shipped safe default ("watch") in _spawn_env/_spawn_command
         # rather than refusing.
         self._transport = transport if transport is not None else ""
         self._cwd = cwd if cwd is not None else _resolve_default_cwd()
         self._mcp_config_path = mcp_config_path if mcp_config_path is not None else (self._cwd / ".mcp.json")
         self._popen_fn = popen_fn
         self._grace_seconds = grace_seconds
+        self._end_notice = end_notice
         self._lock = RLock()
         self._processes: dict[str, _TrackedHeadlessProcess] = {}
 
@@ -970,7 +920,7 @@ class HeadlessHostDriver:
         clone, which ships no ``.mcp.json`` at all, for a file that spawn
         was never going to read. Resolution mirrors :meth:`_resolve_transport`
         exactly (spec-level override, then this driver's constructor/env
-        floor, then the charter default ``"watch"``) so a bare call sees the
+        floor, then the shipped default ``"watch"``) so a bare call sees the
         same posture :meth:`spawn` would actually take."""
         candidates = (
             _claude_bin_remedy(self._claude_bin),
@@ -1014,15 +964,13 @@ class HeadlessHostDriver:
         # Registration-loss fix (2026-08-14): the 2026-08-08 fix used the
         # bare command NAME, which only works when PATH can resolve it. A
         # materialized blue-green release runs with a minimal PATH excluding
-        # its own venv/bin, so wake_waiter.py's
-        # `subprocess.run([$AGENT_WAKE_CLI, "wake"])` and
-        # heartbeat_report_alive.py's bare `["solet-bridge", "call", ...]` both died
-        # with FileNotFoundError and, being non-fatal by design, died
-        # SILENTLY. Absolute binary + PATH prepend closes both halves.
+        # its own venv/bin, so wake_waiter.py's bridge subprocess died with
+        # FileNotFoundError and, being non-fatal by design, died SILENTLY.
+        # Absolute binary + PATH prepend closes both halves.
         expose_worker_cli(env, self._solet_bin)
         # fleet-watch-transport-migration phase 2 slice 1 (2026-08-06):
         # caller-resolved (spec's policy-filled value, or this driver's
-        # constructor/charter-default floor -- see spawn()) -- never
+        # constructor/shipped-default floor -- see spawn()) -- never
         # hardcoded here. This is the SAME env var the rename skill, every
         # spawned worker's hook guards, and wake_waiter.js all read
         # independently (declared, never probed).
@@ -1034,8 +982,8 @@ class HeadlessHostDriver:
         # same night; the hook's opt-in contract (unset env var = gate
         # off) already supported this, this driver just needed to stop
         # forcing it on. The mechanism stays landed as shelf capability
-        # (armed per-work_class via plugin.yaml's work_class_tool_allowlists
-        # whenever usage data argues for it), just not exercised by default.
+        # (armed via plugin.yaml's default_allowed_tools whenever usage data
+        # argues for it), just not exercised by default.
         if allowed_tools:
             env["FLEET_HEADLESS_TOOL_ALLOWLIST"] = ",".join(allowed_tools)
         # T1 usage-capture lane (ruling 2026-08-05, Q1(a)): declared here,
@@ -1046,13 +994,8 @@ class HeadlessHostDriver:
         spool_dir = _resolve_session_mapping_spool_dir()
         if spool_dir is not None:
             env["ANANTA_SESSION_MAPPING_SPOOL_DIR"] = str(spool_dir)
-        # T2 heartbeat lane (seat's redesign ruling 2026-08-05): same
-        # declared-not-derived, conditional-export contract.
-        heartbeat_dir = _resolve_heartbeat_marker_dir()
-        if heartbeat_dir is not None:
-            env["AGENT_HEARTBEAT_MARKER_DIR"] = str(heartbeat_dir)
         _add_coordination_receipt_env(env, self._solet_name, context_gauge_reporter_path)
-        return _with_worktree_pythonpath(env, cwd or self._cwd)
+        return env
 
     def _hook_settings_json(
         self,
@@ -1071,10 +1014,9 @@ class HeadlessHostDriver:
         resolved_hooks = resolved_hooks or _resolve_worker_hook_paths(self._cwd)
         allowlist_hook_path = resolved_hooks["headless_tool_allowlist_gate.py"]
         capture_hook_path = resolved_hooks["capture_session_mapping.py"]
-        heartbeat_hook_path = resolved_hooks["heartbeat_report_alive.py"]
         rotation_due_hook_path = resolved_hooks["rotation_due_watch.py"]
         # Deaf-wake fix (2026-08-08): project-vendored Python ports of
-        # coordination-hooks@<solet>'s four JS hooks, wired here (this
+        # coordination-hooks@<solet>'s hooks, wired here (this
         # adapter's own generated --settings blob) rather than the shared
         # project-scope .claude/settings.json, specifically so this does
         # not double-fire the wake for the seat -- the seat already gets
@@ -1087,6 +1029,9 @@ class HeadlessHostDriver:
         session_start_hook_path = resolved_hooks["session_start_context.py"]
         step_zero_hook_path = resolved_hooks["step_zero_reminder.py"]
         settings = {
+            # Spawned lanes read project settings only, never ~/.claude/settings.json,
+            # so the compaction window rides here: no session passes 500K (rul_1d0a322d).
+            "autoCompactWindow": 500000,
             "permissions": {
                 "deny": list(_HEADLESS_DENIED_TOOLS),
             },
@@ -1097,14 +1042,16 @@ class HeadlessHostDriver:
                 "SessionStart": [
                     {"hooks": [{"type": "command", "command": optional_hook_command(capture_hook_path, "SessionStart")}]},
                     {
-                        # Matches coordination-hooks@<solet>'s own hooks.json
-                        # matcher for this event exactly (fidelity, not a
-                        # new choice) -- session_start_context.py
-                        # fires only here (never UserPromptSubmit
-                        # below), matching the shipped plugin.
-                        "matcher": "startup|resume|clear",
+                        # The checkout hook also answers compact: after a
+                        # compaction the host runs SessionStart again and only
+                        # hooks matching it re-inject context. The shipped
+                        # plugin hooks keep startup|resume|clear (they carry
+                        # the solet's statement, not the register block).
+                        # session_start_context.py fires only here, never on
+                        # UserPromptSubmit.
+                        "matcher": "startup|resume|clear|compact",
                         "hooks": [
-                            {"type": "command", "command": optional_hook_command(session_start_hook_path, "SessionStart"), "timeout": 8},
+                            {"type": "command", "command": optional_hook_command(session_start_hook_path, "SessionStart"), "timeout": 40},
                         ],
                     },
                 ],
@@ -1114,7 +1061,6 @@ class HeadlessHostDriver:
                 "PostToolUse": [
                     {
                         "hooks": [
-                            {"type": "command", "command": optional_hook_command(heartbeat_hook_path, "PostToolUse")},
                             {"type": "command", "command": optional_hook_command(rotation_due_hook_path, "PostToolUse")},
                         ]
                     },
@@ -1220,14 +1166,6 @@ class HeadlessHostDriver:
         effort = str(spec.get("effort") or "")
         if effort:
             cmd += ["--effort", effort]
-        # T2 authority-template (seat's design ruling 2026-08-05): ON by
-        # default for every spawn_session-managed spawn, not a lane
-        # opt-in -- authority-at-first-contact is fleet doctrine. Missing
-        # spec fields (e.g. a direct spawn() call that bypasses
-        # spawn_session) render as blank slots rather than skipping the
-        # flag entirely -- every spawned worker gets the trusted-surface
-        # anchor, never a silently-degraded one.
-        cmd += ["--append-system-prompt", _authority_system_prompt(spec)]
         return cmd
 
     def spawn(self, spec: Mapping[str, object]) -> str:
@@ -1264,8 +1202,8 @@ class HeadlessHostDriver:
         # Minted exactly ONCE, here — never re-derived elsewhere (two
         # evaluations of an identity expression is two identities).
         agent_session_id = f"ases-{agent_instance_id}"
-        cwd = _resolve_spawn_cwd(spec, self._cwd)
-        resolved_hooks = _resolve_worker_hook_paths_for_spawn(cwd)
+        cwd = resolve_workspace(spec.get("workspace"), self._cwd)
+        resolved_hooks = _resolve_worker_hook_paths_for_spawn(self._cwd)
         env = self._spawn_env(
             agent_instance_id=agent_instance_id,
             agent_session_id=agent_session_id,
@@ -1314,7 +1252,12 @@ class HeadlessHostDriver:
             )
         _drain_stdout_with_init_capture(proc.stdout, agent_instance_id=agent_instance_id)
         _drain_pipe(proc.stderr)
+        self._arm_end_notice(proc, host_ref)
         return host_ref
+
+    def _arm_end_notice(self, proc: subprocess.Popen[str], host_ref: str) -> None:
+        if self._end_notice:
+            notify_on_exit(proc.wait, host="headless", host_ref=host_ref, solet_name=self._solet_name, solet_bin=self._solet_bin)
 
     def alive(self, host_ref: str) -> bool:
         try:

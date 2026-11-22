@@ -1,55 +1,29 @@
 #!/usr/bin/env python3
-"""rotation-systematization P2 slice B (ruling 2, P1 ratification 2026-08-07
--- workbench/2026-08-07_rotation_systematization_findings_rotation-impl.md)
--- PostToolUse hook, sibling to ``heartbeat_report_alive.py``: the
-host-independent rotation-due trigger for BOTH the seat and every worker.
+"""PostToolUse hook that reports this session's own context gauge.
 
-Reads this session's OWN ``transcript_path`` (the same stdin field Claude
-Code hooks already carry), tails the most recent ``type=assistant`` line's
-``message.usage`` block (a zero-lag, no-ingestion-latency proxy for current
-context occupancy -- measured live against this session's own transcript
-during P1(b)), compares against the declared ceiling in
+On each throttled tool call the hook reads this session's OWN
+``transcript_path`` (the same stdin field Claude Code hooks already carry),
+tails the most recent ``type=assistant`` line's ``message.usage`` block (a
+zero-lag, no-ingestion-latency proxy for current context occupancy -- measured
+live against a session's own transcript) and pushes that measurement to the
+platform with ``report_context_status``. ``session_context_status``,
+``fleet_status`` and usage accounting read the stored row on demand. The
+ceiling and the cache-state classification come from
 ``agent_messaging_plugin.rotation_thresholds`` (a SINGLE source of truth --
 imported directly rather than duplicated, since that module has zero
-third-party dependencies and is safe to import without the venv), and on a
-threshold crossing NOTIFIES the steward. It never acts (never calls
-``clear_session`` or the seat's own rotation helper) and never touches
-``report_by``/``report_alive``/any lifecycle-transition verb -- rotation
-timing stays a steward/seat decision (ruling 2; brief's own out-of-scope
-line: "changing WHEN the fleet rotates as policy... stays with the
-seat/operator").
+third-party dependencies and is safe to import without the venv).
 
-Two independent marker files, distinct purposes (both under the SAME
-declared ``AGENT_HEARTBEAT_MARKER_DIR`` this checkout already wires --
-composing the existing declared directory rather than requesting new
-adapter-side env wiring, per the brief's "prefer composing landed
-machinery over new surface" framing):
-- THROTTLE (per ``agent_instance_id``): how often this hook even computes
-  -- cost control, same shape as ``heartbeat_report_alive.py``'s own
-  throttle.
-- LATCH (per ``agent_instance_id`` + the CURRENT ``claude_session_id``):
-  fires the notification at most once per session-generation. Keying on
-  the CURRENT claude_session_id (not just agent_instance_id) means a
-  ``/clear`` naturally gets a fresh, absent latch file with no explicit
-  reset logic -- the session_claude_mapping capture already re-fires on
-  every new session_id (``hook:clear`` etc.), so this hook's own re-fire
-  on the same PostToolUse wiring needs no bespoke reset path either.
+The hook only reports. It sends no message to any session, resolves no role
+or steward, writes no notice marker, and never calls ``clear_session``,
+``report_alive`` or any lifecycle-transition verb: when a session rotates is
+the session's and the operator's decision, made from the gauge when they
+choose to read it.
 
-Steward resolution: ``session_status`` for this ``agent_instance_id`` ->
-``spawned_by_role`` when the row exists and carries one (every managed
-worker). For a row that doesn't exist (``host=operator`` -- e.g. the seat
-itself, never spawned via ``spawn_session``) or carries no
-``spawned_by_role``, this falls back to a LOCALLY-SURFACED marker file
-(self-notification artifact) rather than failing -- consumption of that
-marker on the seat's own next turn is a named follow-on, not built here
-(this hook's job is the trigger + delivery attempt, not the read-back
-UX).
-
-Notification identity discipline: the message CONTENT carries this
-session's ``agent_instance_id``/``session_label`` verbatim as text (never
-relies on the transport's own sender-identity field to carry it) --
-per this fleet's own measured trap that a bare CLI send drops caller
-identity (names route, content binds).
+One marker file, a single timestamp under the receipt-derived identity
+directory (``<identity dir>/context_watch/``):
+- THROTTLE (per ``agent_instance_id``): how often this hook even computes --
+  cost control. It is touched only after the platform completed a report, so a
+  failed report is retried on the next tool call.
 
 Non-fatal by design, same contract as this checkout's other hooks: any
 failure (missing env var, unreadable transcript, unparseable JSON,
@@ -59,7 +33,7 @@ hook must never cost a session its tool call.
 Stdlib-only for I/O and subprocess dispatch, EXCEPT the one direct import
 of ``agent_messaging_plugin.rotation_thresholds`` (zero-dependency pure
 module, safe outside the venv) -- mirrors this repo's other hooks
-(``capture_session_mapping.py``, ``heartbeat_report_alive.py``).
+(``capture_session_mapping.py``).
 
 THREE COPIES OF THIS FILE EXIST, AND THE ONE YOU ARE READING IS PROBABLY
 NOT THE ONE THAT RAN. Editing any one of them changes nothing about the
@@ -116,7 +90,7 @@ MERGE rather than override, so in a project that wires copy 1 while the
 plugin is enabled BOTH still receive the event. A spawned worker's host
 adapter now exports ``AGENT_CONTEXT_GAUGE_REPORTER_PATH`` as copy 1's
 absolute, spawn-time-resolved path. Every copy compares that designation to
-its own ``__file__`` before it claims the shared throttle or latch: only the
+its own ``__file__`` before it claims the shared throttle: only the
 designated copy reports, and every other registration exits 0 without a
 marker write. The setting is absent for sessions without generated worker
 settings, preserving the plugin-cache reporter there. This is an election of
@@ -148,7 +122,6 @@ if sys.version_info < (3, 11):  # noqa: UP036 -- see above; ruff assumes
 import json
 import os
 import subprocess
-import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -160,7 +133,6 @@ if _OWNER_DIRECTORY not in sys.path:
 import _session_identity as session_identity  # noqa: E402 -- sibling path follows runtime floor
 import coordination_owner  # noqa: E402 -- sibling path follows runtime floor
 
-_MARKER_DIR_ENV = "AGENT_HEARTBEAT_MARKER_DIR"
 _INSTANCE_ID_ENV = "AGENT_INSTANCE_ID"
 _GAUGE_REPORTER_PATH_ENV = "AGENT_CONTEXT_GAUGE_REPORTER_PATH"
 # The session's STABLE id, distinct from the instance id above and NOT
@@ -169,7 +141,6 @@ _GAUGE_REPORTER_PATH_ENV = "AGENT_CONTEXT_GAUGE_REPORTER_PATH"
 # keys on its WATCH id, and only this value joins the two through the
 # registry. See the schema column of the same name.
 _SESSION_ID_ENV = "AGENT_SESSION_ID"
-_SESSION_LABEL_ENV = "AGENT_SESSION_LABEL"
 _PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
 
 # Comfortably more frequent than the heartbeat's 180s -- rotation-due is a
@@ -179,16 +150,12 @@ _PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
 # not a guess dressed as one -- named as such.
 _THROTTLE_SECONDS = 120.0
 
-_SESSION_STATUS_PROCESS_KEY = "plugin::agent_messaging_plugin::session_status"
-_PEER_SEND_PROCESS_KEY = "plugin::agent_messaging_plugin::peer_send_by_name"
 # maintenance-verbs M1 (workbench
 # 2026-08-09_maintenance_verbs_m0_design_mverbs-impl.md §2.3, shape (a)):
-# this hook already computes current_tokens/model/ceiling every un-throttled
-# tick for the notify path below -- piggybacking a plain state-cache write
-# onto the SAME tick (same throttle window governs both) is the whole of
-# shape (a)'s "hook-fed cache" design, no new wiring surface needed for
-# worker coverage (workers already carry this hook in their spawn-time
-# adapter blob, the same precedent heartbeat_report_alive.py set).
+# this hook computes current_tokens/model/ceiling on every un-throttled tick
+# and writes them as a plain state-cache row -- the whole of shape (a)'s
+# "hook-fed cache" design, with no new wiring surface needed for worker
+# coverage (workers already carry this hook in their spawn-time adapter blob).
 _REPORT_CONTEXT_STATUS_PROCESS_KEY = "plugin::agent_messaging_plugin::report_context_status"
 _PEER_LIST_PROCESS_KEY = "plugin::agent_messaging_plugin::peer_list"
 # This copy's own CONTENT GENERATION, reported alongside every snapshot so a
@@ -260,41 +227,10 @@ def _throttle_marker_path(identity_dir: Path, agent_instance_id: str) -> Path:
     return Path(identity_dir) / "context_watch" / f"{agent_instance_id}.rotation_due_check.stamp"
 
 
-def _latch_marker_path(identity_dir: Path, agent_instance_id: str, claude_session_id: str) -> Path:
-    return Path(identity_dir) / "context_watch" / f"{agent_instance_id}__{claude_session_id}.rotation_due_latch"
-
-
-def _fallback_marker_path(identity_dir: Path, agent_instance_id: str, claude_session_id: str) -> Path:
-    return Path(identity_dir) / "context_watch" / f"{agent_instance_id}__{claude_session_id}.rotation_due_selfnotify.json"
-
-
-def _deferred_marker_path(identity_dir: Path, agent_instance_id: str, claude_session_id: str) -> Path:
-    """GAU-14 (D2): notes, ONCE per session generation, that this hook stood
-    down because the solet's own legs are covering the same condition.
-
-    ★ WHY A MARKER AND NOT A BARE WARNING. Standing down silently would make a
-    hook that deferred indistinguishable from a hook that never ran or never
-    fired -- the defect class this whole family keeps paying for (GAU-02). But
-    the deferral holds for the REST of the generation, and this hook is on a
-    120s throttle, so an ungated warning would repeat every two minutes for the
-    life of the session. One line per generation is the only version that is
-    both observable and not noise.
-
-    ★ WHY IT IS NOT A NEW RACE. The split-marker hazard is real when two
-    PROCESSES read and write the same fact. This file is the only writer of
-    every marker it uses, the key is the same (instance, generation) pair the
-    delivery latch already uses, and nothing reads it but the next tick of this
-    same hook. It is a fourth marker of an existing shape, not a second source
-    of truth for an existing fact.
-    """
-    return Path(identity_dir) / "context_watch" / f"{agent_instance_id}__{claude_session_id}.rotation_due_deferred"
-
-
 def is_throttled(marker_path: Path, *, now: float, throttle_seconds: float = _THROTTLE_SECONDS) -> bool:
     """True means "skip -- computed recently enough". A marker that
     doesn't exist, or that fails to stat for any reason, is never
-    throttled (the safe default is to attempt a compute, matching
-    ``heartbeat_report_alive.py``'s own ``_throttled`` contract)."""
+    throttled (the safe default is to attempt a compute)."""
     try:
         age = now - marker_path.stat().st_mtime
     except OSError:
@@ -454,22 +390,6 @@ def sum_context_tokens(usage: dict[str, Any]) -> int:
     return total
 
 
-def build_notification_content(
-    *,
-    agent_instance_id: str,
-    session_label: str,
-    model: str,
-    current_tokens: int,
-    ceiling: int,
-    band: str,
-    band_actionable: bool,
-    threshold_fraction: float,
-    fraction_crossed: bool,
-) -> str:
-    """Return the sole durability notice text for a due session."""
-    return f"context is {current_tokens:,} — make sure everything is durable."
-
-
 def _resolve_plugin_src_path() -> Path | None:
     """``CLAUDE_PROJECT_DIR``-relative only -- unlike the checkout-local
     original this vendored copy has no fixed parent-directory depth to fall
@@ -572,45 +492,6 @@ def _solet_call(process_key: str, arguments: dict[str, Any]) -> dict[str, Any] |
         return None
 
 
-def _resolve_steward_role(agent_instance_id: str) -> str | None:
-    """The managed_session row's ``spawned_by_role``, or ``None`` when the
-    row doesn't exist (host=operator, e.g. the seat) or carries no
-    steward -- callers fall back to local self-notification, they don't
-    treat this as an error."""
-    envelope = _solet_call(
-        _SESSION_STATUS_PROCESS_KEY,
-        {"agent_instance_id": agent_instance_id},
-    )
-    if envelope is None or envelope.get("status") != "completed":
-        return None
-    data = ((envelope.get("result") or {}).get("data")) or {}
-    role = str(data.get("spawned_by_role") or "").strip()
-    return role or None
-
-
-def _deliver_notification(*, agent_instance_id: str, claude_session_id: str, content: str, marker_dir: Path) -> bool:
-    """Peer-send to the resolved steward when one exists; otherwise write
-    a locally-surfaced marker file. Returns True on any successful
-    delivery path (peer-send OR marker write) -- the caller only touches
-    the latch on a True return, so a fully-failed delivery attempt can
-    retry on the next un-throttled tick instead of being silently
-    latched-but-never-delivered."""
-    steward_role = _resolve_steward_role(agent_instance_id)
-    if steward_role is not None:
-        envelope = _solet_call(_PEER_SEND_PROCESS_KEY, {"name": steward_role, "content": content})
-        if envelope is not None and envelope.get("status") == "completed":
-            return True
-        _warn(f"peer_send_by_name to steward role {steward_role!r} failed; falling back to local marker")
-    marker_path = _fallback_marker_path(marker_dir, agent_instance_id, claude_session_id)
-    try:
-        marker_path.parent.mkdir(parents=True, exist_ok=True)
-        marker_path.write_text(json.dumps({"content": content, "written_at": time.time()}))
-    except OSError as exc:
-        _warn(f"failed to write local self-notification marker: {exc}")
-        return False
-    return True
-
-
 def _read_stdin_payload() -> dict[str, Any] | None:
     """``None`` means "skip, already warned" -- a parse failure is never
     fatal, same contract as ``capture_session_mapping.py``'s own helper of
@@ -625,25 +506,6 @@ def _read_stdin_payload() -> dict[str, Any] | None:
         _warn("stdin payload was not a JSON object")
         return None
     return payload
-
-
-def _fallback_marker_dir() -> str | None:  # pyright: ignore[reportUnusedFunction]
-    """A writable stand-in marker root for the managed-but-mis-wired case.
-
-    Deliberately the OS temp dir rather than a project-relative path: this
-    hook cannot rely on ``CLAUDE_PROJECT_DIR`` (measured absent from live
-    spawned workers' env), and guessing a profile-relative location would
-    invent a convention rather than use one. Returns ``None`` if the
-    directory cannot be created, which sends the caller back to skipping --
-    the one case where this hook still declines to fire.
-    """
-    path = Path(tempfile.gettempdir()) / "agent_rotation_due_markers"
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        _warn(f"could not create fallback marker root {path}: {exc} -- skipping")
-        return None
-    return str(path)
 
 
 def _ancestor_claude_pid() -> int | None:
@@ -987,19 +849,13 @@ def _report_context_status(
     reading_at: str | None,
 ) -> bool:
     """Best-effort cache write for ``session_context_status`` (shape (a)) --
-    non-fatal by this hook's own standing contract: a failed report here
-    must never cost the notify path below, so failures warn to stderr.
+    non-fatal by this hook's own standing contract: a failed report costs the
+    session nothing and warns to stderr.
 
-    ★ RETURNS WHETHER THE SOLET ANSWERED (GAU-14 D2, 2026-08-19). The caller
-    still does not branch on this for the REPORT -- that stays best-effort and
-    unconditional. It branches on it for the NOTIFY, and this is the one place
-    in the tick that already knows the answer. Deriving solet liveness from the
-    call this tick has ALREADY made costs nothing; asking separately would add
-    a second round trip to the hot path and a second chance to disagree with
-    itself about the same fact.
-
-    False means "the solet did not complete this call", which is exactly the
-    condition under which the solet-side legs cannot be covering anything.
+    RETURNS WHETHER THE PLATFORM COMPLETED THE CALL. The caller makes the
+    report unconditionally and uses the answer for one thing only: it touches
+    the throttle marker after a completed report, so a failed report is
+    retried on the next tool call instead of waiting out the throttle window.
     """
     identity = _runtime_identity_arguments(claude_session_id)
     envelope = _solet_call(
@@ -1032,9 +888,7 @@ def _report_context_status(
 def _resolve_usage(transcript_path: str) -> tuple[str, int, str | None, Any] | None:
     """``(model, current_tokens, reading_at, rotation_thresholds module)``, or
     ``None`` when there is no usage-bearing assistant line yet or the module
-    import fails -- shared by the (unconditional, every-tick) cache report and
-    the (latch-gated, once-per-generation) notify path so each tick reads the
-    transcript file exactly once, not twice.
+    import fails -- so each tick reads the transcript's usage line once.
 
     ``reading_at`` rides the SAME read for the same reason the token sum does:
     it is a property of the one line this tick already parsed, and re-deriving
@@ -1049,149 +903,6 @@ def _resolve_usage(transcript_path: str) -> tuple[str, int, str | None, Any] | N
     if rotation_thresholds is None:
         return None
     return model, sum_context_tokens(usage), reading_at, rotation_thresholds
-
-
-def _check_and_notify(
-    *,
-    marker_dir: Path,
-    agent_instance_id: str,
-    claude_session_id: str,
-    latch_path: Path,
-    model: str,
-    current_tokens: int,
-    cache_cold: Any,
-    rotation_thresholds: Any,
-    solet_live: bool,
-) -> None:
-    """The threshold-and-notify half of a firing (post throttle/latch
-    gating) -- split out of :func:`main` to keep it a straight-line
-    dispatcher (radon cc). Takes the ALREADY-resolved usage tuple (see
-    :func:`_resolve_usage`) rather than a transcript path -- this is the
-    LATCH-GATED half (``main`` never calls it once the latch exists for this
-    session generation), so it must not be where the cache report lives;
-    that runs unconditionally in :func:`main` before the latch check.
-
-    ``cache_cold`` is the tri-state ``True``/``False``/``None`` that
-    :func:`_cache_arguments` already measured for the unconditional cache
-    report, threaded through rather than re-derived: it is the SECOND input to
-    the rotation-due decision since GAU-08 (a cold cache above H is due at a
-    size a warm one is not), and reading the transcript twice per tick to
-    recover a value this tick already has would be both slower and a second
-    chance to disagree with itself. ``None`` means NOT MEASURED and is treated
-    as warm by the predicate -- never promoted to cold.
-    """
-    verdict = rotation_thresholds.rotation_due_verdict(
-        ceiling=rotation_thresholds.resolve_ceiling(model),
-        current_tokens=current_tokens,
-        cache_cold=cache_cold,
-    )
-    if not verdict.due:
-        return
-
-    # ★ GAU-14 (D2), 2026-08-19 -- DEDUPE ACROSS DELIVERY PATHS, AT THE ONLY
-    # LEG THAT CAN SEE BOTH.
-    #
-    # ONE due condition was reaching a steward up to THREE times inside six
-    # minutes, and a seat twice, because four independent legs latch correctly
-    # against four separate stores and none can observe any other: this hook's
-    # latch file, `rotation_due_notice.py`'s surfaced_at stamp, and -- solet
-    # side -- `sweep_rotation_due_sessions`'s NoticeLatch and
-    # `sweep_rotation_self_notice`'s BandEdgeLatch, both in that process's RAM.
-    # No shared key exists between them and adding one would be a read-then-
-    # write across two processes, i.e. a write race, for a fact that does not
-    # need to be shared at all.
-    #
-    # It does not need to be shared because the legs are not peers. They were
-    # built for disjoint recipients and overlap only by accident:
-    #   * managed lane -- the solet's steward leg notifies the steward, and its
-    #     self-notice leg notifies the session. This hook's steward peer-send is
-    #     a THIRD copy of the first one.
-    #   * operator-present seat -- the solet's self-notice leg appends to the
-    #     seat's own bridge, which for a bridge-held seat genuinely surfaces.
-    #     This hook's local marker (surfaced later by `rotation_due_notice.py`)
-    #     is a SECOND copy of that.
-    # In both topologies this hook is the redundant one WHENEVER THE SOLET IS
-    # UP -- so it stands down, and only then.
-    #
-    # ★ THE FAIL DIRECTION IS THE WHOLE DESIGN. `solet_live` is False whenever
-    # this tick's own `report_context_status` call did not complete. A solet
-    # that cannot answer a call cannot be running the legs this hook is
-    # deferring to, so the guard fires the notice rather than suppressing it:
-    # the failure mode is a DUPLICATE notice, never a lost one. Every uncertain
-    # case resolves the same way, because the guard's input is a positive
-    # answer, not the absence of a negative.
-    #
-    # ★ IMMUNE TO THE LANDED-NOT-LIVE ASYMMETRY, which is why the input is this
-    # one. The solet-side legs go live only at a deploy, so between this
-    # landing and that deploy the DEPLOYED legs are what actually run -- both
-    # of them do: the deployed rider's own per-tick line shows `L4a=` and
-    # `L4c=` on every tick (measured 2026-08-19 against pid 8929). A guard
-    # keyed on some NEW thing the solet legs would write could not say that;
-    # this one asks only whether the solet answered THIS hook, which is true of
-    # every solet version that has ever served this call.
-    #
-    # ★ NO LATCH ON THIS PATH. Standing down must not consume the
-    # one-notice-per-generation latch: if the solet dies later in this
-    # session's life, the next un-throttled tick must be free to fire. Only the
-    # deferral NOTE is latched, and only so it is said once.
-    #
-    # ★ AND IT DEFERS ONLY WHERE THE SOLET LEG ACTUALLY SPEAKS -- the condition
-    # that "the solet is up" does NOT by itself establish. MEASURED, and it
-    # cost this guard a real notice class before the check was added: the
-    # self-notice leg fires only for bands in its own notify set, while THIS
-    # hook fires on the full GAU-08 union (band actionable OR fraction
-    # crossed). Sweeping 3 models x every size x both cache states found 59
-    # sizes where this hook is due and the self-notice leg is SILENT -- all of
-    # them fraction-crossed-with-a-quiet-band on a small ceiling
-    # (claude-haiku-4-5 at 200,000 from 100,000 up; the conservative-ceiling
-    # unknown model likewise), which is exactly the GAU-12 population. The
-    # steward leg does use the full union, so a managed lane's STEWARD is still
-    # told in that class -- but an operator-present seat has no steward, so
-    # standing down there would have lost the notice outright.
-    #
-    # `band_actionable` is the safe discriminator and it was verified, not
-    # assumed: every actionable band produced across that same sweep
-    # (warm_task_boundary, warm_safe_checkpoint, warm_immediate, cold_above_h)
-    # is inside the self-notice leg's notify set, so an actionable band is
-    # exactly the condition on which that leg is guaranteed to speak. A
-    # fraction-only crossing is not, and this hook keeps it.
-    if solet_live and verdict.band_actionable:
-        deferred_path = _deferred_marker_path(
-            marker_dir,
-            agent_instance_id,
-            claude_session_id,
-        )
-        if not deferred_path.exists():
-            _warn(
-                f"rotation-due for {agent_instance_id} at {current_tokens} tokens "
-                "(band "
-                f"{verdict.band}) -- STANDING DOWN, not suppressing: the solet "
-                "answered this tick, so its steward leg and its self-notice leg "
-                "are covering this same condition. This hook fires only if the "
-                "solet stops answering. Said once per session generation.",
-            )
-            touch_marker(deferred_path)
-        return
-
-    content = build_notification_content(
-        agent_instance_id=agent_instance_id,
-        session_label=os.environ.get(_SESSION_LABEL_ENV, "").strip(),
-        model=model,
-        current_tokens=current_tokens,
-        ceiling=rotation_thresholds.resolve_ceiling(model),
-        band=verdict.band,
-        band_actionable=verdict.band_actionable,
-        threshold_fraction=rotation_thresholds.ROTATION_THRESHOLD_FRACTION,
-        fraction_crossed=verdict.fraction_crossed,
-    )
-    delivered = _deliver_notification(
-        agent_instance_id=agent_instance_id,
-        claude_session_id=claude_session_id,
-        content=content,
-        marker_dir=marker_dir,
-    )
-    if delivered:
-        touch_marker(latch_path)
 
 
 def _verified_identity_directory() -> Path | None:
@@ -1230,51 +941,24 @@ def main() -> int:
         return 0
     model, current_tokens, reading_at, rotation_thresholds = resolved
 
-    # Cache report rides EVERY un-throttled tick, UNCONDITIONALLY -- deliberately
-    # ahead of the latch check below, which only gates the once-per-generation
-    # notify. session_context_status must answer for a session nowhere near
-    # rotation-due too, and must keep refreshing after the one-time notify has
-    # already latched for this session generation.
-    # Hoisted to a local so the SAME measurement serves the report and the
-    # rotation-due decision below. Measured once per tick: `_cache_arguments`
-    # re-reads and re-parses the whole transcript, and two reads could not only
-    # cost twice, they could disagree if a call landed between them.
-    cache_arguments = _cache_arguments(transcript_path, rotation_thresholds)
-    solet_live = _report_context_status(
+    # The report rides EVERY un-throttled tick, UNCONDITIONALLY, so that
+    # session_context_status answers for a session nowhere near its ceiling too.
+    # The throttle is touched only after the platform completed the call, so a
+    # failed report is retried on the next tool call.
+    reported = _report_context_status(
         agent_instance_id=agent_instance_id,
         claude_session_id=claude_session_id,
         model=model,
         current_tokens=current_tokens,
         ceiling=rotation_thresholds.resolve_ceiling(model),
-        cache_arguments=cache_arguments,
+        cache_arguments=_cache_arguments(transcript_path, rotation_thresholds),
         reading_at=reading_at,
     )
-    if solet_live:
+    if reported:
         try:
             touch_marker(throttle_path)
         except OSError as exc:
             _warn(f"failed to write context throttle marker: {exc}")
-
-    latch_path = _latch_marker_path(marker_dir, agent_instance_id, claude_session_id)
-    if latch_path.exists():
-        return 0
-
-    _check_and_notify(
-        marker_dir=marker_dir,
-        agent_instance_id=agent_instance_id,
-        claude_session_id=claude_session_id,
-        latch_path=latch_path,
-        model=model,
-        current_tokens=current_tokens,
-        # `.get` returns None when the cache state could not be measured at all
-        # -- `_cache_arguments` returns {} in that case precisely so the absence
-        # stays visible instead of arriving as a fabricated False.
-        cache_cold=cache_arguments.get("cache_cold"),
-        rotation_thresholds=rotation_thresholds,
-        # GAU-14 (D2): the same call that wrote the gauge row already told us
-        # whether the solet is answering. Threaded, never re-asked.
-        solet_live=solet_live,
-    )
     return 0
 
 

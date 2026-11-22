@@ -321,7 +321,7 @@ class RealStyleFixture(Fixture):
 
 
 def assembled_seed() -> tuple[Path, str]:
-    """The seed factory's ``macos-bizops`` bundle from this checkout's ``HEAD``, assembled once per host and commit."""
+    """The seed factory's ``macos-bizops`` bundle from this checkout's ``HEAD``, assembled once per run and commit."""
     if "bundle" not in _SEED_CACHE:
         commit = _head_commit()
 
@@ -337,7 +337,7 @@ def assembled_seed() -> tuple[Path, str]:
 
 
 def sealed_source(knobs: Knobs) -> tuple[Path, Release, Release, dict[str, bytes], str]:
-    """The sealed two-release seed repository for the seed-affecting knobs: sealed once per host and commit, copied
+    """The sealed two-release seed repository for the seed-affecting knobs: sealed once per run and commit, copied
     once per process into a private scratch (a smoke may seal a third release onto its copy), never written otherwise."""
     key = _seed_key(knobs)
     if key not in _SOURCE_CACHE:
@@ -1010,7 +1010,10 @@ def build_keg(root: Path, *, seed_lock: bytes, anchors: dict[str, JsonValue], ve
         models = package / "src" / "solet_manager" / "models.py"
         models.write_text(models.read_text(encoding="utf-8").replace('MANAGER_VERSION = "0.1.0"', f'MANAGER_VERSION = "{version}"'), encoding="utf-8")
     wheels = work / "wheels"
-    for project in (package, _ROOT / "solet_setup_contracts"):
+    # Built from a scratch copy: a build in place writes build/ and *.egg-info into the source tree.
+    contracts = work / "solet_setup_contracts"
+    shutil.copytree(_ROOT / "solet_setup_contracts", contracts, ignore=shutil.ignore_patterns("__pycache__", "*.egg-info", "build", "dist"))
+    for project in (package, contracts):
         subprocess.run((sys.executable, "-m", "pip", "wheel", "--no-deps", "--quiet", "--wheel-dir", str(wheels), str(project)), check=True, capture_output=True, text=True)
     for wheel in sorted(wheels.glob("*.whl")):
         subprocess.run((sys.executable, "-m", "pip", "install", "--no-deps", "--quiet", "--target", str(site), str(wheel)), check=True, capture_output=True, text=True)

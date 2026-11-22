@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import shlex
 import shutil
@@ -40,12 +41,12 @@ from .composer_preservation import (
     placeholder_shown,
 )
 from .headless_adapter import (
-    _authority_system_prompt,
     _pid_alive,
     _resolve_default_cwd,
     _sigterm_then_kill,
 )
-from .lane_worktrees import LaneWorktreeError, spawn_worktree_cwd, worktree_pythonpath
+from .host_end_notice import arm_session_closed_notice
+from .session_workspace import resolve_workspace
 from .solet_cli import WakeCliResolver
 from .submit_conventions import TMUX_CODEX_SUBMIT_CONVENTION
 from .tmux_adapter import (
@@ -56,9 +57,12 @@ from .tmux_adapter import (
     _sanitize_session_name,
     _sigterm_then_kill_process_group,
 )
+from .tmux_target import pane_target, session_target
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_host_binary(explicit: str | None, name: str) -> str:
@@ -100,6 +104,7 @@ class _CodexTmuxDriverChannel:
     ) -> None:
         self._tmux_bin = tmux_bin
         self._session = session
+        self._pane_target = pane_target(session)
         self._run_fn = run_fn
         self._sleep_fn = sleep_fn
         self._now_fn = now_fn
@@ -123,7 +128,7 @@ class _CodexTmuxDriverChannel:
         baseline = self._wait_until_ready()
         try:
             literal = self._run(
-                [self._tmux_bin, "send-keys", "-t", self._session, "-l", "--", text],
+                [self._tmux_bin, "send-keys", "-t", self._pane_target, "-l", "--", text],
             )
             if not _command_succeeded(literal):
                 raise DriverChannelSendError(
@@ -172,7 +177,7 @@ class _CodexTmuxDriverChannel:
         and a pending advisory. A redraw proves neither a turn nor an inbox
         read; only the live interrupt status proves a turn.
         """
-        port = TmuxComposerPort(self._run, self._tmux_bin, self._session)
+        port = TmuxComposerPort(self._run_composer, self._tmux_bin, self._session)
         facts = port.facts()
         if facts is None:
             return DrainReceipt("pending_unknown_pane")
@@ -214,7 +219,7 @@ class _CodexTmuxDriverChannel:
         from .session_hosts import DriverChannelSendError  # noqa: PLC0415
 
         try:
-            literal = self._run([self._tmux_bin, "send-keys", "-t", self._session, "-l", "--", text])
+            literal = self._run([self._tmux_bin, "send-keys", "-t", self._pane_target, "-l", "--", text])
             if not _command_succeeded(literal):
                 raise DriverChannelSendError(
                     f"tmux literal send failed for Codex session {self._session!r}",
@@ -265,7 +270,7 @@ class _CodexTmuxDriverChannel:
         pending = self._empty_drain_state(self._capture_styled())
         if pending is not None:
             return pending
-        escaped = self._run([self._tmux_bin, "send-keys", "-t", self._session, "Escape"])
+        escaped = self._run([self._tmux_bin, "send-keys", "-t", self._pane_target, "Escape"])
         if not _command_succeeded(escaped):
             return "pending_escape_failed"
         # Escape can change mode; the pane must still be idle and empty.
@@ -305,7 +310,7 @@ class _CodexTmuxDriverChannel:
             pending = before_enter() if before_enter is not None else self._drain_submit_state(self._capture_styled(), text)
             if pending is not None:
                 return pending
-            enter = self._run([self._tmux_bin, "send-keys", "-t", self._session, "Enter"])
+            enter = self._run([self._tmux_bin, "send-keys", "-t", self._pane_target, "Enter"])
             if not _command_succeeded(enter):
                 return "pending_enter_failed"
             observed = self._observe_drain_submission()
@@ -318,7 +323,7 @@ class _CodexTmuxDriverChannel:
         from .session_hosts import DriverChannelSendError  # noqa: PLC0415
 
         escaped = self._run(
-            [self._tmux_bin, "send-keys", "-t", self._session, "Escape"],
+            [self._tmux_bin, "send-keys", "-t", self._pane_target, "Escape"],
         )
         if not _command_succeeded(escaped):
             raise DriverChannelSendError(
@@ -327,6 +332,12 @@ class _CodexTmuxDriverChannel:
         self._composed = None
         self._wait_until_ready()
         return "interrupted_park"
+
+    def _run_composer(self, argv: list[str]) -> Any:
+        if argv[1] in {"capture-pane", "display-message", "paste-buffer", "send-keys"}:
+            target_index = argv.index("-t") + 1
+            argv = [*argv[:target_index], self._pane_target, *argv[target_index + 1 :]]
+        return self._run(argv)
 
     def _run(self, argv: list[str]) -> Any:
         try:
@@ -345,7 +356,7 @@ class _CodexTmuxDriverChannel:
 
     def _capture_styled(self) -> str | None:
         result = self._run(
-            [self._tmux_bin, "capture-pane", "-e", "-p", "-t", self._session],
+            [self._tmux_bin, "capture-pane", "-e", "-p", "-t", self._pane_target],
         )
         return str(getattr(result, "stdout", "") or "") if _command_succeeded(result) else None
 
@@ -499,7 +510,7 @@ class _CodexTmuxDriverChannel:
             return f"Rollback refused for pane {self._session!r}: it did not positively show only this call's inserted text; text may be stranded."
         try:
             cleared = self._run(
-                [self._tmux_bin, "send-keys", "-t", self._session, "C-u"],
+                [self._tmux_bin, "send-keys", "-t", self._pane_target, "C-u"],
             )
         except DriverChannelSendError as exc:
             return f"Rollback clear failed for pane {self._session!r}: {exc}"
@@ -524,7 +535,7 @@ class _CodexTmuxDriverChannel:
         if submit_value is None:
             raise RuntimeError("Codex tmux convention has no terminal submit value")
         enter = self._run(
-            [self._tmux_bin, "send-keys", "-t", self._session, submit_value],
+            [self._tmux_bin, "send-keys", "-t", self._pane_target, submit_value],
         )
         if not _command_succeeded(enter):
             return False
@@ -642,17 +653,15 @@ class CodexTmuxHostDriver:
         transport = self._resolve_transport(spec)
         self._require_ready(transport)
         identity = self._spawn_identity(spec)
-        try:
-            cwd = spawn_worktree_cwd(spec.get("worktree_path"), self._cwd)
-        except LaneWorktreeError as exc:
-            from .session_hosts import HostCannotSpawnError  # noqa: PLC0415
-
-            raise HostCannotSpawnError(str(exc)) from exc
+        cwd = resolve_workspace(spec.get("workspace"), self._cwd)
         env = self._spawn_env(identity, transport, cwd)
         codex_cmd = self._codex_command(spec, identity, transport, cwd)
-        session_name = _sanitize_session_name(
-            f"fleet-{identity.label}-{identity.agent_instance_id[-8:]}",
-        )
+        if self._solet_name:
+            solet_segment = f"{self._solet_name}-"
+        else:
+            logger.warning("Cannot include an empty solet name in the tmux session name")
+            solet_segment = ""
+        session_name = _sanitize_session_name(f"fleet-{solet_segment}{identity.label}-{identity.agent_instance_id[-8:]}")
         command = self._new_session_command(
             session_name=session_name,
             pane_command=self._pane_command(
@@ -670,6 +679,7 @@ class CodexTmuxHostDriver:
             text=True,
             timeout=5,
         )
+        arm_session_closed_notice(tmux=[self._tmux_bin], run_fn=self._run_fn, solet_name=self._solet_name, solet_bin=self._solet_bin)
         return session_name
 
     def _require_ready(self, transport: str) -> None:
@@ -689,7 +699,7 @@ class CodexTmuxHostDriver:
         return _TmuxSpawnIdentity(
             agent_instance_id=agent_instance_id,
             agent_session_id=f"ases-{agent_instance_id}",
-            label=(str(spec.get("local_name") or "") or str(spec.get("lane_id") or "") or agent_instance_id),
+            label=(str(spec.get("local_name") or "") or str(spec.get("label") or "") or agent_instance_id),
         )
 
     def _spawn_env(
@@ -706,7 +716,6 @@ class CodexTmuxHostDriver:
             solet_bin=self._solet_bin,
             transport=transport,
         )
-        env["PYTHONPATH"] = worktree_pythonpath(cwd or self._cwd, env.get("PYTHONPATH", ""))
         return env
 
     def _codex_command(
@@ -729,9 +738,6 @@ class CodexTmuxHostDriver:
         effort = str(spec.get("effort") or "")
         if effort:
             overrides.append(f"model_reasoning_effort={_toml_string(effort)}")
-        overrides.append(
-            f"developer_instructions={_toml_string(_authority_system_prompt(spec))}",
-        )
         codex_cmd = [
             self._codex_bin,
             "--dangerously-bypass-approvals-and-sandbox",
@@ -837,8 +843,12 @@ class CodexTmuxHostDriver:
 
     def alive(self, host_ref: str) -> bool:
         try:
+            target = session_target(host_ref)
+        except ValueError:
+            return False
+        try:
             result = self._run_fn(
-                [self._tmux_bin, "has-session", "-t", host_ref],
+                [self._tmux_bin, "has-session", "-t", target],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -849,8 +859,12 @@ class CodexTmuxHostDriver:
 
     def _pane_pid(self, host_ref: str) -> int | None:
         try:
+            target = pane_target(host_ref)
+        except ValueError:
+            return None
+        try:
             result = self._run_fn(
-                [self._tmux_bin, "list-panes", "-t", host_ref, "-F", "#{pane_pid}"],
+                [self._tmux_bin, "list-panes", "-t", target, "-F", "#{pane_pid}"],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -865,6 +879,10 @@ class CodexTmuxHostDriver:
             return None
 
     def terminate(self, host_ref: str, grace_seconds: int) -> None:
+        try:
+            target = session_target(host_ref)
+        except ValueError:
+            return
         pane_pid = self._pane_pid(host_ref)
         grace = grace_seconds if grace_seconds > 0 else self._grace_seconds
         if pane_pid is not None and _pid_alive(pane_pid):
@@ -878,7 +896,7 @@ class CodexTmuxHostDriver:
                 _sigterm_then_kill(pane_pid, None, grace)
         with contextlib.suppress(OSError, subprocess.TimeoutExpired):
             self._run_fn(
-                [self._tmux_bin, "kill-session", "-t", host_ref],
+                [self._tmux_bin, "kill-session", "-t", target],
                 capture_output=True,
                 text=True,
                 timeout=5,

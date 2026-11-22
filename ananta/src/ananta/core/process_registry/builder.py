@@ -116,9 +116,7 @@ class ProcessRegistryBuilder:
     def _log_registry_completion(self, plugin_processes: int, service_processes: int) -> None:
         """Log completion information for registry building."""
         total_processes = plugin_processes + service_processes
-        logger.debug(
-            f"Process registry built with {total_processes} total processes ({plugin_processes} plugin processes, {service_processes} service interface processes)"
-        )
+        logger.debug(f"Process registry built with {total_processes} total processes ({plugin_processes} plugin processes, {service_processes} service interface processes)")
         logger.debug("Service interface plugins encapsulated - regular plugins accessible directly")
 
     def _handle_registry_build_error(self, error: Exception) -> None:

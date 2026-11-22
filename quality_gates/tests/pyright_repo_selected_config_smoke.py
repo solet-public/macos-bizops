@@ -124,7 +124,7 @@ def case_overlay_shape() -> None:
         _check("reportMissingImports" in before.stdout, "pre-fix failure is unresolved imports, not a real typing error")
 
         # PRODUCTION: the payload overlay_payload actually writes.
-        payload = pyright_repo.overlay_payload(config, effective, settings, overlay.parent, retained)
+        payload = pyright_repo.overlay_payload(config, effective, settings, overlay.parent, retained, [target])
         overlay.write_text(json.dumps(payload), encoding="utf-8")
         after = _run_pyright(overlay, target)
         _check(after.returncode == 0, f"production payload type-checks the same file cleanly (exit {after.returncode}: {_summary(after.stdout)})")
@@ -145,7 +145,7 @@ def case_sibling_imports_resolve() -> None:
     siblings = [_REPO_ROOT / "quality_gates/run_smokes.py", _REPO_ROOT / "quality_gates/code_quality_check.py"]
     with tempfile.TemporaryDirectory(prefix="pyright-overlay-siblings-", dir=_REPO_ROOT.parent) as directory:
         overlay = Path(directory) / "pyrightconfig.json"
-        overlay.write_text(json.dumps(pyright_repo.overlay_payload(config, effective, settings, overlay.parent, retained)), encoding="utf-8")
+        overlay.write_text(json.dumps(pyright_repo.overlay_payload(config, effective, settings, overlay.parent, retained, [])), encoding="utf-8")
         for target in siblings:
             result = _run_pyright(overlay, target)
             _check(result.returncode == 0, f"{target.name} type-checks cleanly (exit {result.returncode}: {_summary(result.stdout)})")
@@ -158,7 +158,7 @@ def case_settings_are_rebased_correctly() -> None:
     config, effective, settings, retained = _selection()
     origin = effective.parent
     overlay_directory = _REPO_ROOT.parent / "pyright-overlay-fixture"
-    payload = pyright_repo.overlay_payload(config, effective, settings, overlay_directory, retained)
+    payload = pyright_repo.overlay_payload(config, effective, settings, overlay_directory, retained, [_REPO_ROOT / _SELECTED])
 
     _check(Path(payload["venvPath"]).is_absolute(), f"venvPath is absolute (got {payload['venvPath']!r})")
     _check(Path(payload["venvPath"]) == origin, "venvPath points at the real config's own directory, where the venv is")
@@ -221,6 +221,67 @@ def case_refusal_preserved() -> None:
     _check("reportReturnType" in result.stdout, f"the real defect is named (got {_summary(result.stdout)})")
 
 
+#: The fixture directories found by ``rg`` over ``plugins/*/tests`` for imports
+#: carrying ``# pyright: ignore[reportMissingImports]``, each module resolved with
+#: ``git ls-files`` (plan Q1-A input step). Repository-relative.
+_MEASURED_FIXTURE_ROOTS: tuple[str, ...] = (
+    "ananta/tests/core/actions",
+    "plugins/actr_memory_plugin/migrations",
+    "plugins/agent_messaging_plugin/tests",
+    "plugins/g_suite_plugin/tests",
+    "plugins/github_midwife_plugin/coordination_hooks_common",
+    "plugins/github_midwife_plugin/tests",
+    "plugins/marketo_plugin/tests",
+    "plugins/platform_health_plugin/tests",
+    "plugins/seed_factory_plugin/tests",
+    "plugins/zuora_plugin/tests",
+)
+
+#: A plugin test file whose two fixture imports the overlay must now resolve.
+_SIBLING_FIXTURE_FILE = _REPO_ROOT / "plugins/default_scheduling_plugin/tests/g1_scheduler_registered_admission_smoke.py"
+
+
+def _overlay_for(selected: Path) -> dict[str, Any] | None:
+    """The overlay payload ``selected_config`` writes for one selected test file.
+
+    Read inside the context manager, because the temporary overlay is removed on
+    exit. ``None`` means no overlay was written, which is itself a failed check.
+    """
+    with pyright_repo.selected_config(_REPO_ROOT, [str(selected.relative_to(_REPO_ROOT))]) as arguments:
+        if "--project" not in arguments:
+            return None
+        overlay = Path(arguments[arguments.index("--project") + 1])
+        payload: dict[str, Any] = json.loads(overlay.read_text(encoding="utf-8"))
+        return payload
+
+
+def case_fixture_roots_on_extra_paths() -> None:
+    """T1 and T2: extraPaths carry the selected file's directory and the fixture roots."""
+    print("\nCase 6 — extraPaths carry the selected test file's directory and the fixture roots")
+    payload = _overlay_for(_SIBLING_FIXTURE_FILE)
+    _check(payload is not None, "selected_config writes an overlay for the selected plugin test file")
+    extra: list[str] = payload.get("extraPaths", []) if payload else []
+    environment_extra: list[str] = payload["executionEnvironments"][0].get("extraPaths", []) if payload else []
+    own_directory = str(_SIBLING_FIXTURE_FILE.parent)
+    _check(own_directory in extra and Path(own_directory).is_absolute(), "T1: the selected file's own directory is an absolute extraPaths entry")
+    _check(own_directory in environment_extra, "T1: and it is on the execution environment's extraPaths, which Pyright searches")
+    for root in _MEASURED_FIXTURE_ROOTS:
+        if (_REPO_ROOT / root).is_dir():
+            _check(str(_REPO_ROOT / root) in extra, f"T2: existing fixture root {root} is on extraPaths")
+
+    # The omit half of T2: a declared root absent from the checkout is not added.
+    absent = "quality_gates/tests/__absent_fixture_root__"
+    saved = pyright_repo._SHARED_FIXTURE_ROOTS
+    try:
+        pyright_repo._SHARED_FIXTURE_ROOTS = (*saved, absent)
+        widened = _overlay_for(_SIBLING_FIXTURE_FILE)
+        widened_extra: list[str] = widened.get("extraPaths", []) if widened else []
+        _check(str(_REPO_ROOT / absent) not in widened_extra, "T2: a declared root absent from the checkout is omitted")
+        _check(str(_REPO_ROOT / _MEASURED_FIXTURE_ROOTS[0]) in widened_extra, "T2: and the existing roots are still added alongside it")
+    finally:
+        pyright_repo._SHARED_FIXTURE_ROOTS = saved
+
+
 def main() -> int:
     print("Pyright selected-test overlay config smoke\n")
     case_overlay_shape()
@@ -228,6 +289,7 @@ def main() -> int:
     case_settings_are_rebased_correctly()
     case_production_entry_point_is_clean()
     case_refusal_preserved()
+    case_fixture_roots_on_extra_paths()
     if _FAILURES:
         print(f"\nFAILED ({len(_FAILURES)}): {_FAILURES}")
         return 1

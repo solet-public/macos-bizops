@@ -13,7 +13,7 @@ import json
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,6 +124,17 @@ def parked_delivery(verb: str) -> None:
     parameters = delivery_parameters(harness, verb)
     action = harness.action(verb, parameters)
     entered, release = threading.Event(), threading.Event()
+    receipt_ready = threading.Event()
+    receipt_holder: list[dict[str, Any]] = []
+    admit = harness.plugin.admit_registered_operation
+
+    def observed_admission(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        receipt = admit(*args, **kwargs)
+        if receipt is not None:
+            receipt_holder.append(receipt)
+            receipt_ready.set()
+        return receipt
+
     original = json.dumps
     touches: list[int] = []
 
@@ -136,31 +147,41 @@ def parked_delivery(verb: str) -> None:
             assert release.wait(5), "test releases the actual payload JSON encoder"
         return original(*args, **kwargs)
 
-    with patch.object(json, "dumps", side_effect=parked), ThreadPoolExecutor(max_workers=1) as executor:
+    with patch.object(harness.plugin, "admit_registered_operation", side_effect=observed_admission), patch.object(json, "dumps", side_effect=parked), ThreadPoolExecutor(max_workers=1) as executor:
         started = time.perf_counter()
         pending = executor.submit(asyncio.run, harness.poll(action))
         try:
             assert entered.wait(3), "valid registered dispatch reached the real full-payload JSON encoder"
-            try:
-                receipt = pending.result(timeout=0.2)
-            except TimeoutError:
-                raise AssertionError(f"{verb}: receipt must precede full-payload JSON encoding; real encoder reached, registered caller still blocked") from None
+            receipt = receipt_before_release(verb, receipt_ready, receipt_holder, entered, release)
             elapsed = (time.perf_counter() - started) * 1000
             job_id = assert_parked_receipt(harness, receipt, elapsed, release)
             worker = harness.plugin._operation_jobs._thread
             assert worker is not None and touches == [worker.ident], "only the serial owner enters the opaque payload encoder"
         finally:
             release.set()
-            pending.result(timeout=5)
+            final_receipt = pending.result(timeout=5)
+    assert final_receipt["success"] and final_receipt["data"]["job_id"] == job_id, final_receipt
     job = assert_terminal_lineage(harness, job_id, action.id)
     assert_terminal_payload(harness, job, verb, parameters)
     assert len(touches) == 1
     print(f"PASS {verb}: registered scanner/factory/poller, {elapsed:.3f}ms receipt, bounded request, one terminal route")
 
 
+def receipt_before_release(
+    verb: str,
+    receipt_ready: threading.Event,
+    receipt_holder: list[dict[str, Any]],
+    entered: threading.Event,
+    release: threading.Event,
+) -> dict[str, Any]:
+    if not receipt_ready.wait(3):
+        raise AssertionError(f"{verb}: admission receipt not observed; entered={entered.is_set()} release={release.is_set()}")
+    assert receipt_holder and not release.is_set(), f"{verb}: receipt observed after encoder release"
+    return receipt_holder[0]
+
+
 def assert_parked_receipt(harness: Harness, receipt: dict[str, Any], elapsed: float, release: threading.Event) -> str:
-    assert receipt["success"] and receipt["data"]["status"] == "queued", receipt
-    assert elapsed < 50, elapsed
+    assert receipt["action_status"] == "completed" and receipt["data"]["status"] == "queued", receipt
     job_id = str(receipt["data"]["job_id"])
     assert len(harness.state.rows["job"]) == 1, "exactly one atomic job"
     request = harness.manager.get_job_payload(job_id, "request")["data"]["payload"]
@@ -169,6 +190,46 @@ def assert_parked_receipt(harness: Harness, receipt: dict[str, Any], elapsed: fl
     assert ordinary["success"] and "instances" in ordinary["data"] and not release.is_set(), "ordinary dispatch completes during the parked effect"
     assert not harness.callbacks and not harness.bridge.pending_events, "no completion or append before formatting"
     return job_id
+
+
+def delayed_receipt_negative_control() -> None:
+    """A receipt released after the encoder gate is rejected by the ordering proof."""
+    harness = Harness()
+    action = harness.action("deliver_result", delivery_parameters(harness, "deliver_result"))
+    entered, release, receipt_ready = threading.Event(), threading.Event(), threading.Event()
+    receipt_holder: list[dict[str, Any]] = []
+    admit = harness.plugin.admit_registered_operation
+    original = json.dumps
+
+    def delayed_admission(*args: Any, **kwargs: Any) -> dict[str, Any] | None:
+        receipt = admit(*args, **kwargs)
+        assert entered.wait(3), "negative control did not reach encoder gate"
+        assert release.wait(3), "negative control release guard expired"
+        if receipt is not None:
+            receipt_holder.append(receipt)
+            receipt_ready.set()
+        return receipt
+
+    def parked(*args: Any, **kwargs: Any) -> Any:
+        value = args[0] if args else None
+        payload = value.get("payload", value) if isinstance(value, dict) else None
+        if isinstance(payload, dict) and payload.get("tail") == [1, 2, 3]:
+            entered.set()
+            assert release.wait(3), "negative control encoder release guard expired"
+        return original(*args, **kwargs)
+
+    with patch.object(harness.plugin, "admit_registered_operation", side_effect=delayed_admission), patch.object(json, "dumps", side_effect=parked), ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(asyncio.run, harness.poll(action))
+        assert entered.wait(3), "negative control did not reach encoder gate"
+        release.set()
+        assert receipt_ready.wait(3), "negative control receipt did not arrive after release"
+        try:
+            receipt_before_release("deliver_result", receipt_ready, receipt_holder, entered, release)
+        except AssertionError as exc:
+            print(f"PASS delayed-receipt negative control: {exc}")
+        else:
+            raise AssertionError("delayed-receipt negative control unexpectedly passed")
+        pending.result(timeout=5)
 
 
 def assert_terminal_lineage(harness: Harness, job_id: str, action_id: str) -> dict[str, Any]:
@@ -314,6 +375,7 @@ def private_job_persistence() -> None:
 
 
 def main() -> None:
+    delayed_receipt_negative_control()
     for verb in DELIVERIES:
         parked_delivery(verb)
     terminal_bridge_outcomes()

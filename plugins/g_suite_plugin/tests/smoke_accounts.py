@@ -49,7 +49,7 @@ from g_suite_plugin.oauth import oauth_client, service_factory  # noqa: E402
 from g_suite_plugin.oauth.oauth_client import GoogleTokens  # noqa: E402
 from g_suite_plugin.oauth.token_store import TokenStore, TokenStoreError  # noqa: E402
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
-from gsuite_fakes import CLIENT_SECRET, FakeVault, connect_accounts, fake_loader, run_queued  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import CLIENT_SECRET, FakeVault, connect_accounts, fake_loader, run_queued  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []

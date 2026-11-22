@@ -8,7 +8,7 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   so the hook cannot block on its result. Unconditionally armed — no
   environment variable disarms it, alongside the live-context hook below — so a
   session never silently loses awareness that the mechanism exists.
-- **Live session context** (`session_start_context.py`, SessionStart) — bounded register-wide digest, current roles and observer inbox counts; explicit unavailable lines on failure. See the read and timeout contract below.
+- **Live session context** (`session_start_context.py`, SessionStart) — bounded observer inbox counts read through the solet's bridge, and the solet's own approved principle statement read from its knowledge-base file on disk (through the bridge only when no file is found); explicit unavailable lines on failure. See the read and timeout contract below.
 - **Idle-wake waiter** (`Stop`) — opt-in per session (armed by environment
   variables, see Configuration), but the fleet this plugin ships with runs
   on it as the PRIMARY idle-wake mechanism as of 2026-08-06, not a
@@ -23,51 +23,23 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   session then fetches the actual messages itself via the normal tool
   path. The hook conveys exactly one bit of dynamic information —
   "deliveries pending" — plus timing; it never relays message content.
-- **Heartbeat report-alive** (`PostToolUse`, unconditional) — opt-in per
-  session via its owner receipt and `AGENT_INSTANCE_ID`. After each tool call
-  it takes a worktree attestation (three git read commands in the session's
-  working directory, snapshot kept in worktree-resync.json), and at most once
-  per ~180s it shells out to the fleet's `report_alive` CLI verb so a
-  fleet-managed session's liveness stays
-  current without a standalone background loop — the loop shape this hook
-  replaced could survive a session `/clear` and keep reporting a dead
-  session as live for hours, since it had no coupling to whether the process
-  it vouched for was still doing anything. This hook has no persistent
-  process of its own; it dies with the tool-call lifecycle it fires inside.
-  Failed calls are kept in failures.json and reported on the next successful
-  heartbeat.
-  Conveys no dynamic information back to the session — it never prints a
-  `hookSpecificOutput` block, only an occasional stderr diagnostic on
-  failure. See `SECURITY.md` for the full contract.
 - **Rotation-due watch** (`PostToolUse`, unconditional) — opt-in per session
-  via `AGENT_INSTANCE_ID`. The host-independent sibling of the heartbeat:
-  reads the session's own transcript usage, compares it against a declared
-  context ceiling, and on a threshold crossing sends ONE notification (via
-  `peer_send_by_name` to the session's steward, or a local marker file when
-  no steward is resolvable) — at most once per session generation. It never
-  acts on the signal itself (never clears or rotates the session); rotation
-  timing stays a steward/operator decision. Also opportunistically caches a
-  lightweight context-status reading on every un-throttled tick, independent
-  of the threshold check. Like the heartbeat, it prints nothing to stdout;
-  diagnostics are stderr-only. See `SECURITY.md` for the full contract.
+  via its owner receipt and `AGENT_INSTANCE_ID`. It reports the session's own
+  context gauge: at most once per ~120 s it reads the session's own
+  transcript usage and sends the token count, the model's context ceiling
+  and the cache state to the platform's `report_context_status` verb, where
+  `session_context_status`, `fleet_status` and usage accounting read it. It
+  only reports: it sends no message to any session, notifies no steward,
+  writes no notice marker, and never clears or rotates the session; when a
+  session rotates stays the session's and the operator's decision. The
+  file's name is historical. It prints nothing to stdout; diagnostics are
+  stderr-only. See `SECURITY.md` for the full contract.
 - **Installed-owner receipt guard** (`coordination_owner.py`, imported by the
-  heartbeat, rotation-due, and wake entrypoints) — validates an immutable,
+  rotation-due watch and wake entrypoints) — validates an immutable,
   owner-qualified installation receipt before any marker, lock, watcher, or
   bridge side effect. Missing, foreign, stale, corrupt, or undesignated roots
   refuse explicitly and inertly; the absolute receipt path is supplied as
   `AGENT_COORDINATION_RECEIPT_PATH`, never guessed from CWD.
-- **Rotation-due notice** (`UserPromptSubmit`, unconditional) — the delivery
-  half of the hook above, for the session it cannot deliver to. When the
-  watch hook finds no steward to notify (an operator-present session, which
-  has none), it writes the notice to a local marker instead of dropping it;
-  this hook surfaces that marker as prompt context on the session's own next
-  turn, once per session generation, then stamps the marker so it never
-  repeats. It is the only hook here that prints a `hookSpecificOutput`
-  block, so what it will inject is bounded: content comes from a marker file
-  this hook checks is owned by the current user and not group/world-writable,
-  and is otherwise carried verbatim. On the ordinary path — no marker — it
-  reads stdin, globs at most two directories, and emits nothing. See
-  `SECURITY.md` for the full contract.
 - **Memory-passthrough capture** (`PostToolUse`, `Write|Edit|MultiEdit`) —
   when the touched file is under this agent's own memory directory,
   appends one journal record (path, hash, timestamp) locally. No content
@@ -91,8 +63,8 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   library for `hydrate_render.py`, plus its own standalone entry point);
   `sync.py` wraps hydrate/drain into one Bash call per direction and is
   the one CLI utility in this group that shells out, via the same
-  PATH-resolved `solet` convention as the rotation-due watch hook (the
-  heartbeat calls `solet-bridge` the same way). See `SECURITY.md` for the full per-file contract.
+  PATH-resolved `solet-bridge` convention as the rotation-due watch hook.
+  See `SECURITY.md` for the full per-file contract.
 - **Spawn-injected worker hooks** (`headless_tool_allowlist_gate.py`,
   `capture_session_mapping.py`) — NOT wired into this plugin's own
   `hooks/hooks.json` at all; a spawned headless/tmux worker's own host
@@ -109,22 +81,109 @@ Fleet coordination hooks for multi-session Claude Code workflows:
   Code `session_id`, for the platform's own session-ledger reconciliation
   — non-fatal by design, like the memory-passthrough capture hook. See
   `SECURITY.md` for the full contract of each.
+- **Working-tree recovery** (`recovery_claude.py`; `PreToolUse` on Bash,
+  `PostToolUse` on the file tools and Bash, `Stop` (async), `SessionEnd`,
+  `SessionStart`) — keeps a local copy of your uncommitted work before a git
+  command discards it and at the end of every turn, so a lost edit can be put
+  back. Always armed, never blocks, exits `0` on every path. See *Working-tree
+  recovery* below.
 
 ## SessionStart cadence
 
-The knowledge-base reminder and live session context fire on startup, resume
-and clear, never UserPromptSubmit. The memory-passthrough session-context hook
+The knowledge-base reminder and live session context fire on startup, resume,
+clear and compact, never UserPromptSubmit. The memory-passthrough session-context hook
 keeps its separate existing SessionStart and UserPromptSubmit bindings.
+
+## Working-tree recovery
+
+Added in `0.10.0`. Uncommitted edits are the one thing git cannot give back, and
+another session's `git stash`, `git checkout -- <path>`, `git reset --hard` or
+`git clean` in a shared folder can remove them. `recovery_claude.py` saves first:
+
+- **Before a discarding git command** (`PreToolUse`, Bash): every file git can see
+  in the folder is saved, then the command runs. You are told, in the terminal and
+  in the model's context, only when the discarded changes were not made by this
+  session, or when something could not be saved. The notice names what was saved
+  and prints the exact command that restores it.
+- **At the end of every turn** (`Stop`, asynchronous) and when the session ends
+  (`SessionEnd`): the same save, for the working folder and every other folder this
+  session's tools edited, so work in progress survives a crash or a deleted
+  worktree. `PostToolUse` only notes what this session's own tools wrote (and any
+  stash it made), so those are not reported as changed by someone else.
+- **`SessionStart`** speaks only when recovery cannot work (the store is unwritable
+  or the interpreter is too old) or the store is over its size cap.
+
+It never refuses a command, never prints a `decision` or `permissionDecision` field
+and exits `0` on every path; a fault means "no save", never a blocked tool call.
+
+**Where saves live.** In a local store owned by you and readable only by you: on
+macOS `~/Library/Application Support/Solet/Recovery/v1`, elsewhere
+`$XDG_DATA_HOME/Solet/Recovery/v1`, or the folder named by `SOLET_RECOVERY_ROOT`
+(ignored if it is inside a repository or a synced or tool folder; an empty value
+counts as unset). Saves are never
+written as commits, branches or stashes in your repository. Content is stored once.
+Ignored files are never saved; a save is a copy of your own working files, so it can
+hold anything you keep tracked or untracked-but-not-ignored. A save is kept until
+its content is found in `HEAD` or a local branch and then for 30 days; the store has
+a 5 GiB soft cap (past it, saves continue, saves already delivered are pruned early
+and you are told once per session). At most once an hour the `Stop` hook runs a
+prune pass that deletes only inside the store. The size, file-count, store,
+disk-floor, grace and trash limits and three of the time budgets (`hard_seconds`,
+`publication_seconds`, `untracked_seconds`) are fields of `<store>/config.json`;
+the 60 second `Stop` budget, the 8 second deadline of the other events and the
+one second lock wait are fixed in the code.
+
+**Putting work back, and removing saves.** Run the command the notice prints, or:
+
+```
+python3 hooks/working_tree_recovery.py list --undelivered
+python3 hooks/working_tree_recovery.py show <save>
+python3 hooks/working_tree_recovery.py restore <save>
+python3 hooks/working_tree_recovery.py forget <save> --expected-state present
+python3 hooks/working_tree_recovery.py prune --dry-run
+```
+
+`restore` never overwrites a newer edit: a file that exists is parked in a private
+sibling directory, kept, and its path reported. `forget`, `purge` or deleting the
+store folder removes saves; uninstalling the plugin leaves the store in place.
+
+**What ships.** `recovery_claude.py` is the only hook. Beside it ship the shared
+engine's 23 modules, byte-identical copies of `coordination_hooks_common/` made by
+the source repository's materialization tool, `materialize_hook_common.py` (do not edit them here; change the canonical
+file and materialize): `command_lex.py`, `command_resolve.py`, `command_types.py`,
+`command_walk.py`, `custody_store.py`, `discard_forms.py`, `recovery_capture.py`,
+`recovery_cli.py`, `recovery_content.py`, `recovery_deadline.py`,
+`recovery_events.py`, `recovery_git.py`, `recovery_journal.py`,
+`recovery_lifecycle.py`, `recovery_metadata.py`, `recovery_packets.py`,
+`recovery_rebuild.py`, `recovery_refs.py`, `recovery_restore.py`,
+`recovery_retention.py`, `recovery_rules.py`, `recovery_types.py` and
+`working_tree_recovery.py` (also the command line above). `hooks.json` registers
+five entries, each through `optional_hook_runner.py` so a script missing from a
+stale plugin cache is skipped rather than failing the tool call: `PreToolUse` on
+`Bash` (timeout 15), `PostToolUse` on `Write|Edit|MultiEdit|NotebookEdit|Bash`
+(timeout 10), `Stop` (`async`, timeout 120), `SessionEnd` (timeout 10) and
+`SessionStart` on `startup|resume|clear` (timeout 10). The existing entries are
+unchanged.
+
+**Requirements.** `python3` 3.11 or later and `git` on `PATH`. On an older
+interpreter the hook exits `0` before importing the engine and `SessionStart` says
+recovery is inactive.
+
+**Not yet measured.** The tests use synthetic payloads that follow Claude Code's
+documented hook shapes; they were not captured from a live session. Two assumptions
+wait for a live run: that Claude Code honours `hookSpecificOutput.additionalContext`
+on `PreToolUse` (if it does not, you still see the `systemMessage` notice and only
+the model-facing sentence is lost), and the bound Claude Code puts on a
+`SessionEnd` hook (declared here as 10 seconds). `SECURITY.md` answers the
+shipped-hook due-diligence checklist for this hook in full.
 
 ## Configuration
 
 The knowledge-base and live-context hooks always run. The latter explicitly
 reports missing read configuration. The idle-wake waiter keys on
-`AGENT_SESSION_ID`; the heartbeat keys on its owner receipt with
-`AGENT_INSTANCE_ID` and `AGENT_SESSION_ID`, and the rotation-due watch hook
-keys on `AGENT_INSTANCE_ID` (its throttling additionally reads
-`AGENT_HEARTBEAT_MARKER_DIR` when set — see `SECURITY.md` for the fail-open
-behavior when it is absent but the instance id is present); the
+`AGENT_SESSION_ID`; the rotation-due watch hook keys on its owner receipt with
+`AGENT_INSTANCE_ID` and `AGENT_SESSION_ID` (its throttle marker lives under
+the receipt-derived identity directory); the
 memory-passthrough capture and session-context hooks key on whether this
 agent's own memory directory exists at all — no environment variable
 arms or disarms either (a bare session in a project with no memory
@@ -175,12 +234,14 @@ empty value must not silently kill wakes on a watch deployment.
   nothing guaranteed and could silently fail to launch with no signal
   Claude Code surfaces to the user (measured 2026-08-08; retired the same
   day).
-- Hooks have no direct network/database client. Five files invoke local
-  children: session_start_context.py (read-only register/inbox), wake_waiter.py,
-  heartbeat_report_alive.py, rotation_due_watch.py and sync.py. Existing
-  marker/memory/spawn effects remain as documented in SECURITY.md.
-- Context sources are the fixed knowledge-base reminder, bounded live register
-  and inbox observations, and the existing qualified memory/rotation notices.
+- Hooks have no direct network/database client. These files invoke local
+  children: session_start_context.py (read-only bridge reads), wake_waiter.py,
+  rotation_due_watch.py, sync.py,
+  session_cron_sentinel.py and recovery_claude.py (read-only git children,
+  spawned only by the recovery engine). Existing marker/memory/spawn effects
+  remain as documented in SECURITY.md.
+- Context sources are the fixed knowledge-base reminder, the solet's own
+  principle statement, a bounded live inbox observation, and the existing qualified memory instruction template.
   No environment-authored instruction channel or message-body relay is added.
 
 ## Retired behaviours (inventory, not a replacement claim)
@@ -218,15 +279,8 @@ read by a security reviewer before the code.
 ## Live session context — reviewer due diligence (2026-10-08)
 
 `session_start_context.py` replaces the static message and role reminders on
-SessionStart `startup`, `resume`, and `clear`. It performs two read operations:
+SessionStart `startup`, `resume`, `clear`, and `compact`. It performs two read operations:
 
-- `[PROJECT_SOLET_CLI, "resume-digest", "--limit", "1"]` reads the bounded,
-  **register-wide** digest. The default executable is
-  `$HOME/Workspace/project-solet/.venv/bin/psolet`; installations elsewhere
-  set `PROJECT_SOLET_CLI` to one executable path. The child resolves its normal
-  `PROJECT_SOLET_DATABASE_DSN` or Keychain credentials; the hook neither reads
-  credentials itself nor prints child stderr. Register previews are data,
-  not instructions or a substitute for full authoritative reads.
 - `[SOLET_BRIDGE, "call", "plugin::agent_messaging_plugin::peer_inbox", JSON]`
   pages the instance and role sections with `observer: true`. `SOLET_BRIDGE`
   defaults to `solet-bridge` on PATH. The original `SOLET_NAME`,
@@ -234,6 +288,21 @@ SessionStart `startup`, `resume`, and `clear`. It performs two read operations:
   Current bound role names come from `role_read_coverage`, never the local
   label. Forward instance cursors preserve timestamp ties; role cursors are
   independent. The hook never acknowledges a page or advances a covered mark.
+- The article principles_statement.md (knowledge base ananta_platform, folder 24_operator_communication) is read
+  from the solet's own knowledge-base file,
+  `ananta/knowledge_bases/ananta_platform/24_operator_communication/principles_statement.md`, under the first of
+  these roots that holds it as a regular file: `CLAUDE_PROJECT_DIR`, the working directory, the tree the bridge runs
+  from (`<root>` of `<root>/.venv/bin/solet-bridge`, `<release>` of `<release>/venv/bin/solet-bridge`; a bare
+  `SOLET_BRIDGE` name is looked up in `PATH`) and that tree's `code` directory. That is one read of one file, which
+  no host load slows. Only when no root holds the file does the hook run
+  `[SOLET_BRIDGE, "call", "service_interface::knowledge_service::read_file", JSON]` for the same article. Either
+  way the hook emits the text under the `## Approved statement` heading verbatim after one label line naming the
+  article, capped at 8000 UTF-8 bytes; a longer article is clipped at a line
+  boundary with a one-line advisory. A file without that heading gives one typed `StatementMissing` line and no
+  bridge read. The hook neither reads credentials nor prints child stderr.
+
+A session with no launcher identity also gets one line naming the fleet identity
+that the read-only `_session_identity.py` helper found and the CLI claim path.
 
 The role count means **pending above role covered mark (display/consumption
 unknown)**. Observer mode includes display-receipted rows; it cannot prove
@@ -246,14 +315,18 @@ Paging produces an observation over an interval, not an atomic cross-page
 snapshot; a binding change, repeated cursor, partial role failure or identity
 mismatch makes the count unavailable.
 
-The digest child has a three-second timeout, and all inbox pages share a
-separate three-second deadline. The manifest timeout is eight seconds. A failed
+The principles are read before the inbox. All inbox pages share one 3.5-second
+deadline, and the bridge read of the principles, made only when no statement
+file is found, keeps a 3.5-second timeout of its own, so the worst case is 3.5
+seconds with the file and seven seconds without, under the thirty-second
+manifest timeout. A failed
 read adds one explicit `unavailable (ErrorClass)` line and exits zero; a missing
 identity is `MissingIdentity`, never zero messages. No cache or static reminder
-fallback exists. JSON serialization escapes all observed strings. The digest
-context is capped at 5800 UTF-8 bytes and inbox context at 1000, leaving room
-inside 8192 for the unchanged knowledge-base reminder. Over-budget output is
-reported as `ByteBudgetExceeded`, never silently clipped into apparent success.
+fallback exists. JSON serialization escapes all observed strings. Inbox context
+is capped at 1000 UTF-8 bytes and the principle text at 8000, leaving room
+for the unchanged knowledge-base reminder. Over-budget inbox output is
+reported as `ByteBudgetExceeded`, never silently clipped into apparent success;
+the principle text is clipped only with its one-line advisory.
 
 This stdlib Python 3.13 hook uses `subprocess.run` with argument arrays and no
 shell. It creates no files, performs no register writes, claims no role. Hook installation/trust is separate from candidate delivery;

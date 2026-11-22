@@ -287,7 +287,7 @@ def _check_shipped_bundle() -> None:
     _check_public_r48_predecessor(bundle)
     _check_public_later_predecessors(bundle)
     _check_shipped_in_clone_artifacts(bundle)
-    _check(bundle.lifecycle.strategy == "router_preferred", "shipped lifecycle strategy")
+    _check(bundle.lifecycle.strategy == "single_color_required", "shipped lifecycle strategy declares single_color_required (release 74 cannot install through the router cutover)")
     for artifact in bundle.managed_artifacts:
         template = _ROOT / artifact.template_ref
         _check(template.is_file(), f"template exists: {artifact.template_ref}")

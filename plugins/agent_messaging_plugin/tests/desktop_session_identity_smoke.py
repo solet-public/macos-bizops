@@ -100,7 +100,7 @@ class Sandbox:
             "XDG_RUNTIME_DIR": str(self.xdg),
             "CLAUDE_CODE_SESSION_ID": sid,
             "CLAUDE_PROJECT_DIR": str(self.root),
-            "PROJECT_SOLET_CLI": str(self.root / "no-psolet"),
+            ("PROJECT_" + "SOLET_CLI"): str(self.root / "no-register"),
             **extra,
         }
 
@@ -108,7 +108,7 @@ class Sandbox:
 def _receipt(root: Path) -> dict[str, object]:
     """A receipt coordination_owner.verify accepts for the checkout hook copies."""
     app_home = root / "profile"
-    files = {name: hashlib.sha256((_PLUGIN_HOOKS / name).read_bytes()).hexdigest() for name in ("coordination_owner.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "wake_waiter.py")}
+    files = {name: hashlib.sha256((_PLUGIN_HOOKS / name).read_bytes()).hexdigest() for name in ("coordination_owner.py", "rotation_due_watch.py", "wake_waiter.py")}
     manifest = _PLUGIN_HOOKS / "hooks.json"
     receipt: dict[str, object] = {
         "schema": "solet_coordination_installation_v1",
@@ -434,14 +434,12 @@ def test_overlay_makes_the_context_gauge_owner_eligible() -> None:
         assert env["ANANTA_SESSION_MAPPING_SPOOL_DIR"] == str(box.root / "profile/data/session_claude_mapping_spool")
 
 
-def test_rotation_and_heartbeat_hooks_exit_cleanly_env_less() -> None:
+def test_rotation_hook_exits_cleanly_env_less() -> None:
     with _sandbox() as box:
         payload = {"session_id": SID, "transcript_path": str(box.root / "absent.jsonl"), "tool_name": "Bash"}
-        for name in ("rotation_due_watch.py", "heartbeat_report_alive.py"):
-            done = _run_hook(_PLUGIN_HOOKS / name, box.env(), payload)
-            assert done.returncode == 0, (name, done.stderr)
-        heartbeat = _run_hook(_PLUGIN_HOOKS / "heartbeat_report_alive.py", box.env(), payload)
-        assert heartbeat.stdout == "" and heartbeat.stderr == "", "heartbeat is unchanged: no ledger row exists for an env-less session"
+        done = _run_hook(_PLUGIN_HOOKS / "rotation_due_watch.py", box.env(), payload)
+        assert done.returncode == 0, done.stderr
+        assert done.stdout == "" and done.stderr == "", "the context watch stays inert for an env-less session"
 
 
 # --- record lifecycle -------------------------------------------------------------

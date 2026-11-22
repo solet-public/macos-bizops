@@ -4,8 +4,9 @@ The §3 preflight gate (``schema_preflight.py``) classifies a candidate-vs-curre
 schema diff as additive (rollback-safe) or not. It needs a **canonical schema
 snapshot** of a code tree's DECLARED schemas. This module is that collector: it
 discovers every declared ``SchemaDefinition`` (core + manifest-gated plugins),
-reduces them to the canonical ``namespace → table → column → attrs`` snapshot,
-and prints it as JSON to stdout.
+reduces them to the canonical ``namespace → table → column → attrs`` snapshot
+(plus a top-level ``__retired_tables__`` key, ``namespace → retired names``,
+when a namespace retires a table), and prints it as JSON to stdout.
 
 It is launched as a **subprocess by FILE PATH** (NOT ``-m``) by
 ``schema_snapshot_producer``, with ``PYTHONPATH`` pointed at a target code tree
@@ -59,6 +60,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from ananta.config.core_schemas import CoreSchemaDefinitions
 from ananta.core.plugins.capabilities import collect_schemas
@@ -79,18 +81,21 @@ _ATTR_NOT_NULL = "not_null"
 _ATTR_HAS_DEFAULT = "has_default"
 _ATTR_PRIMARY_KEY = "primary_key"
 _ATTR_UNIQUE = "unique"
+# Top-level key ``namespace -> sorted retired table names``; present only when a
+# namespace retires something (same literal as ``schema_preflight.RETIRED_TABLES_KEY``).
+_RETIRED_TABLES_KEY = "__retired_tables__"
 
 
 def _reduce_to_snapshot(
     schemas: dict[str, SchemaDefinition],
-) -> dict[str, dict[str, dict[str, dict[str, object]]]]:
+) -> dict[str, Any]:
     """Reduce typed ``SchemaDefinition``s to the canonical comparable snapshot.
 
     INLINE twin of ``schema_preflight.schemas_to_snapshot`` (see the keys note
     above). Only rollback-relevant attributes are retained, so the snapshot is
     small, JSON-able, and stable across cosmetic edits.
     """
-    snapshot: dict[str, dict[str, dict[str, dict[str, object]]]] = {}
+    snapshot: dict[str, Any] = {}
     for namespace, schema in schemas.items():
         tables: dict[str, dict[str, dict[str, object]]] = {}
         for table_key, table in schema.tables.items():
@@ -106,7 +111,21 @@ def _reduce_to_snapshot(
                 }
             tables[table_key] = columns
         snapshot[namespace] = tables
+    retired = {namespace: sorted(_retired_tables_of(schema)) for namespace, schema in schemas.items() if _retired_tables_of(schema)}
+    if retired:
+        snapshot[_RETIRED_TABLES_KEY] = retired
     return snapshot
+
+
+def _retired_tables_of(schema: SchemaDefinition) -> tuple[str, ...]:
+    """The retired table names ``schema`` declares.
+
+    ``getattr`` is the one cross-version read in this module: the derive call
+    site snapshots an OLD release tree whose ``SchemaDefinition`` predates
+    ``retired_tables`` and so retires nothing. The old side's list is never
+    consulted by the classifier, so an empty answer there is exact, not a guess.
+    """
+    return tuple(getattr(schema, "retired_tables", ()))
 
 
 def _assert_under_root(module_file: str | None, expect_root: Path, label: str) -> str | None:
@@ -134,10 +153,7 @@ def _assert_provenance(manager: PluginManager, expect_root: Path) -> None:
         if offender is not None:
             offenders.append(offender)
     if offenders:
-        msg = (
-            f"§3 collector provenance violation (EXPECT_ROOT={expect_root}): "
-            + "; ".join(offenders)
-        )
+        msg = f"§3 collector provenance violation (EXPECT_ROOT={expect_root}): " + "; ".join(offenders)
         raise ValueError(msg)
 
 
@@ -152,10 +168,7 @@ def _assert_completeness(manager: PluginManager, manifest: set[str] | None) -> N
         return
     missing = set(manifest) - set(manager.plugins)
     if missing:
-        msg = (
-            "§3 collector completeness violation: manifest plugins not discovered "
-            f"in target tree: {sorted(missing)}"
-        )
+        msg = f"§3 collector completeness violation: manifest plugins not discovered in target tree: {sorted(missing)}"
         raise ValueError(msg)
 
 
@@ -192,10 +205,7 @@ def _resolve_manifest(app_home: str) -> set[str] | None:
         msg = f"MANIFEST_PLUGIN_OVERRIDE is not valid JSON: {exc}"
         raise ValueError(msg) from exc
     if not isinstance(decoded, list) or not all(isinstance(name, str) for name in decoded):
-        msg = (
-            "MANIFEST_PLUGIN_OVERRIDE must be a JSON array of plugin names, got: "
-            f"{type(decoded).__name__}"
-        )
+        msg = f"MANIFEST_PLUGIN_OVERRIDE must be a JSON array of plugin names, got: {type(decoded).__name__}"
         raise ValueError(msg)
     if not decoded:
         # Independently guarded here, not just upstream, because this process
@@ -205,11 +215,7 @@ def _resolve_manifest(app_home: str) -> set[str] | None:
         # the completeness assert vacuously, and produces an empty snapshot —
         # which ``classify_snapshot_diff`` reports as unconditionally additive
         # because it iterates the OLD side. That is the gate failing OPEN.
-        msg = (
-            "MANIFEST_PLUGIN_OVERRIDE is an EMPTY array — refusing, because an empty "
-            "plugin set collapses the snapshot to nothing and would pass the additive "
-            "check vacuously. Omit the variable to read the live manifest instead."
-        )
+        msg = "MANIFEST_PLUGIN_OVERRIDE is an EMPTY array — refusing, because an empty plugin set collapses the snapshot to nothing and would pass the additive check vacuously. Omit the variable to read the live manifest instead."
         raise ValueError(msg)
     return set(decoded)
 
@@ -236,25 +242,27 @@ def collect_declared_schemas() -> list[SchemaDefinition]:
     return schemas
 
 
-def build_snapshot(schemas: list[SchemaDefinition]) -> dict[str, dict[str, dict[str, dict[str, object]]]]:
+def build_snapshot(schemas: list[SchemaDefinition]) -> dict[str, Any]:
     """Reduce schemas to the canonical snapshot, MERGING tables per namespace.
 
     Fails loud on a genuine duplicate ``(namespace, table)`` across two
     definitions — that is a build-time schema conflict, not a snapshot concern.
     """
-    merged: dict[str, dict[str, dict[str, dict[str, object]]]] = {}
+    merged: dict[str, Any] = {}
+    retired: dict[str, set[str]] = {}
     for schema in schemas:
         part = _reduce_to_snapshot({schema.namespace: schema})
+        for namespace, names in part.pop(_RETIRED_TABLES_KEY, {}).items():
+            retired.setdefault(namespace, set()).update(names)
         for namespace, tables in part.items():
             ns_tables = merged.setdefault(namespace, {})
             for table_name, columns in tables.items():
                 if table_name in ns_tables:
-                    msg = (
-                        f"duplicate declared table {namespace}.{table_name} across "
-                        "two SchemaDefinitions — schema conflict, refusing to snapshot"
-                    )
+                    msg = f"duplicate declared table {namespace}.{table_name} across two SchemaDefinitions — schema conflict, refusing to snapshot"
                     raise ValueError(msg)
                 ns_tables[table_name] = columns
+    if retired:
+        merged[_RETIRED_TABLES_KEY] = {namespace: sorted(names) for namespace, names in retired.items()}
     return merged
 
 

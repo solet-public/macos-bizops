@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Unit smoke for ``budget_report.py`` (T1 S3, seat's design ruling
-2026-08-05) -- the per-``budget_line`` token-usage rollup joining
+2026-08-05) -- the per-``label`` token-usage rollup joining
 ``managed_session``/``session_claude_mapping`` (agent_messaging_plugin)
 against ``session_ledger__session``/``session_ledger__event``
 (session_ledger_service) -- the first cross-plugin state read of its kind
@@ -12,7 +12,10 @@ that resolves to no session_ledger session, and a resolved session with no
 usage-bearing events) all count as sessions_uncovered, never
 sessions_covered; a worker's usage sums across EVERY distinct
 claude_session_id it has ever been observed under (the ONE-TO-MANY rotation
-history); lane_id/budget_line filters narrow the managed_session scan;
+history); distinct sessions with equal labels share one entry and the
+label filter narrows the managed_session scan; rows with empty or missing
+labels share the empty-label entry; the platform accepts the label filter
+and refuses retired filters as unknown;
 by_model buckets (including the empty-string bucket for an unset model) are
 correct and independent from the top-level totals; a non-numeric or boolean
 field in usage_json is never summed; and the real
@@ -27,6 +30,7 @@ Run:
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -39,11 +43,13 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
+from ananta.error_handling import FrameworkError  # noqa: E402
+from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.llm.session_ledger.schema import NAMESPACE as LEDGER_NAMESPACE  # noqa: E402
 from ananta.llm.session_ledger.schema import TABLE_EVENT as LEDGER_TABLE_EVENT  # noqa: E402
 from ananta.llm.session_ledger.schema import TABLE_SESSION as LEDGER_TABLE_SESSION  # noqa: E402
 from ananta.llm.session_ledger.types import SourceVendor  # noqa: E402
+from session_usage_verbs_smoke import _submit  # noqa: E402
 
 from agent_messaging_plugin.budget_report import build_budget_report  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
@@ -52,7 +58,7 @@ from agent_messaging_plugin.schema import (  # noqa: E402
     LIFECYCLE_SPAWNING,
     SESSION_HOST_HEADLESS,
     SESSION_HOST_OPERATOR,
-    WORK_CLASS_READ_ONLY,
+    TABLE_MANAGED_SESSION,
 )
 from agent_messaging_plugin.session_claude_mapping_store import (  # noqa: E402
     upsert_session_claude_mapping,
@@ -85,21 +91,26 @@ def _spawn(
     state: StateManagementInterface,
     *,
     agent_instance_id: str,
-    lane_id: str = "lane-x",
-    budget_line: str = "budget-x",
+    label: str = "lbl-x",
     model: str = "",
     host: str = SESSION_HOST_HEADLESS,
 ) -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id=lane_id, assignment=fixture_assignment(),
-            work_class=WORK_CLASS_READ_ONLY, budget_line=budget_line, host=host, model=model,
+            agent_instance_id=agent_instance_id,
+            session_origin="spawned",
+            host=host,
+            model=model,
+            label=label,
         ),
     )
     transition_lifecycle_state(
-        state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        state,
+        agent_instance_id=agent_instance_id,
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
     )
 
 
@@ -140,10 +151,7 @@ def _seed_ledger_session(
         },
     )
     records = cast("dict[str, Any]", result)["data"]["records"]
-    assert len(records) == 1, (
-        f"expected exactly one row for (external_session_id={claude_session_id!r}, "
-        f"source_id={source_id!r}), got {records!r}"
-    )
+    assert len(records) == 1, f"expected exactly one row for (external_session_id={claude_session_id!r}, source_id={source_id!r}), got {records!r}"
     return str(records[0]["id"])
 
 
@@ -170,34 +178,39 @@ def _seed_ledger_event(
     )
 
 
-def _one_budget_line(report: dict[str, Any], budget_line: str) -> dict[str, Any]:
-    matches = [entry for entry in report["budget_lines"] if entry["budget_line"] == budget_line]
-    assert len(matches) == 1, f"expected exactly one {budget_line!r} entry, got {matches!r}"
+def _one_label(report: dict[str, Any], label: str) -> dict[str, Any]:
+    matches = [entry for entry in report["labels"] if entry["label"] == label]
+    assert len(matches) == 1, f"expected exactly one {label!r} entry, got {matches!r}"
     return matches[0]
 
 
 def test_no_managed_sessions_returns_empty_list() -> None:
     state = _state()
-    report = build_budget_report(state, budget_line="nothing-here")
+    report = build_budget_report(state, label="nothing-here")
     _check(
-        report == {"budget_lines": []},
+        report == {"labels": []},
         "no matching managed_session rows -> an empty list, not an error",
     )
 
 
 def test_covered_row_sums_usage_and_sets_as_of() -> None:
     state = _state()
-    _spawn(state, agent_instance_id="agi-covered-1", budget_line="bl-covered", model="sonnet")
+    _spawn(state, agent_instance_id="agi-covered-1", label="lbl-covered", model="sonnet")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-covered-1", claude_session_id="cs-covered-1",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-covered-1",
+        claude_session_id="cs-covered-1",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     ledger_id = _seed_ledger_session(state, claude_session_id="cs-covered-1")
     _seed_ledger_event(
-        state, ledger_session_id=ledger_id, event_at="2026-08-05T18:03:00+00:00",
+        state,
+        ledger_session_id=ledger_id,
+        event_at="2026-08-05T18:03:00+00:00",
         usage_json={"input_tokens": 100, "output_tokens": 50},
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-covered"), "bl-covered")
+    entry = _one_label(build_budget_report(state, label="lbl-covered"), "lbl-covered")
     _check(entry["sessions_covered"] == 1, "the covered row counts toward sessions_covered")
     _check(entry["sessions_uncovered"] == 0, "and NOT toward sessions_uncovered")
     _check(
@@ -212,9 +225,9 @@ def test_uncovered_no_mapping_row_at_all() -> None:
     row ever observed for it (e.g. the hook never fired -- S2c's own
     population)."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-uncovered-1", budget_line="bl-uncovered-1")
-    report = build_budget_report(state, budget_line="bl-uncovered-1")
-    entry = _one_budget_line(report, "bl-uncovered-1")
+    _spawn(state, agent_instance_id="agi-uncovered-1", label="lbl-uncovered-1")
+    report = build_budget_report(state, label="lbl-uncovered-1")
+    entry = _one_label(report, "lbl-uncovered-1")
     _check(entry["sessions_covered"] == 0, "no mapping row -> not covered")
     _check(entry["sessions_uncovered"] == 1, "no mapping row -> uncovered")
     _check(entry["usage"] == {}, "no usage figures")
@@ -226,13 +239,16 @@ def test_uncovered_mapping_resolves_to_no_ledger_session() -> None:
     session_ledger never ingested that claude_session_id (e.g. the
     filesystem source hasn't polled it yet)."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-uncovered-2", budget_line="bl-uncovered-2")
+    _spawn(state, agent_instance_id="agi-uncovered-2", label="lbl-uncovered-2")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-uncovered-2", claude_session_id="cs-never-ingested",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-uncovered-2",
+        claude_session_id="cs-never-ingested",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
-    report = build_budget_report(state, budget_line="bl-uncovered-2")
-    entry = _one_budget_line(report, "bl-uncovered-2")
+    report = build_budget_report(state, label="lbl-uncovered-2")
+    entry = _one_label(report, "lbl-uncovered-2")
     _check(entry["sessions_covered"] == 0, "an unresolvable claude_session_id -> not covered")
     _check(entry["sessions_uncovered"] == 1, "-> uncovered")
 
@@ -245,17 +261,23 @@ def test_no_llm_turns_ledger_session_with_no_usage_events() -> None:
     fixture shape as the former "Rail 3, shape 3" test; only the expected
     classification changed, per the D4 close-out ruling."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-no-turns-1", budget_line="bl-no-turns-1")
+    _spawn(state, agent_instance_id="agi-no-turns-1", label="lbl-no-turns-1")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-no-turns-1", claude_session_id="cs-no-usage",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-no-turns-1",
+        claude_session_id="cs-no-usage",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     ledger_id = _seed_ledger_session(state, claude_session_id="cs-no-usage")
     _seed_ledger_event(
-        state, ledger_session_id=ledger_id, event_at="2026-08-05T18:03:00+00:00", usage_json=None,
+        state,
+        ledger_session_id=ledger_id,
+        event_at="2026-08-05T18:03:00+00:00",
+        usage_json=None,
     )
-    report = build_budget_report(state, budget_line="bl-no-turns-1")
-    entry = _one_budget_line(report, "bl-no-turns-1")
+    report = build_budget_report(state, label="lbl-no-turns-1")
+    entry = _one_label(report, "lbl-no-turns-1")
     _check(entry["sessions_covered"] == 0, "events exist but none carry usage_json -> not covered")
     _check(
         entry["sessions_no_llm_turns"] == 1,
@@ -282,10 +304,12 @@ def test_operator_hosted_excluded_never_touches_mapping_table() -> None:
     sessions_excluded_operator_hosted."""
     state = _state()
     _spawn(
-        state, agent_instance_id="agi-operator-1", budget_line="bl-operator-1",
+        state,
+        agent_instance_id="agi-operator-1",
+        label="lbl-operator-1",
         host=SESSION_HOST_OPERATOR,
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-operator-1"), "bl-operator-1")
+    entry = _one_label(build_budget_report(state, label="lbl-operator-1"), "lbl-operator-1")
     _check(
         entry["sessions_excluded_operator_hosted"] == 1,
         "host=operator -> its own declared exclusion, never uncovered",
@@ -303,18 +327,24 @@ def test_pre_landing_excluded_regardless_of_mapping_state() -> None:
     never on whether capture happened to work for it anyway."""
     state = _state()
     state.now_iso = lambda: "2026-08-01T00:00:00+00:00"
-    _spawn(state, agent_instance_id="agi-pre-landing-1", budget_line="bl-pre-landing-1")
+    _spawn(state, agent_instance_id="agi-pre-landing-1", label="lbl-pre-landing-1")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-pre-landing-1", claude_session_id="cs-pre-landing-1",
-        captured_at="2026-08-01T00:01:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-pre-landing-1",
+        claude_session_id="cs-pre-landing-1",
+        captured_at="2026-08-01T00:01:00+00:00",
+        capture_source="hook:startup",
     )
     ledger_id = _seed_ledger_session(state, claude_session_id="cs-pre-landing-1")
     _seed_ledger_event(
-        state, ledger_session_id=ledger_id, event_at="2026-08-01T00:02:00+00:00",
+        state,
+        ledger_session_id=ledger_id,
+        event_at="2026-08-01T00:02:00+00:00",
         usage_json={"input_tokens": 999},
     )
-    entry = _one_budget_line(
-        build_budget_report(state, budget_line="bl-pre-landing-1"), "bl-pre-landing-1",
+    entry = _one_label(
+        build_budget_report(state, label="lbl-pre-landing-1"),
+        "lbl-pre-landing-1",
     )
     _check(
         entry["sessions_excluded_pre_landing"] == 1,
@@ -335,9 +365,10 @@ def test_post_landing_row_not_excluded() -> None:
     sessions."""
     state = _state()
     state.now_iso = lambda: "2026-08-05T16:36:07+00:00"
-    _spawn(state, agent_instance_id="agi-post-landing-1", budget_line="bl-post-landing-1")
-    entry = _one_budget_line(
-        build_budget_report(state, budget_line="bl-post-landing-1"), "bl-post-landing-1",
+    _spawn(state, agent_instance_id="agi-post-landing-1", label="lbl-post-landing-1")
+    entry = _one_label(
+        build_budget_report(state, label="lbl-post-landing-1"),
+        "lbl-post-landing-1",
     )
     _check(entry["sessions_excluded_pre_landing"] == 0, "one second after landing -> NOT excluded")
     _check(entry["sessions_uncovered"] == 1, "in scope, no mapping row -> a genuine open gap")
@@ -350,12 +381,15 @@ def test_unresolved_gap_distinct_from_no_llm_turns() -> None:
     sessions_no_llm_turns -- that class is reserved for a CONFIRMED zero
     (rows exist, checked, empty), not an unresolved one (no row to check)."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-gap-1", budget_line="bl-gap-1")
+    _spawn(state, agent_instance_id="agi-gap-1", label="lbl-gap-1")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-gap-1", claude_session_id="cs-never-ingested-2",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-gap-1",
+        claude_session_id="cs-never-ingested-2",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-gap-1"), "bl-gap-1")
+    entry = _one_label(build_budget_report(state, label="lbl-gap-1"), "lbl-gap-1")
     _check(entry["sessions_uncovered"] == 1, "no ledger row resolves at all -> an unresolved gap")
     _check(entry["sessions_no_llm_turns"] == 0, "never confused with a confirmed true-zero")
 
@@ -375,25 +409,39 @@ def test_sibling_canonical_zero_usage_sibling_has_usage_resolves_to_usage() -> N
     canonical (thin) row inserted FIRST, usage-bearing sibling inserted
     second."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-sib-1", budget_line="bl-sib-1")
+    _spawn(state, agent_instance_id="agi-sib-1", label="lbl-sib-1")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-sib-1", claude_session_id="cs-sib-1",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-sib-1",
+        claude_session_id="cs-sib-1",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     thin_id = _seed_ledger_session(
-        state, claude_session_id="cs-sib-1", source_id="src-history", event_count=17,
+        state,
+        claude_session_id="cs-sib-1",
+        source_id="src-history",
+        event_count=17,
     )
     _seed_ledger_event(
-        state, ledger_session_id=thin_id, event_at="2026-08-05T18:01:00+00:00", usage_json=None,
+        state,
+        ledger_session_id=thin_id,
+        event_at="2026-08-05T18:01:00+00:00",
+        usage_json=None,
     )
     rich_id = _seed_ledger_session(
-        state, claude_session_id="cs-sib-1", source_id="src-local", event_count=395,
+        state,
+        claude_session_id="cs-sib-1",
+        source_id="src-local",
+        event_count=395,
     )
     _seed_ledger_event(
-        state, ledger_session_id=rich_id, event_at="2026-08-05T18:03:00+00:00",
+        state,
+        ledger_session_id=rich_id,
+        event_at="2026-08-05T18:03:00+00:00",
         usage_json={"input_tokens": 500},
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-sib-1"), "bl-sib-1")
+    entry = _one_label(build_budget_report(state, label="lbl-sib-1"), "lbl-sib-1")
     _check(entry["sessions_covered"] == 1, "the usage-bearing sibling is found -> covered")
     _check(
         entry["usage"] == {"input_tokens": 500},
@@ -401,9 +449,7 @@ def test_sibling_canonical_zero_usage_sibling_has_usage_resolves_to_usage() -> N
     )
     _check(
         entry["sessions_multi_row_resolved"] == 0,
-        "only ONE row is usage-bearing here (the thin row has zero usage-bearing "
-        "events, so it is never a candidate) -- nothing to disambiguate, unlike "
-        "the two-usage-bearing-siblings leg below",
+        "only ONE row is usage-bearing here (the thin row has zero usage-bearing events, so it is never a candidate) -- nothing to disambiguate, unlike the two-usage-bearing-siblings leg below",
     )
 
 
@@ -414,25 +460,39 @@ def test_sibling_resolution_is_order_independent() -> None:
     leg above, but the usage-bearing sibling is inserted FIRST and the thin
     zero-usage row SECOND -- the result must be byte-identical."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-sib-2", budget_line="bl-sib-2")
+    _spawn(state, agent_instance_id="agi-sib-2", label="lbl-sib-2")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-sib-2", claude_session_id="cs-sib-2",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-sib-2",
+        claude_session_id="cs-sib-2",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     rich_id = _seed_ledger_session(
-        state, claude_session_id="cs-sib-2", source_id="src-local", event_count=395,
+        state,
+        claude_session_id="cs-sib-2",
+        source_id="src-local",
+        event_count=395,
     )
     _seed_ledger_event(
-        state, ledger_session_id=rich_id, event_at="2026-08-05T18:03:00+00:00",
+        state,
+        ledger_session_id=rich_id,
+        event_at="2026-08-05T18:03:00+00:00",
         usage_json={"input_tokens": 500},
     )
     thin_id = _seed_ledger_session(
-        state, claude_session_id="cs-sib-2", source_id="src-history", event_count=17,
+        state,
+        claude_session_id="cs-sib-2",
+        source_id="src-history",
+        event_count=17,
     )
     _seed_ledger_event(
-        state, ledger_session_id=thin_id, event_at="2026-08-05T18:01:00+00:00", usage_json=None,
+        state,
+        ledger_session_id=thin_id,
+        event_at="2026-08-05T18:01:00+00:00",
+        usage_json=None,
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-sib-2"), "bl-sib-2")
+    entry = _one_label(build_budget_report(state, label="lbl-sib-2"), "lbl-sib-2")
     _check(entry["sessions_covered"] == 1, "still covered regardless of insertion order")
     _check(
         entry["usage"] == {"input_tokens": 500},
@@ -447,26 +507,39 @@ def test_two_usage_bearing_siblings_never_summed() -> None:
     both carrying usage). The higher-event_count row's usage is used
     EXCLUSIVELY; the result must NOT equal the sum of both rows."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-sib-3", budget_line="bl-sib-3")
+    _spawn(state, agent_instance_id="agi-sib-3", label="lbl-sib-3")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-sib-3", claude_session_id="cs-sib-3",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-sib-3",
+        claude_session_id="cs-sib-3",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     big_id = _seed_ledger_session(
-        state, claude_session_id="cs-sib-3", source_id="src-local-a", event_count=3567,
+        state,
+        claude_session_id="cs-sib-3",
+        source_id="src-local-a",
+        event_count=3567,
     )
     _seed_ledger_event(
-        state, ledger_session_id=big_id, event_at="2026-08-05T18:05:00+00:00",
+        state,
+        ledger_session_id=big_id,
+        event_at="2026-08-05T18:05:00+00:00",
         usage_json={"input_tokens": 3000},
     )
     small_id = _seed_ledger_session(
-        state, claude_session_id="cs-sib-3", source_id="src-local-b", event_count=20,
+        state,
+        claude_session_id="cs-sib-3",
+        source_id="src-local-b",
+        event_count=20,
     )
     _seed_ledger_event(
-        state, ledger_session_id=small_id, event_at="2026-08-05T18:02:00+00:00",
+        state,
+        ledger_session_id=small_id,
+        event_at="2026-08-05T18:02:00+00:00",
         usage_json={"input_tokens": 200},
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-sib-3"), "bl-sib-3")
+    entry = _one_label(build_budget_report(state, label="lbl-sib-3"), "lbl-sib-3")
     _check(
         entry["usage"] == {"input_tokens": 3000},
         f"only the higher-event_count row's usage is used (got {entry['usage']!r})",
@@ -484,28 +557,41 @@ def test_sibling_tie_break_prefers_more_recent_last_event_at() -> None:
     deterministically, not whichever the state layer happens to return
     first."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-sib-4", budget_line="bl-sib-4")
+    _spawn(state, agent_instance_id="agi-sib-4", label="lbl-sib-4")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-sib-4", claude_session_id="cs-sib-4",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-sib-4",
+        claude_session_id="cs-sib-4",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     older_id = _seed_ledger_session(
-        state, claude_session_id="cs-sib-4", source_id="src-older",
-        event_count=50, last_event_at="2026-08-05T18:10:00",
+        state,
+        claude_session_id="cs-sib-4",
+        source_id="src-older",
+        event_count=50,
+        last_event_at="2026-08-05T18:10:00",
     )
     _seed_ledger_event(
-        state, ledger_session_id=older_id, event_at="2026-08-05T18:10:00+00:00",
+        state,
+        ledger_session_id=older_id,
+        event_at="2026-08-05T18:10:00+00:00",
         usage_json={"input_tokens": 10},
     )
     newer_id = _seed_ledger_session(
-        state, claude_session_id="cs-sib-4", source_id="src-newer",
-        event_count=50, last_event_at="2026-08-05T18:20:00",
+        state,
+        claude_session_id="cs-sib-4",
+        source_id="src-newer",
+        event_count=50,
+        last_event_at="2026-08-05T18:20:00",
     )
     _seed_ledger_event(
-        state, ledger_session_id=newer_id, event_at="2026-08-05T18:20:00+00:00",
+        state,
+        ledger_session_id=newer_id,
+        event_at="2026-08-05T18:20:00+00:00",
         usage_json={"input_tokens": 20},
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-sib-4"), "bl-sib-4")
+    entry = _one_label(build_budget_report(state, label="lbl-sib-4"), "lbl-sib-4")
     _check(
         entry["usage"] == {"input_tokens": 20},
         f"tie on event_count -> the more-recent last_event_at wins (got {entry['usage']!r})",
@@ -520,20 +606,29 @@ def test_sibling_group_with_no_usage_anywhere_is_no_llm_turns() -> None:
     (that class is reserved for an unresolved gap, e.g. no ledger row at
     all -- see test_uncovered_mapping_resolves_to_no_ledger_session)."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-sib-5", budget_line="bl-sib-5")
+    _spawn(state, agent_instance_id="agi-sib-5", label="lbl-sib-5")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-sib-5", claude_session_id="cs-sib-5",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-sib-5",
+        claude_session_id="cs-sib-5",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     id_a = _seed_ledger_session(state, claude_session_id="cs-sib-5", source_id="src-a")
     _seed_ledger_event(
-        state, ledger_session_id=id_a, event_at="2026-08-05T18:01:00+00:00", usage_json=None,
+        state,
+        ledger_session_id=id_a,
+        event_at="2026-08-05T18:01:00+00:00",
+        usage_json=None,
     )
     id_b = _seed_ledger_session(state, claude_session_id="cs-sib-5", source_id="src-b")
     _seed_ledger_event(
-        state, ledger_session_id=id_b, event_at="2026-08-05T18:02:00+00:00", usage_json=None,
+        state,
+        ledger_session_id=id_b,
+        event_at="2026-08-05T18:02:00+00:00",
+        usage_json=None,
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-sib-5"), "bl-sib-5")
+    entry = _one_label(build_budget_report(state, label="lbl-sib-5"), "lbl-sib-5")
     _check(entry["sessions_covered"] == 0, "no usage anywhere in the group -> not covered")
     _check(entry["sessions_no_llm_turns"] == 1, "both siblings resolved, zero usage -> no_llm_turns")
     _check(entry["sessions_uncovered"] == 0, "a confirmed true-zero is NOT an unresolved gap")
@@ -547,17 +642,22 @@ def test_single_row_group_unaffected_by_sibling_resolution() -> None:
     """Regression guard: the overwhelming common case (no siblings at all)
     must behave exactly as before the sibling-row fix."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-sib-6", budget_line="bl-sib-6")
+    _spawn(state, agent_instance_id="agi-sib-6", label="lbl-sib-6")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-sib-6", claude_session_id="cs-sib-6",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-sib-6",
+        claude_session_id="cs-sib-6",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     ledger_id = _seed_ledger_session(state, claude_session_id="cs-sib-6", event_count=5)
     _seed_ledger_event(
-        state, ledger_session_id=ledger_id, event_at="2026-08-05T18:03:00+00:00",
+        state,
+        ledger_session_id=ledger_id,
+        event_at="2026-08-05T18:03:00+00:00",
         usage_json={"input_tokens": 42},
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-sib-6"), "bl-sib-6")
+    entry = _one_label(build_budget_report(state, label="lbl-sib-6"), "lbl-sib-6")
     _check(entry["sessions_covered"] == 1, "single-row group -> covered, unchanged")
     _check(entry["usage"] == {"input_tokens": 42}, "usage unchanged for the common case")
     _check(
@@ -571,27 +671,37 @@ def test_usage_sums_across_every_claude_session_in_the_workers_lifetime() -> Non
     claude_session_id values (e.g. across a /clear) has its usage summed
     across BOTH, and as_of reflects the LATER of the two events."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-multi-cs", budget_line="bl-multi-cs")
+    _spawn(state, agent_instance_id="agi-multi-cs", label="lbl-multi-cs")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-multi-cs", claude_session_id="cs-multi-a",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-multi-cs",
+        claude_session_id="cs-multi-a",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-multi-cs", claude_session_id="cs-multi-b",
-        captured_at="2026-08-05T19:00:00+00:00", capture_source="hook:clear",
+        state,
+        agent_instance_id="agi-multi-cs",
+        claude_session_id="cs-multi-b",
+        captured_at="2026-08-05T19:00:00+00:00",
+        capture_source="hook:clear",
     )
     ledger_a = _seed_ledger_session(state, claude_session_id="cs-multi-a")
     ledger_b = _seed_ledger_session(state, claude_session_id="cs-multi-b")
     _seed_ledger_event(
-        state, ledger_session_id=ledger_a, event_at="2026-08-05T18:03:00+00:00",
+        state,
+        ledger_session_id=ledger_a,
+        event_at="2026-08-05T18:03:00+00:00",
         usage_json={"input_tokens": 100},
     )
     _seed_ledger_event(
-        state, ledger_session_id=ledger_b, event_at="2026-08-05T19:03:00+00:00",
+        state,
+        ledger_session_id=ledger_b,
+        event_at="2026-08-05T19:03:00+00:00",
         usage_json={"input_tokens": 200},
     )
-    report = build_budget_report(state, budget_line="bl-multi-cs")
-    entry = _one_budget_line(report, "bl-multi-cs")
+    report = build_budget_report(state, label="lbl-multi-cs")
+    entry = _one_label(report, "lbl-multi-cs")
     _check(entry["sessions_covered"] == 1, "still ONE covered managed_session row, not two")
     _check(
         entry["usage"] == {"input_tokens": 300},
@@ -600,44 +710,112 @@ def test_usage_sums_across_every_claude_session_in_the_workers_lifetime() -> Non
     _check(entry["as_of"] == "2026-08-05T19:03:00+00:00", "as_of is the LATER of the two events")
 
 
-def test_budget_line_filter_narrows_scope() -> None:
+def test_label_filter_narrows_scope() -> None:
     state = _state()
-    _spawn(state, agent_instance_id="agi-filter-1", budget_line="bl-keep")
-    _spawn(state, agent_instance_id="agi-filter-2", budget_line="bl-drop")
-    report = build_budget_report(state, budget_line="bl-keep")
-    lines = [entry["budget_line"] for entry in report["budget_lines"]]
+    _spawn(state, agent_instance_id="agi-filter-1", label="lbl-keep")
+    _spawn(state, agent_instance_id="agi-filter-2", label="lbl-drop")
+    report = build_budget_report(state, label="lbl-keep")
+    labels = [entry["label"] for entry in report["labels"]]
     _check(
-        lines == ["bl-keep"], f"budget_line filter returns only the matching line (got {lines!r})",
+        labels == ["lbl-keep"],
+        f"the label filter returns only the matching label (got {labels!r})",
     )
 
 
-def test_lane_id_filter_narrows_scope() -> None:
-    state = _state()
-    _spawn(state, agent_instance_id="agi-lane-1", lane_id="lane-keep", budget_line="bl-lane-1")
-    _spawn(state, agent_instance_id="agi-lane-2", lane_id="lane-drop", budget_line="bl-lane-2")
-    report = build_budget_report(state, lane_id="lane-keep")
-    lines = [entry["budget_line"] for entry in report["budget_lines"]]
+def test_distinct_sessions_with_equal_labels_share_an_entry() -> None:
+    """The two alpha sessions remain distinct and contribute to one label entry."""
+    raw = RealShapeState()
+    state = cast("StateManagementInterface", raw)
+    _spawn(state, agent_instance_id="agi-alpha-1", label="alpha")
+    _spawn(state, agent_instance_id="agi-alpha-2", label="alpha")
+    _spawn(state, agent_instance_id="agi-beta-1", label="beta")
+    alpha_instances = {row["agent_instance_id"] for row in raw.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION) if row["label"] == "alpha"}
+    _check(alpha_instances == {"agi-alpha-1", "agi-alpha-2"}, "the ledger keeps both alpha session identities")
+    report = build_budget_report(state)
+    _check(set(report) == {"labels"}, f"the report's only key is labels (got {sorted(report)!r})")
+    labels = [entry["label"] for entry in report["labels"]]
+    _check(labels == ["alpha", "beta"], f"exactly two entries, keyed by label (got {labels!r})")
+    alpha = _one_label(report, "alpha")
     _check(
-        lines == ["bl-lane-1"],
-        f"lane_id filter returns only that lane's budget_line (got {lines!r})",
+        alpha["sessions_uncovered"] == 2,
+        "both alpha sessions contribute to the same entry",
     )
+    retired_keys = {"_".join(parts) for parts in (("budget", "line"), ("lane", "id"))}
+    _check(not retired_keys.intersection(alpha), "the entry omits retired grouping fields")
+    filtered = build_budget_report(state, label="alpha")
+    filtered_labels = [entry["label"] for entry in filtered["labels"]]
+    _check(filtered_labels == ["alpha"], f"label='alpha' filters to one entry (got {filtered_labels!r})")
+    _check(
+        filtered["labels"][0]["sessions_uncovered"] == 2,
+        "the filtered entry still counts both alpha rows",
+    )
+
+
+def test_rows_with_no_label_report_under_the_empty_label() -> None:
+    """A row whose label is empty and a row written before the label column
+    existed (no label key at all) are ONE entry under ''; nothing is backfilled
+    and a labelled row is unaffected."""
+    raw = RealShapeState()
+    state = cast("StateManagementInterface", raw)
+    _spawn(state, agent_instance_id="agi-blank-label", label="")
+    _spawn(state, agent_instance_id="agi-old-row", label="never-stored")
+    _spawn(state, agent_instance_id="agi-labelled", label="alpha")
+    for row in raw.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_SESSION):
+        if row["agent_instance_id"] == "agi-old-row":
+            del row["label"]
+    report = build_budget_report(state)
+    labels = [entry["label"] for entry in report["labels"]]
+    _check(labels == ["", "alpha"], f"a label-less row reports under '' next to alpha (got {labels!r})")
+    _check(
+        _one_label(report, "")["sessions_uncovered"] == 2,
+        "the empty-label row and the label-less row are one entry",
+    )
+    _check(_one_label(report, "alpha")["sessions_uncovered"] == 1, "a labelled row is unaffected")
+
+
+_BUDGET_REPORT_KEY = "plugin::agent_messaging_plugin::budget_report"
+
+
+def _refused_as_unknown_argument(arguments: dict[str, Any]) -> bool:
+    try:
+        _submit(AgentMessagingPlugin.budget_report, _BUDGET_REPORT_KEY, arguments)
+    except FrameworkError as exc:
+        return exc.error_code == "action.unknown_arguments"
+    return False
+
+
+def test_retired_filters_are_refused_as_unknown_arguments() -> None:
+    """The verb declares label only, so the platform's own argument check
+    refuses the two retired filters instead of silently ignoring them."""
+    method: Any = AgentMessagingPlugin.budget_report
+    declared = set(method._platform_process_metadata.parameters)
+    _check(declared == {"label"}, f"budget_report declares exactly one argument, label (got {sorted(declared)!r})")
+    _check(not _refused_as_unknown_argument({"label": "alpha"}), "label is a declared argument and is accepted")
+    for parts in (("lane", "id"), ("budget", "line")):
+        retired = "_".join(parts)
+        _check(_refused_as_unknown_argument({retired: "alpha"}), f"{retired} is refused as an unknown argument")
 
 
 def test_by_model_breakdown_including_empty_string_bucket() -> None:
     state = _state()
-    _spawn(state, agent_instance_id="agi-model-a", budget_line="bl-model", model="sonnet")
-    _spawn(state, agent_instance_id="agi-model-b", budget_line="bl-model", model="")
+    _spawn(state, agent_instance_id="agi-model-a", label="lbl-model", model="sonnet")
+    _spawn(state, agent_instance_id="agi-model-b", label="lbl-model", model="")
     for agent_instance_id, cs_id in (("agi-model-a", "cs-model-a"), ("agi-model-b", "cs-model-b")):
         upsert_session_claude_mapping(
-            state, agent_instance_id=agent_instance_id, claude_session_id=cs_id,
-            captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+            state,
+            agent_instance_id=agent_instance_id,
+            claude_session_id=cs_id,
+            captured_at="2026-08-05T18:00:00+00:00",
+            capture_source="hook:startup",
         )
         ledger_id = _seed_ledger_session(state, claude_session_id=cs_id, source_id=f"src-{cs_id}")
         _seed_ledger_event(
-            state, ledger_session_id=ledger_id, event_at="2026-08-05T18:03:00+00:00",
+            state,
+            ledger_session_id=ledger_id,
+            event_at="2026-08-05T18:03:00+00:00",
             usage_json={"input_tokens": 10},
         )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-model"), "bl-model")
+    entry = _one_label(build_budget_report(state, label="lbl-model"), "lbl-model")
     _check(entry["usage"] == {"input_tokens": 20}, "top-level totals sum across both models")
     _check(
         set(entry["by_model"]) == {"sonnet", ""},
@@ -659,17 +837,22 @@ def test_non_numeric_and_boolean_fields_never_summed() -> None:
     the guard actually excludes it, not just that a plain string is
     excluded."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-nonnum", budget_line="bl-nonnum")
+    _spawn(state, agent_instance_id="agi-nonnum", label="lbl-nonnum")
     upsert_session_claude_mapping(
-        state, agent_instance_id="agi-nonnum", claude_session_id="cs-nonnum",
-        captured_at="2026-08-05T18:00:00+00:00", capture_source="hook:startup",
+        state,
+        agent_instance_id="agi-nonnum",
+        claude_session_id="cs-nonnum",
+        captured_at="2026-08-05T18:00:00+00:00",
+        capture_source="hook:startup",
     )
     ledger_id = _seed_ledger_session(state, claude_session_id="cs-nonnum")
     _seed_ledger_event(
-        state, ledger_session_id=ledger_id, event_at="2026-08-05T18:03:00+00:00",
+        state,
+        ledger_session_id=ledger_id,
+        event_at="2026-08-05T18:03:00+00:00",
         usage_json={"input_tokens": 10, "cache_hit": True, "model_label": "claude-sonnet"},
     )
-    entry = _one_budget_line(build_budget_report(state, budget_line="bl-nonnum"), "bl-nonnum")
+    entry = _one_label(build_budget_report(state, label="lbl-nonnum"), "lbl-nonnum")
     _check(
         entry["usage"] == {"input_tokens": 10},
         f"only the numeric field is summed, bool and str fields excluded (got {entry['usage']!r})",
@@ -683,19 +866,21 @@ def test_verb_handler_extracts_params_and_calls_through() -> None:
     state_service wiring are genuinely correct, mirroring this plugin's own
     wired-consumer convention."""
     state = _state()
-    _spawn(state, agent_instance_id="agi-verb-1", budget_line="bl-verb")
+    _spawn(state, agent_instance_id="agi-verb-1", label="lbl-verb")
     fake_self = cast(
         "Any",
         type("FakeSelf", (), {"_get_state_service": lambda self: state})(),
     )
     result = AgentMessagingPlugin.budget_report(
-        fake_self, {"parameters": {"budget_line": "bl-verb"}}, {},
+        fake_self,
+        {"parameters": {"label": "lbl-verb"}},
+        {},
     )
     _check(result["action_status"] == "completed", f"the verb handler succeeds (got {result!r})")
-    lines = [entry["budget_line"] for entry in result["data"]["budget_lines"]]
+    labels = [entry["label"] for entry in result["data"]["labels"]]
     _check(
-        lines == ["bl-verb"],
-        "the handler's budget_line param genuinely reaches build_budget_report's filter",
+        labels == ["lbl-verb"],
+        "the handler's label param genuinely reaches build_budget_report's filter",
     )
 
 
@@ -709,29 +894,41 @@ def test_verb_handler_reports_state_service_unavailable() -> None:
     )
 
 
+TESTS: tuple[Callable[[], None], ...] = (
+    test_no_managed_sessions_returns_empty_list,
+    test_covered_row_sums_usage_and_sets_as_of,
+    test_uncovered_no_mapping_row_at_all,
+    test_uncovered_mapping_resolves_to_no_ledger_session,
+    test_no_llm_turns_ledger_session_with_no_usage_events,
+    test_operator_hosted_excluded_never_touches_mapping_table,
+    test_pre_landing_excluded_regardless_of_mapping_state,
+    test_post_landing_row_not_excluded,
+    test_unresolved_gap_distinct_from_no_llm_turns,
+    test_sibling_canonical_zero_usage_sibling_has_usage_resolves_to_usage,
+    test_sibling_resolution_is_order_independent,
+    test_two_usage_bearing_siblings_never_summed,
+    test_sibling_tie_break_prefers_more_recent_last_event_at,
+    test_sibling_group_with_no_usage_anywhere_is_no_llm_turns,
+    test_single_row_group_unaffected_by_sibling_resolution,
+    test_usage_sums_across_every_claude_session_in_the_workers_lifetime,
+    test_label_filter_narrows_scope,
+    test_distinct_sessions_with_equal_labels_share_an_entry,
+    test_rows_with_no_label_report_under_the_empty_label,
+    test_retired_filters_are_refused_as_unknown_arguments,
+    test_by_model_breakdown_including_empty_string_bucket,
+    test_non_numeric_and_boolean_fields_never_summed,
+    test_verb_handler_extracts_params_and_calls_through,
+    test_verb_handler_reports_state_service_unavailable,
+)
+
+
 def main() -> int:
-    test_no_managed_sessions_returns_empty_list()
-    test_covered_row_sums_usage_and_sets_as_of()
-    test_uncovered_no_mapping_row_at_all()
-    test_uncovered_mapping_resolves_to_no_ledger_session()
-    test_no_llm_turns_ledger_session_with_no_usage_events()
-    test_operator_hosted_excluded_never_touches_mapping_table()
-    test_pre_landing_excluded_regardless_of_mapping_state()
-    test_post_landing_row_not_excluded()
-    test_unresolved_gap_distinct_from_no_llm_turns()
-    test_sibling_canonical_zero_usage_sibling_has_usage_resolves_to_usage()
-    test_sibling_resolution_is_order_independent()
-    test_two_usage_bearing_siblings_never_summed()
-    test_sibling_tie_break_prefers_more_recent_last_event_at()
-    test_sibling_group_with_no_usage_anywhere_is_no_llm_turns()
-    test_single_row_group_unaffected_by_sibling_resolution()
-    test_usage_sums_across_every_claude_session_in_the_workers_lifetime()
-    test_budget_line_filter_narrows_scope()
-    test_lane_id_filter_narrows_scope()
-    test_by_model_breakdown_including_empty_string_bucket()
-    test_non_numeric_and_boolean_fields_never_summed()
-    test_verb_handler_extracts_params_and_calls_through()
-    test_verb_handler_reports_state_service_unavailable()
+    for test in TESTS:
+        try:
+            test()
+        except Exception as exc:  # noqa: BLE001 -- one smoke report per named test, never an abort
+            _failed.append(f"{test.__name__}: {type(exc).__name__}: {exc}")
+            print(f"  FAIL  {test.__name__}: {type(exc).__name__}: {exc}")
 
     print()
     print(f"PASSED: {_passed}")

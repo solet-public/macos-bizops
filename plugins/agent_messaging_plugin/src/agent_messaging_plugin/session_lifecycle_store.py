@@ -42,12 +42,11 @@ provenance lives in ``managed_session.spawned_by_instance_id`` /
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 from ananta.llm.agent_messaging.state_results import (
@@ -58,32 +57,24 @@ from ananta.llm.agent_messaging.state_results import (
 from ananta.services.state_service.bounded_read import (
     PagedReadError,
     ReadCeilingError,
-    iter_table_rows,
 )
 
-from .register_unit_client import RegisterUnitClient, UnitAssignment, VerbError
 from .schema import (
-    LIFECYCLE_IDLE,
     LIFECYCLE_LIVE,
-    LIFECYCLE_OVERDUE,
-    LIFECYCLE_PARKED,
     LIFECYCLE_SPAWNING,
     LIFECYCLE_TERMINATED,
     LIFECYCLE_TRANSITIONS,
     SESSION_VISIBILITY_HEADLESS,
-    TABLE_LANE_CHARTER,
-    TABLE_MANAGED_DISPATCH,
     TABLE_MANAGED_SESSION,
     TABLE_SESSION_TRANSITION,
 )
-from .session_hosts import DEFAULT_AGENT_RUNTIME, OPERATOR_HOST, resolve_host_driver
+from .session_end_reason import UNKNOWN, require_end_reason
+from .session_hosts import DEFAULT_AGENT_RUNTIME, OPERATOR_HOST
 
 if TYPE_CHECKING:
     from ananta.core.services.call_context import CallContext
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
-    from .bridge_sessions import BridgeSessionManager
-    from .peer_registry import PeerRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +103,8 @@ _COL_CREATED_AT = "created_at"
 _COL_ID = "id"
 
 # Single source of truth (session_lifecycle_verbs.py's _rearm_report_by
-# imports this rather than redefining it) — interim fixed window, pending
-# the §6 rule 1 per-work_class config substrate (deferred to a later D-step).
+# imports this rather than redefining it) — the fixed default report window
+# for a spawn that requests none.
 DEFAULT_REPORT_BY_SECONDS = 300
 
 
@@ -175,19 +166,14 @@ class ManagedSessionSpec:
     """The ``spawn_session`` ledger-row-before-host-dispatch record (§4)."""
 
     agent_instance_id: str
-    lane_id: str
-    assignment: UnitAssignment | None
-    work_class: str
-    budget_line: str
     host: str
-    dispatch_id: str = ""
     agent_runtime: str = DEFAULT_AGENT_RUNTIME
     spawned_by_instance_id: str = ""
     spawned_by_role: str = ""
     role_name: str = ""
     # W6 (#13 §44.3): the name the worker answers to on its own machine.
     # Empty means "derive it" — insert_managed_session falls back to
-    # role_name then lane_id, the same order spawn_session resolves.
+    # role_name.
     local_name: str = ""
     # W4A item 3: an EXPLICIT operator choice to spawn onto a host whose
     # preflight found worker hooks unable to run. Default off.
@@ -197,33 +183,12 @@ class ManagedSessionSpec:
     effort: str = ""
     report_by_seconds: int = 0
     directed_by: str = ""
-    provisioning_mode: str = "worktree"
-    # The resolved source checkout used at spawn.  Retire reads this row, not
-    # a live process environment, so a foreign-repository lane removes the
-    # same worktree it provisioned.
-    lane_repo_root: str = ""
-    dispatch_kind: str = ""
-    reviewed_report_vendor: str = ""
-    pair_id: str = ""
-    # Capability-floor audit trail (iss_63d91ca9): the caller's declared
-    # scope_tags and every floor spawn_session actually applied (declared or
-    # brief-detected), so "which floor governed this spawn's model" is a
-    # ledger read, never a reconstruction from a commit trailer.
-    scope_tags: tuple[str, ...] = ()
-    capability_floors: list[dict[str, str]] = dataclasses.field(default_factory=list)
-    difficulty_score: float = 0.0
-    selection_receipt: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-
-def _session_assignment(spec: ManagedSessionSpec) -> dict[str, Any]:
-    if spec.assignment is not None:
-        return {"assignment": spec.assignment.to_record(), "assignment_sha256": spec.assignment.sha256, "unit_id": spec.assignment.unit_id}
-    if (spec.host, spec.provisioning_mode) not in {
-        (OPERATOR_HOST, "operator_existing_checkout"),
-        ("synthetic", "synthetic_no_process"),
-    }:
-        raise VerbError("unit_assignment_required", "A spawned session requires a registered assignment.")
-    return {"assignment": None, "assignment_sha256": None, "unit_id": ""}
+    # Opaque caller text, stored and reported, never parsed.
+    label: str = ""
+    # The session's working directory, used verbatim as the host cwd; nothing
+    # is created or removed in it.
+    workspace: str = ""
+    session_origin: Literal["spawned", "registered", "historical_read_only", "synthetic", "unknown"] = "unknown"
 
 
 def insert_managed_session(
@@ -238,43 +203,27 @@ def insert_managed_session(
     now = _now_iso()
     record: dict[str, Any] = {
         _COL_AGENT_INSTANCE_ID: spec.agent_instance_id,
-        "lane_id": spec.lane_id,
-        **_session_assignment(spec),
-        "work_class": spec.work_class,
-        "budget_line": spec.budget_line,
         "host": spec.host,
-        "dispatch_id": spec.dispatch_id,
         "agent_runtime": spec.agent_runtime,
         "spawned_by_instance_id": spec.spawned_by_instance_id,
         "spawned_by_role": spec.spawned_by_role,
         # W6: role_name was a ManagedSessionSpec field that this writer never
         # persisted and no caller ever passed — an inert knob. It is
         # load-bearing now (it is what the incumbent refusal names), so it is
-        # written, and local_name is derived from it exactly as spawn_session
-        # resolves it so a direct store caller cannot mint a different rule.
+        # written, and an empty local_name is derived from it.
         "role_name": spec.role_name,
-        "local_name": spec.local_name or spec.role_name or spec.lane_id,
+        "local_name": spec.local_name or spec.role_name,
         "degraded_hooks_acknowledged": spec.degraded_hooks_acknowledged,
         "visibility": spec.visibility,
         "model": spec.model,
         "effort": spec.effort,
         "capability_report": {},
         _COL_LIFECYCLE_STATE: LIFECYCLE_SPAWNING,
-        # Empty until retirement attempts teardown.  The terminal outcome is
-        # written atomically with terminated -> retired, never inferred from
-        # the lifecycle state alone.
-        "worktree_disposition": "",
         "last_transition_at": now,
         "directed_by": spec.directed_by,
-        "provisioning_mode": spec.provisioning_mode,
-        "lane_repo_root": spec.lane_repo_root,
-        "dispatch_kind": spec.dispatch_kind,
-        "reviewed_report_vendor": spec.reviewed_report_vendor,
-        "pair_id": spec.pair_id,
-        "scope_tags": list(spec.scope_tags),
-        "capability_floors": list(spec.capability_floors),
-        "difficulty_score": spec.difficulty_score,
-        "selection_receipt": dict(spec.selection_receipt),
+        "label": spec.label,
+        "workspace": spec.workspace,
+        "session_origin": spec.session_origin,
     }
     # Always persisted (even 0) — the WINDOW LENGTH itself, distinct from
     # "report_by" (the computed deadline below). This is what lets
@@ -285,9 +234,9 @@ def insert_managed_session(
     # A4 Slice 0 (measured gap, not assumed): a caller-omitted
     # report_by_seconds (0) used to leave NON-operator rows with no
     # report_by at all until their first report_alive/drive_session call —
-    # a spawn-to-first-report window invisible to sweep_overdue_sessions,
-    # which reads report_by IS NULL as "no contract" (the correct read for
-    # an operator row, which has none by design). Every non-operator host
+    # a spawn-to-first-report window with no report_by at all, which reads
+    # as "no contract" (the correct read for an operator row, which has
+    # none by design). Every non-operator host
     # now gets a contract from the moment the row is visible, defaulted to
     # the SAME fallback _rearm_report_by already uses, so the row's own
     # report_by_seconds stays self-describing for every later re-arm.
@@ -323,105 +272,6 @@ def read_managed_session(
     if not records:
         raise SessionNotFoundError(agent_instance_id)
     return records[0]
-
-
-@dataclass(frozen=True, slots=True)
-class LaneCharterSpec:
-    """The seat-captured operator charter for a lane (fleet-watch-transport-
-    migration phase 2 slice 6, design check-in ruling item 3) — driven
-    byte-exact as a spawned worker's literal first turn."""
-
-    lane_id: str
-    charter_text: str
-    captured_at: str
-    unit_id: str
-    revision_id: str
-    directed_by: str = ""
-
-
-def capture_lane_charter(
-    state: StateManagementInterface,
-    spec: LaneCharterSpec,
-) -> dict[str, Any]:
-    """Insert-only capture: ALWAYS writes a NEW ``lane_charter`` row, never
-    updates a prior one — the exact ``session_transition`` append-only
-    shape. A later charter for the same ``lane_id`` supersedes by recency
-    (:func:`resolve_lane_charter` reads the latest row by ``captured_at``
-    desc); there is no update path for ``charter_text`` anywhere in this
-    codebase, which is what makes "the stored words are write-once" true
-    rather than merely documented."""
-    if not spec.lane_id:
-        raise ValueError("capture_lane_charter requires a non-empty lane_id.")
-    if not spec.charter_text:
-        raise ValueError("capture_lane_charter requires non-empty charter_text.")
-    if not spec.unit_id or not spec.revision_id:
-        raise VerbError("unit_assignment_required", "Charter capture requires a registered Unit and revision identity.")
-    record: dict[str, Any] = {
-        "lane_id": spec.lane_id,
-        "charter_text": spec.charter_text,
-        "unit_id": spec.unit_id,
-        "revision_id": spec.revision_id,
-        "captured_at": spec.captured_at,
-        "directed_by": spec.directed_by,
-    }
-    require_completed(
-        state.write_state(
-            AGENT_ROLE_BINDING_NAMESPACE,
-            {"table": TABLE_LANE_CHARTER, "record": record},
-        ),
-        "insert lane_charter",
-    )
-    return record
-
-
-@dataclass(frozen=True, slots=True)
-class LaneCharterRecord:
-    """The latest captured charter for a lane, as :func:`resolve_lane_charter`
-    resolves it — widened beyond a bare ``charter_text`` string (2026-08-06,
-    phase-3 charter-rider provenance framing) so a caller can build the
-    provenance frame (captured_at + Unit/revision identity) around the verbatim body
-    without a second read."""
-
-    charter_text: str
-    captured_at: str
-    unit_id: str
-    revision_id: str
-
-
-def resolve_lane_charter(
-    state: StateManagementInterface,
-    lane_id: str,
-) -> LaneCharterRecord | None:
-    """The latest ``lane_charter`` row for ``lane_id``, or ``None`` if none
-    is on file (an ordinary lane with no captured charter — never a fault).
-    The ``(captured_at desc, id desc)`` order mirrors the platform's own
-    latest-row precedent (``agent_messaging/repository.py``'s peer-thread
-    lookup) — ``query_ordered``'s >=2-order-col contract forces a
-    deterministic pick among same-instant captures rather than leaving the
-    tie undefined."""
-    if not lane_id:
-        return None
-    result = state.query_ordered(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {
-            "table": TABLE_LANE_CHARTER,
-            "filters": {"lane_id": lane_id},
-            "order_by": [["captured_at", "desc"], ["id", "desc"]],
-            "limit": 1,
-        },
-    )
-    records = require_records(result)
-    if not records:
-        return None
-    row = records[0]
-    if not row.get("unit_id") or not row.get("revision_id"):
-        raise VerbError("unit_assignment_historical", "This captured charter is read-only historical evidence.")
-    return LaneCharterRecord(
-        charter_text=str(row.get("charter_text") or ""),
-        captured_at=str(row.get("captured_at") or ""),
-        unit_id=str(row["unit_id"]),
-        revision_id=str(row["revision_id"]),
-    )
 
 
 def _iter_managed_session_rows(
@@ -513,6 +363,7 @@ def iter_managed_sessions_unbounded(
     state: StateManagementInterface,
     *,
     reason: str,
+    include_deleted: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Deliberately walk the whole managed-session ledger.
 
@@ -525,7 +376,7 @@ def iter_managed_sessions_unbounded(
         raise ValueError("iter_managed_sessions_unbounded requires a non-empty reason")
     yield from _iter_managed_session_rows(
         state,
-        filters={},
+        filters={_COL_IS_DELETED: [0, 1]} if include_deleted else {},
         ceiling=_MANAGED_SESSION_WALK_CEILING,
         reason=f"{reason} {_MANAGED_SESSION_CEILING_REASON}",
     )
@@ -545,15 +396,21 @@ def list_managed_sessions(
     rows and applies that value explicitly, while the ordinary path relies on
     ``iter_table_rows``' default live-row predicate.
     """
+    return list(iter_managed_sessions(state, filters))
+
+
+def iter_managed_sessions(
+    state: StateManagementInterface,
+    filters: dict[str, Any] | None,
+) -> Iterator[dict[str, Any]]:
+    """Stream filtered, strictly decoded pages without materialising a fleet list."""
     if not filters:
         raise ManagedSessionFilterRequiredError("list_managed_sessions requires a non-empty filter; use iter_managed_sessions_unbounded with a reason for a deliberate full-ledger walk")
-    return list(
-        _iter_managed_session_rows(
-            state,
-            filters=filters,
-            ceiling=_MANAGED_SESSION_WALK_CEILING,
-            reason=_MANAGED_SESSION_CEILING_REASON,
-        )
+    return _iter_managed_session_rows(
+        state,
+        filters=filters,
+        ceiling=_MANAGED_SESSION_WALK_CEILING,
+        reason=_MANAGED_SESSION_CEILING_REASON,
     )
 
 
@@ -772,7 +629,6 @@ def persist_first_turn_evidence(
     state: StateManagementInterface,
     *,
     agent_instance_id: str,
-    dispatch_id: str,
     source: str,
     delivered: bool,
     error: str,
@@ -790,7 +646,6 @@ def persist_first_turn_evidence(
                 },
             },
             {
-                "dispatch_id": dispatch_id,
                 "first_turn_source": source,
                 "first_turn_delivered": delivered,
                 "first_turn_error": error,
@@ -835,47 +690,6 @@ def persist_session_liveness(
         raise SessionNotFoundError(agent_instance_id)
 
 
-def mark_registration_overdue(
-    state: StateManagementInterface,
-    *,
-    agent_instance_id: str,
-    reason: str,
-    observed_at: datetime,
-) -> None:
-    """W4A: stamp the registration-overdue FIELDS on a still-``spawning`` row.
-
-    Deliberately NOT a :func:`transition_lifecycle_state` call, and the
-    reasoning is the whole design call — see
-    :func:`session_sweep.sweep_unregistered_spawning_sessions`. The row is
-    still genuinely in the spawn phase AND is now registration-overdue; those
-    are two facts, and a lifecycle state can only hold one of them. A new
-    state would also have to be WRITTEN by somebody, and the defining property
-    of this failure is that nobody is home — so it would encode "the platform
-    noticed", not a lifecycle fact about the session.
-
-    Predicated on the row still being ``spawning`` so a registration or a
-    terminate landing in the race window is never overwritten with a mark that
-    is already false. Idempotent by the same predicate plus the null check in
-    the sweep: the FIRST observation's timestamp is the one that survives, so
-    the field answers "since when", not "as of the last tick".
-    """
-    state.update_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {
-            "table": TABLE_MANAGED_SESSION,
-            "filters": {
-                _COL_AGENT_INSTANCE_ID: agent_instance_id,
-                _COL_IS_DELETED: 0,
-                _COL_LIFECYCLE_STATE: LIFECYCLE_SPAWNING,
-            },
-        },
-        {
-            "registration_overdue_at": observed_at.isoformat(),
-            "registration_overdue_reason": reason,
-        },
-    )
-
-
 _OBSERVATION_FIELDS = frozenset({"host", "host_ref", "lifecycle_state", "last_transition_at", "last_heartbeat_at"})
 
 
@@ -898,6 +712,7 @@ def transition_lifecycle_state(
     reason: str = "",
     recorded_fields: Mapping[str, object] | None = None,
     expected_observation: Mapping[str, object] | None = None,
+    end_reason: str | None = None,
 ) -> None:
     """Predicated ``lifecycle_state`` write (§3.2 matrix) + the AMEND-2a
     append-only audit insert. Raises :class:`IllegalLifecycleTransitionError`
@@ -905,9 +720,17 @@ def transition_lifecycle_state(
     :class:`StaleLifecycleStateError` (legal edge, lost the CAS race — the
     ledger write itself, not the audit insert, is what raises). A successful
     call has ALREADY inserted the audit row when it returns.
+
+    ``end_reason`` is the typed reason an ended record carries (see
+    :mod:`session_end_reason`). It is written in the same predicated update that
+    moves the record to terminated, and a terminal move that names none stores
+    ``unknown``. Naming one on any other move, or naming a value outside
+    ``END_REASONS``, raises ``ValueError`` before anything is written.
     """
     if to_state not in LIFECYCLE_TRANSITIONS.get(from_state, frozenset()):
         raise IllegalLifecycleTransitionError(from_state, to_state)
+    if end_reason is not None and to_state != LIFECYCLE_TERMINATED:
+        raise ValueError(f"end_reason is written only with a move to {LIFECYCLE_TERMINATED}, not {to_state}")
     now = _now_iso()
     transition_record: dict[str, object] = {
         _COL_LIFECYCLE_STATE: to_state,
@@ -916,6 +739,8 @@ def transition_lifecycle_state(
     }
     if recorded_fields:
         transition_record.update(recorded_fields)
+    if to_state == LIFECYCLE_TERMINATED:
+        transition_record["end_reason"] = require_end_reason(end_reason or UNKNOWN)
     updated = require_updated(
         state.update_state(
             AGENT_ROLE_BINDING_NAMESPACE,
@@ -950,851 +775,22 @@ def transition_lifecycle_state(
     )
 
 
-# Coordination-efficiency contract validation and supervision live beside the
-# lifecycle persistence they govern. Imports of the dispatch state machine stay
-# call-local so that state machine can use this module's row primitives without
-# a module cycle.
-_DISPATCH_EVIDENCE_STATUSES = frozenset({"pass", "fail", "skipped", "not_applicable"})
-_DISPATCH_SKIP_STATUSES = frozenset({"skipped", "not_applicable"})
-
-
-def _dispatch_text(value: object, field: str) -> str:
-    from .managed_dispatch import _require_text  # noqa: PLC0415
-
-    return _require_text(value, field)
-
-
-def _dispatch_error(code: str, message: str) -> Exception:
-    from .managed_dispatch import DispatchError  # noqa: PLC0415
-
-    return DispatchError(code, message)
-
-
-def _completion_obligation(item: object) -> tuple[str, frozenset[str]]:
-    if not isinstance(item, Mapping):
-        raise _dispatch_error(
-            "completion_contract_invalid",
-            "Each completion evidence obligation must be an object.",
-        )
-    evidence_id = _dispatch_text(item.get("id"), "completion_evidence_id")
-    allowed = item.get("allowed_statuses")
-    if not isinstance(allowed, list) or not allowed:
-        raise _dispatch_error(
-            "completion_contract_invalid",
-            f"Evidence obligation {evidence_id!r} needs allowed_statuses.",
-        )
-    statuses = frozenset(str(value) for value in allowed)
-    if not statuses <= _DISPATCH_EVIDENCE_STATUSES:
-        raise _dispatch_error(
-            "completion_contract_invalid",
-            f"Evidence obligation {evidence_id!r} has invalid statuses.",
-        )
-    return evidence_id, statuses
-
-
-def _validate_completion_verdicts(contract: Mapping[str, Any]) -> None:
-    verdicts = contract.get("allowed_verdicts")
-    if not isinstance(verdicts, list) or not verdicts or not all(isinstance(value, str) and value.strip() for value in verdicts):
-        raise _dispatch_error(
-            "completion_contract_invalid",
-            "completion_contract.allowed_verdicts must be a non-empty string list.",
-        )
-
-
-def completion_obligations(
-    contract: Mapping[str, Any],
-) -> dict[str, frozenset[str]]:
-    raw = contract.get("evidence_obligations")
-    if not isinstance(raw, list) or not raw:
-        raise _dispatch_error(
-            "completion_contract_invalid",
-            "completion_contract.evidence_obligations must be a non-empty list.",
-        )
-    obligations: dict[str, frozenset[str]] = {}
-    for item in raw:
-        evidence_id, statuses = _completion_obligation(item)
-        if evidence_id in obligations:
-            raise _dispatch_error(
-                "completion_contract_invalid",
-                f"Duplicate completion evidence obligation {evidence_id!r}.",
-            )
-        obligations[evidence_id] = statuses
-    _validate_completion_verdicts(contract)
-    return obligations
-
-
-def validate_completion_evidence(
-    contract: Mapping[str, Any],
-    evidence: object,
-    verdict: object,
-    *,
-    prefix: str,
-) -> dict[str, Any]:
-    obligations = completion_obligations(contract)
-    if not isinstance(evidence, Mapping):
-        raise _dispatch_error(
-            f"{prefix}_evidence_required",
-            "Structured evidence is required.",
-        )
-    missing = sorted(set(obligations) - set(evidence))
-    if missing:
-        raise _dispatch_error(
-            f"{prefix}_evidence_incomplete",
-            f"Missing completion evidence obligations: {missing}.",
-        )
-    normalized: dict[str, Any] = {}
-    for evidence_id, allowed in obligations.items():
-        item = evidence[evidence_id]
-        if not isinstance(item, Mapping):
-            raise _dispatch_error(
-                f"{prefix}_evidence_invalid",
-                f"Evidence {evidence_id!r} must be an object.",
-            )
-        status = _dispatch_text(item.get("status"), f"{evidence_id}_status")
-        if status not in allowed:
-            raise _dispatch_error(
-                f"{prefix}_evidence_status_invalid",
-                f"Evidence {evidence_id!r} status {status!r} is not allowed.",
-            )
-        if status in _DISPATCH_SKIP_STATUSES:
-            _dispatch_text(item.get("reason"), f"{evidence_id}_reason")
-        normalized[evidence_id] = dict(item)
-    verdict_text = _dispatch_text(verdict, "verdict")
-    if verdict_text not in {str(value) for value in contract["allowed_verdicts"]}:
-        raise _dispatch_error(
-            f"{prefix}_verdict_invalid",
-            "Verdict is outside the contract.",
-        )
-    return normalized
-
-
-_REQUIRED_DISPATCH_SPEC_TEXT = (
-    "dispatch_id",
-    "lane_id",
-    "role_name",
-    "role_class",
-    "work_class",
-    "budget_line",
-    "unit_id",
-    "dispatch_kind",
-    "expected_path",
-    "model",
-    "effort",
-    "agent_runtime",
-    "host",
-    "visibility",
-    "local_name",
-    "permission_mode",
-    "transport",
-    "spawned_by_instance_id",
-    "spawned_by_role",
-    "directed_by",
-    "uptake_due_at",
-    "report_by",
-    "watchdog_due_at",
-)
-
-
-def _validate_required_dispatch_spec(spec: Any) -> None:
-    for field in _REQUIRED_DISPATCH_SPEC_TEXT:
-        _dispatch_text(getattr(spec, field), field)
-    if not spec.completion_contract:
-        raise _dispatch_error(
-            "completion_contract_required",
-            "completion_contract is required.",
-        )
-    completion_obligations(spec.completion_contract)
-    if not spec.allowed_hosts:
-        raise _dispatch_error("allowed_hosts_required", "allowed_hosts is required.")
-    if spec.report_by_seconds < 0:
-        raise _dispatch_error(
-            "spawn_window_invalid",
-            "Spawn report windows cannot be negative.",
-        )
-
-
-def _validate_dispatch_digest(value: str, field: str) -> None:
-    if len(value) != 64:
-        raise _dispatch_error(
-            f"{field}_invalid",
-            f"{field} must be a SHA-256 hex digest.",
-        )
-    try:
-        int(value, 16)
-    except ValueError as exc:
-        raise _dispatch_error(
-            f"{field}_invalid",
-            f"{field} must be a SHA-256 hex digest.",
-        ) from exc
-
-
-def _validate_dispatch_deadlines(spec: Any, now: datetime) -> None:
-    deadlines = {field: _dispatch_deadline({field: getattr(spec, field)}, field) for field in ("uptake_due_at", "report_by", "watchdog_due_at")}
-    if any(value <= now for value in deadlines.values()):
-        raise _dispatch_error(
-            "deadline_not_future",
-            "Every dispatch deadline must be future.",
-        )
-
-
-def validate_dispatch_spec(spec: Any, now: datetime) -> None:
-    _validate_required_dispatch_spec(spec)
-    _validate_dispatch_deadlines(spec, now)
-
-
-# Coordination-efficiency supervision lives beside the lifecycle persistence
-# it reconciles. Imports of the dispatch state machine stay call-local so the
-# state machine can use this module's row primitives without a module cycle.
-_MANAGED_DISPATCH_WALK_CEILING = 1_000_000
-_SupervisionCondition = tuple[str, str, str]
-
-
-def _dispatch_deadline(row: Mapping[str, Any], field: str) -> datetime:
-    from .managed_dispatch import _parse_persisted_utc  # noqa: PLC0415
-
-    return _parse_persisted_utc(row[field], field)
-
-
-def _failed_start_dispatch_condition(row: Mapping[str, Any], _now: datetime) -> _SupervisionCondition | None:
-    if str(row["state"]) == "failed_start":
-        return (
-            "failed_start_decision_required",
-            "decide_retry_or_cancel",
-            str(row["spawned_by_role"]),
-        )
-    return None
-
-
-def _unknown_liveness_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
-    if str(row.get("host_liveness") or "") != "unknown":
-        return None
-    escalation = str(row.get("liveness_escalation_due_at") or "")
-    if escalation and now >= _dispatch_deadline(
-        {"liveness_escalation_due_at": escalation},
-        "liveness_escalation_due_at",
-    ):
-        return (
-            "liveness_unknown_escalation",
-            "investigate_or_decide_retry",
-            str(row["spawned_by_role"]),
-        )
-    next_probe = str(row.get("next_liveness_probe_at") or "")
-    if next_probe and now >= _dispatch_deadline(
-        {"next_liveness_probe_at": next_probe},
-        "next_liveness_probe_at",
-    ):
-        return (
-            "liveness_reprobe_due",
-            "reprobe_current_attempt",
-            str(row["spawned_by_role"]),
-        )
-    return None
-
-
-def _watchdog_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
-    if str(row["state"]) != "active":
-        return None
-    if row.get("watchdog_fired_at"):
-        return None
-    if now >= _dispatch_deadline(row, "watchdog_due_at"):
-        return (
-            "watchdog_overdue",
-            "perform_watchdog_review",
-            str(row["spawned_by_role"]),
-        )
-    return None
-
-
-def _blocker_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
-    if str(row["state"]) == "blocked_internal" and row.get("decision_due_at") and now >= _dispatch_deadline(row, "decision_due_at"):
-        return (
-            "blocker_decision_overdue",
-            "resolve_internal_blocker",
-            str(row["blocker_owner"]),
-        )
-    return None
-
-
-def _completion_dispatch_condition(row: Mapping[str, Any], _now: datetime) -> _SupervisionCondition | None:
-    if str(row["state"]) == "completion_reported":
-        return (
-            "completion_acceptance_pending",
-            "validate_and_accept_completion",
-            str(row["spawned_by_role"]),
-        )
-    return None
-
-
-def _uptake_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
-    if str(row["state"]) in {
-        "preparing",
-        "uptake_pending",
-        "uptake_uncertain",
-    } and now >= _dispatch_deadline(row, "uptake_due_at"):
-        return (
-            "uptake_overdue",
-            "decide_uptake_recovery",
-            str(row["spawned_by_role"]),
-        )
-    return None
-
-
-def _milestone_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
-    if str(row["state"]) == "active" and now >= _dispatch_deadline(row, "report_by"):
-        return (
-            "milestone_overdue",
-            "request_worker_milestone",
-            str(row["spawned_by_role"]),
-        )
-    return None
-
-
-_DISPATCH_CONDITION_DETECTORS = (
-    _failed_start_dispatch_condition,
-    _unknown_liveness_dispatch_condition,
-    _blocker_dispatch_condition,
-    _completion_dispatch_condition,
-    _uptake_dispatch_condition,
-    _milestone_dispatch_condition,
-    _watchdog_dispatch_condition,
-)
-
-
-def managed_dispatch_condition(row: Mapping[str, Any], now: datetime) -> _SupervisionCondition | None:
-    conditions = _managed_dispatch_conditions(row, now)
-    return conditions[0] if conditions else None
-
-
-def _managed_dispatch_conditions(row: Mapping[str, Any], now: datetime) -> tuple[_SupervisionCondition, ...]:
-    # Pre-assignment rows are read-only historical inventory, never resumed.
-    if not row.get("assignment"):
-        return ()
-    terminal_states = {"completed", "cancelled", "expired", "failed_start"}
-    if str(row["state"]) in terminal_states - {"failed_start"}:
-        return ()
-    conditions: list[_SupervisionCondition] = []
-    for detector in _DISPATCH_CONDITION_DETECTORS:
-        condition = detector(row, now)
-        if condition is None:
-            continue
-        conditions.append(condition)
-        if condition[0] == "failed_start_decision_required":
-            return (condition,)
-    return tuple(conditions)
-
-
-def _all_managed_dispatch_rows(
-    state: StateManagementInterface,
-) -> list[dict[str, Any]]:
-    return list(
-        iter_table_rows(
-            state,
-            namespace=AGENT_ROLE_BINDING_NAMESPACE,
-            table=TABLE_MANAGED_DISPATCH,
-            filters={},
-            ceiling=_MANAGED_DISPATCH_WALK_CEILING,
-            reason="managed dispatch supervisor must evaluate every owed row",
-        )
-    )
-
-
-def _apply_dispatch_supervision_condition(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-    *,
-    condition: _SupervisionCondition,
-    clock: datetime,
-) -> tuple[dict[str, Any], bool]:
-    from .managed_dispatch import (  # noqa: PLC0415
-        _find_event,
-        _update_dispatch,
-        _write_event,
-    )
-
-    name, action, owner = condition
-    if name == "milestone_overdue":
-        # Watchdog bookkeeping advances ``version`` without changing the
-        # milestone episode.  Only attempt/report progress may re-key it.
-        event_id = ":".join(
-            (
-                "supervision",
-                name,
-                str(int(row["attempt_number"])),
-                _dispatch_deadline(row, "report_by").isoformat(),
-                str(row.get("last_milestone_at") or "initial"),
-            )
-        )
-    else:
-        event_id = f"supervision:{name}:{int(row['version'])}"
-    notice_emitted = _find_event(state, str(row["dispatch_id"]), event_id) is None
-    current = dict(row)
-    if name == "watchdog_overdue":
-        current = _update_dispatch(
-            state,
-            row,
-            {
-                "watchdog_fired_at": clock.isoformat(),
-                "next_required_action": action,
-                "responsible_role": owner,
-            },
-        )
-    if notice_emitted:
-        _write_event(
-            state,
-            dispatch_id=str(current["dispatch_id"]),
-            event_id=event_id,
-            event_kind="supervision_notice",
-            attempt_agent_instance_id=str(current.get("current_agent_instance_id") or ""),
-            actor_role="platform-supervisor",
-            actor_instance_id="",
-            prior_version=(int(current["version"]) - 1 if name == "watchdog_overdue" else int(current["version"])),
-            observed_at=clock,
-            payload={
-                "condition": name,
-                "next_required_action": action,
-                "responsible_role": owner,
-            },
-            accepted=True,
-        )
-    return current, notice_emitted
-
-
-def _supervision_projections(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-    *,
-    clock: datetime,
-) -> list[tuple[dict[str, Any], bool]]:
-    conditions = _managed_dispatch_conditions(row, clock)
-    if not conditions:
-        return []
-
-    current = dict(row)
-    applied: dict[str, tuple[dict[str, Any], bool]] = {}
-    application_order = sorted(
-        conditions,
-        key=lambda condition: condition[0] != "watchdog_overdue",
-    )
-    for condition in application_order:
-        current, notice_emitted = _apply_dispatch_supervision_condition(
-            state,
-            current,
-            condition=condition,
-            clock=clock,
-        )
-        name, action, owner = condition
-        applied[name] = (
-            {
-                "dispatch_id": str(current["dispatch_id"]),
-                "condition": name,
-                "next_required_action": action,
-                "responsible_role": owner,
-                "notice_emitted": notice_emitted,
-                "state": str(current["state"]),
-            },
-            notice_emitted,
-        )
-    return [applied[condition[0]] for condition in conditions]
-
-
-def _claim_version(value: Any) -> int:
-    if type(value) is not int or value < 0:
-        raise ValueError("version and attempt_number must be nonnegative integers")
-    return value
-
-
-def _claim_time(value: Any) -> datetime:
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str):
-        parsed = datetime.fromisoformat(value)
-    else:
-        raise ValueError("claim time must be an aware timestamp")
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("claim time must be timezone-aware")
-    return parsed.astimezone(UTC)
-
-
-def _claim_evidence(
-    baseline: Mapping[str, Any],
-    event: Mapping[str, Any],
-    outcome: Mapping[str, Any],
-    requested_at: Any,
-) -> list[str]:
-    """Compare only stored receipt evidence to the caller-held request baseline."""
-    event_at = _claim_time(event["event_at"])
-    milestone_at = _claim_time(outcome["last_milestone_at"])
-    previous_at = baseline["last_milestone_at"]
-    version = _claim_version(baseline["version"])
-    checks = {
-        "event_before_request": event_at >= _claim_time(requested_at),
-        "event_prior_version_before_baseline": _claim_version(event["prior_version"]) >= version,
-        "outcome_version_not_advanced": _claim_version(outcome["version"]) > version,
-        "outcome_milestone_time_mismatch": milestone_at == event_at,
-        "milestone_time_not_advanced": previous_at is None or milestone_at > _claim_time(previous_at),
-        "report_deadline_not_advanced": _claim_time(outcome["report_by"]) > _claim_time(baseline["report_by"]),
-    }
-    return [reason for reason, passed in checks.items() if not passed]
-
-
-def _claim_attempt_reasons(
-    row: Mapping[str, Any],
-    baseline: Mapping[str, Any],
-    event: Mapping[str, Any],
-    outcome: Mapping[str, Any],
-) -> list[str]:
-    instance = row["current_agent_instance_id"]
-    checks = {
-        "baseline_dispatch_mismatch": baseline["dispatch_id"] == row["dispatch_id"],
-        "baseline_attempt_superseded": baseline["current_agent_instance_id"] == instance,
-        "baseline_attempt_number_mismatch": _claim_version(baseline["attempt_number"]) == row["attempt_number"],
-        "event_dispatch_mismatch": event["dispatch_id"] == row["dispatch_id"],
-        "event_attempt_mismatch": event["attempt_agent_instance_id"] == instance,
-        "event_actor_mismatch": event["actor_instance_id"] == instance,
-        "outcome_dispatch_mismatch": outcome["dispatch_id"] == row["dispatch_id"],
-        "outcome_attempt_mismatch": outcome["current_agent_instance_id"] == instance,
-        "outcome_attempt_number_mismatch": _claim_version(outcome["attempt_number"]) == row["attempt_number"],
-    }
-    return [reason for reason, passed in checks.items() if not passed]
-
-
-def _claim_text(value: Any) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError("claim identity must be nonempty text")
-    return value
-
-
-def _claim_baseline(claim: Any) -> tuple[Mapping[str, Any], str]:
-    if not isinstance(claim, Mapping) or not isinstance(claim.get("baseline"), Mapping):
-        raise ValueError("claim and baseline must be objects")
-    baseline = claim["baseline"]
-    _claim_version(baseline["version"])
-    _claim_version(baseline["attempt_number"])
-    _claim_time(baseline["report_by"])
-    _claim_time(claim["requested_at"])
-    if baseline["last_milestone_at"] is not None:
-        _claim_time(baseline["last_milestone_at"])
-    _claim_text(baseline["current_agent_instance_id"])
-    _claim_text(baseline["dispatch_id"])
-    return baseline, _claim_text(claim["event_id"])
-
-
-def _claim_event_identity(event: Mapping[str, Any]) -> list[str]:
-    reasons: list[str] = []
-    if event.get("accepted") is not True:
-        reasons.append("event_not_accepted")
-    if event.get("event_kind") != "milestone":
-        reasons.append("event_not_milestone")
-    return reasons
-
-
-def verify_milestone_claim(
-    row: Mapping[str, Any],
-    events: list[dict[str, Any]],
-    claim: Any,
-) -> dict[str, Any]:
-    """Read-only advisory; immutable accepted outcomes alone can prove satisfaction."""
-    result: dict[str, Any] = {
-        "status": "unverifiable",
-        "reasons": [],
-        "advisory": True,
-        "request": claim,
-        "event": None,
-        "post_transition": None,
-        "current": {
-            "version": row.get("version"),
-            "report_by": row.get("report_by"),
-            "last_milestone_at": row.get("last_milestone_at"),
-            "current_agent_instance_id": row.get("current_agent_instance_id"),
-            "attempt_number": row.get("attempt_number"),
-        },
-    }
-    if row.get("assignment") is None:
-        result["reasons"] = ["historical_assignment"]
-        return result
-    try:
-        baseline, event_id = _claim_baseline(claim)
-        event = next((event for event in events if event.get("event_id") == event_id), None)
-        result["event"] = event
-        if event is None:
-            result.update(status="mismatch", reasons=["event_not_found"])
-            return result
-        identity_reasons = _claim_event_identity(event)
-        if identity_reasons:
-            result.update(status="mismatch", reasons=identity_reasons)
-            return result
-        payload = event.get("payload")
-        outcome = payload.get("_managed_dispatch_accepted_outcome") if isinstance(payload, Mapping) else None
-        if not isinstance(outcome, Mapping):
-            result["reasons"] = ["accepted_outcome_missing"]
-            return result
-        result["post_transition"] = dict(outcome)
-        reasons = _claim_attempt_reasons(row, baseline, event, outcome)
-        reasons.extend(_claim_evidence(baseline, event, outcome, claim["requested_at"]))
-        result.update(status="mismatch" if reasons else "satisfied", reasons=reasons, advisory=bool(reasons))
-    except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        result.update(status="unverifiable", reasons=["malformed_claim_or_receipt"], detail=str(exc))
-    return result
-
-
-def native_managed_dispatch_status(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-    clock: datetime,
-    *,
-    milestone_claim: Any = None,
-) -> dict[str, Any]:
-    from .managed_dispatch import DISPATCH_TERMINAL_STATES, _parse_persisted_utc  # noqa: PLC0415
-    from .managed_dispatch_bridge import all_managed_dispatch_events  # noqa: PLC0415
-    from .session_lifecycle_verbs import dispatch_event_age_seconds  # noqa: PLC0415
-
-    events = all_managed_dispatch_events(state, str(row["dispatch_id"]))
-    condition = managed_dispatch_condition(row, clock)
-    aggregate = dict(row)
-    deadline_overdue = {name: clock >= _parse_persisted_utc(row[name], name) for name in ("uptake_due_at", "report_by", "watchdog_due_at")}
-    aggregate.update(
-        {
-            "state": str(row["state"]),
-            "ledger_state": str(row["state"]),
-            "state_consistent": str(row.get("host_liveness") or "unknown") != "dead" or str(row["state"]) in DISPATCH_TERMINAL_STATES,
-            "rejected_event_count": sum(not bool(event.get("accepted")) for event in events),
-            "event_count": len(events),
-            "raw_receipts": [event for event in events if event.get("event_kind") == "first_turn"],
-            "deadline_overdue": deadline_overdue,
-            "last_ack_age_seconds": dispatch_event_age_seconds(row.get("last_ack_at"), clock),
-            "last_milestone_age_seconds": dispatch_event_age_seconds(row.get("last_milestone_at"), clock),
-            "plan_projection_warning": ("human coordinator plans are unverified projections; durable dispatch state and append-only events remain authoritative"),
-        },
-    )
-    if condition is not None:
-        aggregate["overdue_condition"] = condition[0]
-        aggregate["next_required_action"] = condition[1]
-        aggregate["responsible_role"] = condition[2]
-    if milestone_claim is not None:
-        aggregate["milestone_claim_verification"] = verify_milestone_claim(row, events, milestone_claim)
-    return aggregate
-
-
-def supervise_managed_dispatches(
-    state: StateManagementInterface,
-    *,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Evaluate every dispatch while isolating malformed persisted rows."""
-    from .managed_dispatch import DispatchError  # noqa: PLC0415
-
-    clock = (now or datetime.now(UTC)).astimezone(UTC)
-    conditions: list[dict[str, Any]] = []
-    malformed_rows: list[dict[str, str]] = []
-    notices_emitted = 0
-    rows = _all_managed_dispatch_rows(state)
-    for row in rows:
-        try:
-            projections = _supervision_projections(state, row, clock=clock)
-        except (DispatchError, KeyError, TypeError, ValueError) as exc:
-            malformed_rows.append(
-                {
-                    "dispatch_id": str(row.get("dispatch_id") or ""),
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            logger.error(
-                "managed dispatch row %s is malformed; continuing sweep: %s",
-                row.get("dispatch_id"),
-                exc,
-            )
-            continue
-        for condition, emitted in projections:
-            conditions.append(condition)
-            notices_emitted += int(emitted)
-    return {
-        "evaluated": len(rows),
-        "conditions": conditions,
-        "notices_emitted": notices_emitted,
-        "malformed_rows": malformed_rows,
-    }
-
-
-def _probe_managed_attempt(row: Mapping[str, Any]) -> tuple[str, str]:
-    """Return alive/dead/unknown; unsupported or faulted probes are unknown."""
-    host_ref = str(row.get("host_ref") or "")
-    if not host_ref:
-        return "unknown", "host_ref unavailable"
-    try:
-        driver, _resolved_host = resolve_host_driver(
-            str(row.get("host") or ""),
-            str(row.get("agent_runtime") or DEFAULT_AGENT_RUNTIME),
-        )
-        alive = driver.alive(host_ref)
-    except Exception as exc:  # noqa: BLE001 — probe faults are unknown, never dead
-        return "unknown", f"{type(exc).__name__}: {exc}"
-    if alive:
-        return "alive", "driver.alive returned true"
-    return "dead", "driver.alive returned false"
-
-
-def _reconcile_managed_attempt(
-    state: StateManagementInterface,
-    row: Mapping[str, Any],
-    *,
-    now: datetime,
-    register: RegisterUnitClient | None,
-) -> str:
-    from .managed_dispatch import (  # noqa: PLC0415
-        DispatchError,
-        mark_dispatch_worker_lost,
-        record_dispatch_liveness,
-    )
-
-    agent_instance_id = str(row.get("agent_instance_id") or "")
-    dispatch_id = str(row.get("dispatch_id") or "")
-    liveness, detail = _probe_managed_attempt(row)
-    persist_session_liveness(
-        state,
-        agent_instance_id=agent_instance_id,
-        liveness=liveness,
-        detail=detail,
-        observed_at=now,
-    )
-    try:
-        record_dispatch_liveness(
-            state,
-            dispatch_id=dispatch_id,
-            liveness=liveness,
-            detail=detail,
-            observed_at=now,
-        )
-    except DispatchError as exc:
-        logger.info(
-            "managed dispatch %s liveness projection skipped for %s: %s",
-            dispatch_id,
-            agent_instance_id,
-            exc,
-        )
-        return liveness
-    if liveness != "dead":
-        return liveness
-    try:
-        transition_lifecycle_state(
-            state,
-            agent_instance_id=agent_instance_id,
-            from_state=str(row.get("lifecycle_state") or ""),
-            to_state=LIFECYCLE_TERMINATED,
-            directed_by="platform:managed_dispatch_supervisor",
-            reason="native host definitively absent",
-        )
-    except StaleLifecycleStateError:
-        logger.info(
-            "managed attempt %s lost its host-death transition race",
-            agent_instance_id,
-        )
-    try:
-        mark_dispatch_worker_lost(
-            state,
-            dispatch_id=dispatch_id,
-            agent_instance_id=agent_instance_id,
-            observed_at=now,
-            detail=detail,
-            register=register,
-        )
-    except DispatchError as exc:
-        logger.info(
-            "managed dispatch %s host-death transition skipped: %s",
-            dispatch_id,
-            exc,
-        )
-    return liveness
-
-
-def sweep_managed_dispatches(
-    state: StateManagementInterface,
-    *,
-    register: RegisterUnitClient | None,
-    peer_registry: PeerRegistry | None = None,
-    bridge_manager: BridgeSessionManager | None = None,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Reconcile every nonterminal attempt, then supervise every dispatch."""
-    from .managed_dispatch import EVENT_MANAGED_DISPATCH_NOTICE  # noqa: PLC0415
-    from .session_lifecycle_verbs import (  # noqa: PLC0415
-        notify_steward_of_managed_dispatch,
-    )
-
-    clock = (now or datetime.now(UTC)).astimezone(UTC)
-    counts = {"alive": 0, "dead": 0, "unknown": 0}
-    evaluated = 0
-    notices_delivered = 0
-    for lifecycle_state in (
-        LIFECYCLE_SPAWNING,
-        LIFECYCLE_LIVE,
-        LIFECYCLE_IDLE,
-        LIFECYCLE_OVERDUE,
-        LIFECYCLE_PARKED,
-    ):
-        for row in list_managed_sessions(state, {"lifecycle_state": lifecycle_state}):
-            if not row.get("dispatch_id"):
-                continue
-            evaluated += 1
-            outcome = _reconcile_managed_attempt(state, row, now=clock, register=register)
-            counts[outcome] += 1
-            if outcome == "dead" and notify_steward_of_managed_dispatch(
-                state,
-                peer_registry=peer_registry,
-                bridge_manager=bridge_manager,
-                dispatch_id=str(row["dispatch_id"]),
-                condition="worker_lost",
-                next_required_action="decide_retry_or_cancel",
-                event_type=EVENT_MANAGED_DISPATCH_NOTICE,
-            ):
-                notices_delivered += 1
-    supervision = supervise_managed_dispatches(state, now=clock)
-    for condition in supervision["conditions"]:
-        if condition["notice_emitted"] and notify_steward_of_managed_dispatch(
-            state,
-            peer_registry=peer_registry,
-            bridge_manager=bridge_manager,
-            dispatch_id=str(condition["dispatch_id"]),
-            condition=str(condition["condition"]),
-            next_required_action=str(condition["next_required_action"]),
-            event_type=EVENT_MANAGED_DISPATCH_NOTICE,
-        ):
-            notices_delivered += 1
-    return {
-        "attempts_evaluated": evaluated,
-        **counts,
-        "dispatches_evaluated": supervision["evaluated"],
-        "conditions": supervision["conditions"],
-        "notices_emitted": supervision["notices_emitted"],
-        "notices_delivered": notices_delivered,
-    }
-
-
 __all__ = [
-    "_validate_dispatch_digest",
     "IllegalLifecycleTransitionError",
-    "LaneCharterRecord",
-    "LaneCharterSpec",
     "ManagedSessionFilterRequiredError",
     "ManagedSessionSpec",
     "SessionNotFoundError",
     "StaleLifecycleStateError",
     "backfill_registration",
-    "capture_lane_charter",
-    "completion_obligations",
     "format_directed_by",
     "insert_managed_session",
+    "iter_managed_sessions",
     "iter_managed_sessions_unbounded",
     "list_managed_sessions",
     "list_managed_sessions_bounded",
-    "managed_dispatch_condition",
     "persist_first_turn_evidence",
     "persist_session_liveness",
     "read_managed_session",
-    "resolve_lane_charter",
     "set_host_ref",
-    "supervise_managed_dispatches",
-    "sweep_managed_dispatches",
     "transition_lifecycle_state",
-    "validate_completion_evidence",
-    "validate_dispatch_spec",
 ]

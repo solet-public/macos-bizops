@@ -8,20 +8,20 @@ Article Tags: planning-stage:post-approval, planning-stage:wbs-execution, eviden
 
 
 JOSEKI_KEY: request_scoped_landing
-DESCRIPTION: The requester's half of a Git-Controller landing in a shared, dirty checkout: write the lane's evidence record, derive the touched-file list from read-only git status in the spellings git actually tracks, run the pre-handoff gate sweep, send ONE landing request carrying a proposed branch name, the full commit message, the exact file scope, an explicit scoped-staging instruction and a quiescence attestation — then verify the landing independently with ancestor checks instead of believing the reply. Use whenever a session that is not Git-Controller has finished work that must reach master. Not for Git-Controller's own side of the exchange, which is its own gate-and-commit procedure, and not a way to mutate git yourself.
+DESCRIPTION: The requester's half of a Git-Controller landing in the platform's own development checkout (another solet has no Git-Controller; its repository owns its own landing rules), in a shared, dirty checkout: write the lane's evidence record, derive the touched-file list from read-only git status in the spellings git actually tracks, run the pre-handoff gate sweep, send ONE landing request carrying a proposed branch name, the full commit message, the exact file scope, an explicit scoped-staging instruction and a quiescence attestation — then verify the landing independently with ancestor checks instead of believing the reply. Use whenever a session that is not Git-Controller has finished work that must reach master. Not for Git-Controller's own side of the exchange, which is its own gate-and-commit procedure, and not a way to mutate git yourself.
 EMBEDDING_DESCRIPTION: Hand finished work to the Git-Controller session for committing and merging, when many sessions share one working tree and other sessions' unrelated edits are dirty in it at the same time. Write the evidence record, list exactly which files you touched using the path spellings git tracks rather than a symlinked spelling, run the quality gates before asking, then send one request naming the branch, the commit message, the file scope, an instruction to stage only those named files, and confirmation that nobody else is editing them. Afterwards prove the work really reached the main branch by checking that both the commit and its merge are ancestors of it, and by reading back which files were actually staged.
 
 ## Input Contract
 
 - A finished, quiescent unit of work whose edits are confined to the lane's own declared file surface
 - A shared checkout in which other sessions' unrelated edits may be dirty at the same time, and in which only the Git-Controller session may mutate git
-- A live role binding for `Git-Controller` that a role-addressed send can resolve
+- In the platform's own development checkout, a live role binding for `Git-Controller` that a role-addressed send can resolve
 - Bindings: evidence_record_path, branch_name, commit_message, file_scope, landing_request
 
 ## Output Contract
 
 - A workbench evidence record the landing request cites, carrying what changed, what was measured, and what was deliberately not done
-- One landing request delivered to the current holder of the `Git-Controller` role, carrying branch name, commit message, scope summary, the exact file list, the scoped-staging instruction, and the quiescence attestation
+- In the platform's own development checkout, one landing request delivered to the current holder of the `Git-Controller` role, carrying branch name, commit message, scope summary, the exact file list, the scoped-staging instruction, and the quiescence attestation
 - An independently measured landing verdict: the commit AND its merge confirmed as ancestors of the main branch, plus the actually-staged file set read back from the commit — recorded on the run flow, not inferred from the reply
 
 ## Sequence
@@ -50,7 +50,7 @@ EMBEDDING_DESCRIPTION: Hand finished work to the Git-Controller session for comm
 
 ## Binding Guidance
 
-- Bind `evidence_record_path` to the artifact written in step 1 and cite it inside `landing_request`; a request with no citable record forces Git-Controller to reconstruct scope from prose.
+- Bind `evidence_record_path` to the artifact written in step 1 and cite it inside `landing_request`; a request with no citable record forces the platform's own development checkout's Git-Controller to reconstruct scope from prose.
 - Bind `file_scope` to step 2's derived list, in TRACKED spellings only. Where a repository path is reachable through a symlinked directory, the symlinked spelling returns EMPTY from `git status` and `git log`: a file listed that way is silently dropped from a scoped landing, and the drop is invisible in the reply.
 - Bind `branch_name` to a fresh `feature/<descriptive>` or `fix/<descriptive>` name. Git-Controller's procedure asks the requester for it and pings back when it is missing, so omitting it costs a round trip.
 - Bind `commit_message` to the complete multi-line message including its "Why" body. The requester owns the message; Git-Controller does not compose one.
@@ -66,7 +66,7 @@ EMBEDDING_DESCRIPTION: Hand finished work to the Git-Controller session for comm
 - The staged-set read-back is the other half of that verification: an ancestor-true commit can still carry the wrong files, either because a path was written in a spelling git does not track or because staging was wider than the request. Confirm what was actually committed, not only that something was.
 - A file that carries another lane's in-flight edits is not landable by scope alone. Name it in the request as shared, say whose edits are in it, and hold: either the other lane lands first and this lane rebases its own edit on top, or the request waits for a named go from the session that owns the other edits. A relayed or paraphrased go is not a go.
 - The requester never mutates git. Read-only inspection is the whole permitted surface for this card; a gate red, a missing branch, or a failed ancestor check is fixed by editing files and re-requesting, never by staging, committing, branching, or resetting locally.
-- A green pre-handoff sweep does not authorize the commit. It is a snapshot of the whole tree — on a dirty shared checkout it also reports other lanes' work — and Git-Controller re-runs the gates regardless. Send the verdicts as context, not as a claim of authorization.
+- A green pre-handoff sweep does not authorize the commit. It is a snapshot of the whole tree — on a dirty shared checkout it also reports other lanes' work — and in the platform's own development checkout Git-Controller re-runs the gates regardless. Send the verdicts as context, not as a claim of authorization.
 
 ## Next Joseki
 
@@ -74,4 +74,4 @@ Explicitly absent as a single successor — a verified landing hands off to what
 
 ## Repair Joseki
 
-Explicitly absent as a card. Each failure has a different owner and none of them is a retry of step 4. A gate red reported back by Git-Controller is the requester's to fix in the working tree, then re-request with the same branch name. A request declined for missing inputs is completed and re-sent, not escalated. A landing that reports success but fails step 5's ancestor check is NOT re-requested blind: re-read which shas the reply actually named, confirm the role holder that answered, and resolve the discrepancy before any second request — a duplicate request against a partially applied landing is how one change becomes two divergent commits.
+Explicitly absent as a card. Each failure has a different owner and none of them is a retry of step 4. A gate red reported back by Git-Controller (in the platform's own development checkout) is the requester's to fix in the working tree, then re-request with the same branch name. A request declined for missing inputs is completed and re-sent, not escalated. A landing that reports success but fails step 5's ancestor check is NOT re-requested blind: re-read which shas the reply actually named, confirm the role holder that answered, and resolve the discrepancy before any second request — a duplicate request against a partially applied landing is how one change becomes two divergent commits.

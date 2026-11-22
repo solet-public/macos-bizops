@@ -77,7 +77,7 @@ A generic example in the format, sized the way a real brief should be:
 
 ## Reference
 
-- `knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` — the charter template whose governance section this convention operationalizes.
+- `knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` — the governance statement template whose governance section this convention operationalizes.
 - `knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` — the broader operator-collaboration craft this convention is one part of.
 - `ananta/knowledge_base/coordinator_dispatch_discipline.md` — the agent-to-agent counterpart of this operator-facing convention.
 - `service_interface::knowledge_service::search` — the search surface CHECKED FIRST evidence comes from.

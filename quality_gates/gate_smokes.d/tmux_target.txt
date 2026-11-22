@@ -1,0 +1,2 @@
+# One exact tmux target helper: a recorded reference reaches its own session and no prefix-matched neighbour, on a real private tmux server.
+plugins/agent_messaging_plugin/tests/tmux_target_smoke.py

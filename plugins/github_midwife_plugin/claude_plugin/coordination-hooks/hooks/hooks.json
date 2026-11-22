@@ -1,5 +1,5 @@
 {
-  "description": "Coordination hooks: KB-first reminder, live session_start_context.py register and inbox observer, an opt-in idle-wake waiter, a heartbeat report-alive hook, a rotation-due watch hook, a rotation-due notice hook (rotation_due_notice.py) that surfaces the watch hook's own self-notify marker as prompt context for a session with no steward to notify, the memory-passthrough capture/session-context pair, and two spawn-injected worker hooks (a headless tool-allowlist gate on PreToolUse and a session-mapping capture on SessionStart) now also registered here directly (2026-08-24, seed feedback #40/S51.1) so a plugin-registered firing survives a managed policy's `strictPluginOnlyCustomization: [\"hooks\"]`, which strips the host adapters' own `--settings`-injected copy; both stay inert no-ops (exit 0, no side effect) on any session the adapters never marked as a fleet-managed spawn -- see each file's own module docstring for its exact env-var gate. Cadence ruling (2026-08-11): the KB-first and check-your-messages reminders fire on SessionStart (startup|resume|clear), not UserPromptSubmit, so they stop repeating every prompt turn -- this changes CADENCE ONLY; the 2026-08-01 ruling that KB-first is unconditionally armed (no environment gate) still stands and is unchanged by this move. Session-cron sentinel (session_cron_sentinel.py) observes attempts with success unknown.",
+  "description": "Coordination hooks: KB-first reminder, live session_start_context.py register and inbox observer, an opt-in idle-wake waiter, a rotation-due watch hook, the memory-passthrough capture/session-context pair, and two spawn-injected worker hooks (a headless tool-allowlist gate on PreToolUse and a session-mapping capture on SessionStart) now also registered here directly (2026-08-24, seed feedback #40/S51.1) so a plugin-registered firing survives a managed policy's `strictPluginOnlyCustomization: [\"hooks\"]`, which strips the host adapters' own `--settings`-injected copy; both stay inert no-ops (exit 0, no side effect) on any session the adapters never marked as a fleet-managed spawn -- see each file's own module docstring for its exact env-var gate. Cadence ruling (2026-08-11): the KB-first and check-your-messages reminders fire on SessionStart (startup|resume|clear|compact), not UserPromptSubmit, so they stop repeating every prompt turn -- this changes CADENCE ONLY; the 2026-08-01 ruling that KB-first is unconditionally armed (no environment gate) still stands and is unchanged by this move. Session-cron sentinel (session_cron_sentinel.py) observes attempts with success unknown. Working-tree recovery saves (recovery_claude.py, added 0.10.0): five exec-form entries (PreToolUse Bash, PostToolUse file tools and Bash, Stop async, SessionEnd, SessionStart) that save uncommitted work before a shell command discards it and at the end of every turn; they print only systemMessage and additionalContext, exit 0 on every path and never block.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -14,24 +14,11 @@
             ]
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/optional_hook_runner.py",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/rotation_due_notice.py",
-              "UserPromptSubmit"
-            ]
-          }
-        ]
       }
     ],
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear",
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
@@ -50,7 +37,7 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/session_start_context.py",
               "SessionStart"
             ],
-            "timeout": 8
+            "timeout": 30
           }
         ]
       },
@@ -79,6 +66,37 @@
             ]
           }
         ]
+      },
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/optional_hook_runner.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/recovery_claude.py",
+              "SessionStart"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/optional_hook_runner.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/recovery_claude.py",
+              "SessionEnd"
+            ],
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
@@ -96,6 +114,21 @@
             "timeout": 86400
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/optional_hook_runner.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/recovery_claude.py",
+              "Stop"
+            ],
+            "async": true,
+            "timeout": 120
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -109,6 +142,21 @@
             ]
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/optional_hook_runner.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/recovery_claude.py",
+              "PreToolUse"
+            ],
+            "timeout": 15
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -120,19 +168,6 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/optional_hook_runner.py",
               "${CLAUDE_PLUGIN_ROOT}/hooks/rotation_due_watch.py",
-              "PostToolUse"
-            ]
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3",
-            "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/optional_hook_runner.py",
-              "${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat_report_alive.py",
               "PostToolUse"
             ]
           }
@@ -163,6 +198,21 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/session_cron_sentinel.py",
               "PostToolUse"
             ]
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/optional_hook_runner.py",
+              "${CLAUDE_PLUGIN_ROOT}/hooks/recovery_claude.py",
+              "PostToolUse"
+            ],
+            "timeout": 10
           }
         ]
       }

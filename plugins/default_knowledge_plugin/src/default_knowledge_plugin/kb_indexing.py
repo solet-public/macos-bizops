@@ -41,7 +41,7 @@ from .constants import (
 )
 from .kb_install_control import InstallControl
 from .models import ArticleMetadata, Manifest
-from .source_selection import parse_source_selection
+from .source_selection import matches_include, parse_source_selection
 
 logger = logging.getLogger(__name__)
 
@@ -294,36 +294,62 @@ def _include_matches(kb_dir: Path, manifest: Manifest) -> set[Path]:
     return matched
 
 
+def _passes_file_filters(kb_dir: Path, path: Path, manifest: Manifest) -> bool:
+    """The tests every indexed file passes after the include match.
+
+    A real file, outside the ``processes/`` registry and the snapshot sidecar,
+    that no exclude pattern matches.
+    """
+    if not path.is_file():
+        return False
+    rel_path = path.relative_to(kb_dir)
+    relative = str(rel_path)
+    if relative.startswith("processes/"):
+        return False
+    # Code-level exclusion of the W12 snapshot sidecar. A manifest
+    # ``**/.doc_history/**`` glob is NOT trusted for deep snapshot nesting
+    # (e.g. ``.doc_history/archive/foo.md/<ts>.md``) because ``Path.match``
+    # does not reliably cover it; the parts check is authoritative.
+    if DOC_HISTORY_DIRNAME in rel_path.parts:
+        return False
+    return not any(path.match(exc_pattern) or Path(relative).match(exc_pattern) for exc_pattern in manifest.exclude_patterns)
+
+
 def collect_files(kb_dir: Path, manifest: Manifest) -> list[Path]:
     """Collect files matching manifest patterns."""
-    matched = _include_matches(kb_dir, manifest)
+    return [path for path in sorted(_include_matches(kb_dir, manifest)) if _passes_file_filters(kb_dir, path, manifest)]
 
-    filtered: list[Path] = []
-    for path in sorted(matched):
-        if not path.is_file():
-            continue
-        rel_path = path.relative_to(kb_dir)
-        relative = str(rel_path)
-        if relative.startswith("processes/"):
-            continue
-        # Code-level exclusion of the W12 snapshot sidecar. A manifest
-        # ``**/.doc_history/**`` glob is NOT trusted for deep snapshot nesting
-        # (e.g. ``.doc_history/archive/foo.md/<ts>.md``) because ``Path.match``
-        # does not reliably cover it; the parts check is authoritative.
-        if DOC_HISTORY_DIRNAME in rel_path.parts:
-            continue
-        excluded = False
-        for exc_pattern in manifest.exclude_patterns:
-            if path.match(exc_pattern):
-                excluded = True
-                break
-            if Path(relative).match(exc_pattern):
-                excluded = True
-                break
-        if not excluded:
-            filtered.append(path)
 
-    return filtered
+def _is_indexable(kb_dir: Path, path: Path, manifest: Manifest) -> bool:
+    """True when the manifest's include and exclude patterns select ``path``.
+
+    The test ``collect_files`` applies to the files it walks, for one file.
+    ``content.selection`` is not part of it: selection scopes which
+    directories the bulk walk reads, whereas a file named on purpose (an
+    ``archive_file`` re-key into ``archive/<nested path>``) is the caller's
+    explicit choice. A path outside ``kb_dir`` raises ``ValueError``, as
+    ``plan_file_chunks`` does.
+    """
+    return matches_include(path.relative_to(kb_dir), manifest.include_patterns) and _passes_file_filters(kb_dir, path, manifest)
+
+
+def _select_explicit_files(kb_dir: Path, name: str, manifest: Manifest, files: list[Path]) -> list[Path]:
+    """Keep the explicitly named ``files`` the manifest selects.
+
+    The rest are skipped, not refused: a principle's ``*.retrieval_test.yaml``
+    companion is written to the knowledge base on purpose and is not searchable
+    on purpose. One advisory line names them.
+    """
+    selected: list[Path] = []
+    skipped: list[str] = []
+    for path in files:
+        if _is_indexable(kb_dir, path, manifest):
+            selected.append(path)
+        else:
+            skipped.append(str(path.relative_to(kb_dir)))
+    if skipped:
+        logger.info("knowledge base %r: %d explicitly named file(s) not indexed because the manifest's include and exclude patterns do not select them: %s", name, len(skipped), ", ".join(skipped))
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -481,9 +507,13 @@ def index_files(
     provider would refuse is split further to fit, never truncated.  ``None``
     (a provider that declares no ceiling) keeps the character bound alone.
     Every chunk carries its file's digest tag (prb_f6964132).
+
+    ``files=None`` walks the knowledge base with ``collect_files``. An explicit
+    list is held to the same include and exclude patterns, so a file the
+    manifest does not select (a ``*.retrieval_test.yaml`` companion, a file under
+    ``scripts/``) is never embedded however it was named (chg_d096d684).
     """
-    if files is None:
-        files = collect_files(kb_dir, manifest)
+    files = collect_files(kb_dir, manifest) if files is None else _select_explicit_files(kb_dir, name, manifest, files)
 
     memory_ids: list[str] = []
     chunk_count = 0

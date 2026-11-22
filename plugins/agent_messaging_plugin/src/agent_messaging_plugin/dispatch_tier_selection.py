@@ -102,6 +102,8 @@ class CapabilityCell:
     acceptance: str
     plan_weight: float = 1.0
     enabled: bool = True
+    preference_weight: float = 1.0
+    preference_rule: str | None = None
 
     @property
     def pair(self) -> tuple[str, str]:
@@ -112,12 +114,18 @@ class CapabilityCell:
         return EFFORT_ORDER.index(self.effort)
 
     def cost(self, objective: BillingObjective) -> float | None:
+        """What the cell costs under the objective. Reported figures use this and never the preference."""
         if objective == "metered_usd":
             return self.cost_per_task_usd
         if objective == "allowance_weighted":
             relative = self.relative_cost_multiplier
             return None if relative is None else relative * self.plan_weight
         return self.relative_cost_multiplier
+
+    def ordering_cost(self, objective: BillingObjective) -> float | None:
+        """The cost scaled by the operator's preference weight: the key that picks a cell, never a figure to report."""
+        cost = self.cost(objective)
+        return None if cost is None else cost * self.preference_weight
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +153,16 @@ class StaleReading:
 
 
 @dataclass(frozen=True, slots=True)
+class Shortfall:
+    """Immutable evidence of an ask exceeding the selected measured capability."""
+
+    required_score: float
+    effective_required_score: float
+    capability_score: float
+    gap: float
+
+
+@dataclass(frozen=True, slots=True)
 class TierSelection:
     selected: CapabilityCell
     objective: BillingObjective
@@ -161,6 +179,7 @@ class TierSelection:
     pin_cost_delta: float | None
     pin_overrides_constraints: bool
     pin_below_threshold: bool
+    shortfall: Shortfall | None = None
 
 
 def _split_by_effort(catalog: tuple[CapabilityCell, ...]) -> tuple[tuple[CapabilityCell, ...], tuple[str, ...]]:
@@ -230,20 +249,19 @@ def _feasible_cells(
     *,
     objective: BillingObjective,
     threshold: float,
-    capability_floor_pairs: frozenset[tuple[str, str]] | None,
     now: datetime,
     max_age: timedelta | None,
 ) -> tuple[list[CapabilityCell], dict[str, int], dict[str, int]]:
-    """Filter enabled cells to accepted, scored and priced candidates; age is advisory.
+    """Collect eligible cells and count threshold clearance separately.
 
+    Age is advisory. Below-threshold cells remain eligible for the strongest
+    available selection; below_threshold counts failed clearance, not removal.
     Operator ruling rul_becb4bed: stale or unknown data never blocks progress.
     A reading past its window is still used with an advisory. Only a
-    measured fact -- not accepted, floor-disallowed,
-    unpriced, below the bar -- excludes a cell.
+    measured fact -- not accepted, unpriced, below the bar -- excludes a cell.
     """
     excluded = {
         "not_accepted": 0,
-        "capability_floor_disallowed": 0,
         "unpriced": 0,
         "below_threshold": 0,
     }
@@ -252,15 +270,13 @@ def _feasible_cells(
     for cell in catalog:
         if cell.acceptance != "accepted":
             excluded["not_accepted"] += 1
-        elif capability_floor_pairs is not None and cell.pair not in capability_floor_pairs:
-            excluded["capability_floor_disallowed"] += 1
         elif cell.cost(objective) is None:
             excluded["unpriced"] += 1
-        elif cell.capability_score < threshold:
-            excluded["below_threshold"] += 1
         else:
             feasible.append(cell)
-            if not _fresh(cell, now=now, max_age=max_age):
+            if cell.capability_score < threshold:
+                excluded["below_threshold"] += 1
+            elif not _fresh(cell, now=now, max_age=max_age):
                 advisories["stale_reading_used"] += 1
     return feasible, excluded, advisories
 
@@ -299,12 +315,23 @@ def _cost_of(cell: CapabilityCell, objective: BillingObjective) -> float:
     return cost
 
 
+def _ordering_cost_of(cell: CapabilityCell, objective: BillingObjective) -> float:
+    cost = cell.ordering_cost(objective)
+    if cost is None:
+        raise TierSelectionError("catalog_invalid", f"{cell.model}@{cell.effort} lost its price mid-selection.")
+    return cost
+
+
 def _pick_cheapest(feasible: list[CapabilityCell], *, objective: BillingObjective, cost_tolerance: float) -> CapabilityCell:
-    """Exact argmin over cost; near-ties resolve to the lower effort, then the higher score."""
-    cheapest = min(feasible, key=lambda cell: _cost_of(cell, objective))
-    floor = _cost_of(cheapest, objective)
-    near = [cell for cell in feasible if _cost_of(cell, objective) <= floor * (1.0 + cost_tolerance)]
-    return min(near, key=lambda cell: (cell.effort_ordinal, -cell.capability_score, _cost_of(cell, objective)))
+    """Exact argmin over the preference-weighted cost; near-ties resolve to the lower effort, then the higher score.
+
+    The preference weight orders the choice only. Everything reported about the
+    candidates (frontier, domination, ladder, pin delta) keeps the true cost.
+    """
+    cheapest = min(feasible, key=lambda cell: _ordering_cost_of(cell, objective))
+    floor = _ordering_cost_of(cheapest, objective)
+    near = [cell for cell in feasible if _ordering_cost_of(cell, objective) <= floor * (1.0 + cost_tolerance)]
+    return min(near, key=lambda cell: (cell.effort_ordinal, -cell.capability_score, _ordering_cost_of(cell, objective)))
 
 
 def _frontier(feasible: list[CapabilityCell], objective: BillingObjective) -> tuple[CapabilityCell, ...]:
@@ -368,12 +395,14 @@ def _resolve_pin(catalog: tuple[CapabilityCell, ...], pin: Pin | None, required_
     return selected
 
 
-def _select_cell(feasible: list[CapabilityCell], pinned: CapabilityCell | None, *, objective: BillingObjective, cost_tolerance: float, original_count: int, excluded: dict[str, int], threshold: float) -> CapabilityCell:
+def _select_cell(feasible: list[CapabilityCell], eligible: list[CapabilityCell], pinned: CapabilityCell | None, *, objective: BillingObjective, cost_tolerance: float, original_count: int, excluded: dict[str, int], threshold: float) -> CapabilityCell:
     if pinned is not None:
         return pinned
     if not feasible:
-        code = "catalog_unaccepted" if excluded["not_accepted"] == original_count else "no_cell_clears_threshold"
-        raise TierSelectionError(code, f"no feasible cell for required_score={threshold}: {excluded}.")
+        if eligible:
+            return min(eligible, key=lambda cell: (-cell.capability_score, cell.runtime, cell.model, cell.effort))
+        code = "catalog_unaccepted" if excluded["not_accepted"] == original_count else "catalog_ineligible"
+        raise TierSelectionError(code, f"no eligible cell for required_score={threshold}: {excluded}.")
     return _pick_cheapest(feasible, objective=objective, cost_tolerance=cost_tolerance)
 
 
@@ -388,14 +417,29 @@ def _pin_flags(pin: Pin | None, selected: CapabilityCell, constraints: Constrain
     return pin is not None and _constraint_reason(selected, constraints) is not None, pin is not None and selected.capability_score < threshold
 
 
-def _include_pinned_reading(feasible: list[CapabilityCell], selected: CapabilityCell, advisories: dict[str, int], *, capability_floor_pairs: frozenset[tuple[str, str]] | None, now: datetime, max_age: timedelta | None) -> list[CapabilityCell]:
+def _include_pinned_reading(feasible: list[CapabilityCell], selected: CapabilityCell, advisories: dict[str, int], *, now: datetime, max_age: timedelta | None) -> list[CapabilityCell]:
     if selected in feasible:
         return feasible
     if not _fresh(selected, now=now, max_age=max_age):
         advisories["stale_reading_used"] += 1
-    if capability_floor_pairs is not None and selected.pair not in capability_floor_pairs:
-        advisories["pin_floor_disallowed"] = 1
     return [*feasible, selected]
+
+
+def _shortfall_pool(feasible: list[CapabilityCell], eligible: list[CapabilityCell], pinned: CapabilityCell | None, selected: CapabilityCell, advisories: dict[str, int], *, required_score: float, threshold: float, now: datetime, max_age: timedelta | None) -> tuple[list[CapabilityCell], Shortfall | None]:
+    """Use eligible readings for fallback evidence while keeping clearing output stable."""
+    if pinned is not None or feasible:
+        return feasible, None
+    fact = Shortfall(required_score, threshold, selected.capability_score, threshold - selected.capability_score)
+    advisories["stale_reading_used"] = sum(not _fresh(cell, now=now, max_age=max_age) for cell in eligible)
+    ties = sum(cell.capability_score == selected.capability_score for cell in eligible)
+    if ties > 1:
+        advisories["strongest_score_tie"] = ties
+    return eligible, fact
+
+
+def _clearing_cells(eligible: list[CapabilityCell], threshold: float) -> list[CapabilityCell]:
+    """Threshold clearance is separate from eligibility for strongest selection."""
+    return [cell for cell in eligible if cell.capability_score >= threshold]
 
 
 def select_tier(
@@ -405,15 +449,17 @@ def select_tier(
     objective: BillingObjective,
     now: datetime,
     max_age: timedelta | None,
-    capability_floor_pairs: frozenset[tuple[str, str]] | None = None,
     score_margin: float = 0.0,
     cost_tolerance: float = _DEFAULT_COST_TOLERANCE,
     constraints: Constraints = _DEFAULT_CONSTRAINTS,
     pin: Pin | None = None,
 ) -> TierSelection:
-    """Cheapest enabled accepted cell clearing ``required_score + score_margin``.
+    """Cheapest clearing cell, or strongest eligible cell with a shortfall fact.
 
-    Allowance telemetry does not participate in eligibility or ranking.
+    "Cheapest" is by the cost under ``objective`` scaled by each cell's operator
+    preference weight (1.0 unless a policy rule sets one), under every objective.
+    The weight decides which cell is chosen and is never written into a reported
+    cost. Allowance telemetry does not participate in eligibility or ranking.
     Neither does a reading past ``max_age``: it is used and reported in
     ``advisories`` and ``stale_readings`` (operator ruling rul_becb4bed).
     A cell whose effort is outside ``EFFORT_ORDER`` cannot be ordered, so it is
@@ -421,8 +467,8 @@ def select_tier(
     and named in ``unknown_effort_cells``; it never raises, so one such row
     cannot fail every selection. Refuses only on measured facts: an empty
     catalog, a catalog with no cell in the ladder, a catalog with nothing
-    accepted, or a threshold nothing clears each raise a distinct code so the
-    caller can tell an uncross-checked store from an impossible ask.
+    accepted or priced, or constraints removing all eligible cells. A threshold
+    above available capability returns the strongest cell with explicit evidence.
     """
     disabled_count = sum(not cell.enabled for cell in catalog)
     catalog = tuple(cell for cell in catalog if cell.enabled)
@@ -437,20 +483,21 @@ def select_tier(
     original_count = len(known)
     known, constraint_counts = _apply_constraints(known, constraints)
     threshold = required_score + score_margin
-    feasible, excluded, advisories = _feasible_cells(
+    eligible, excluded, advisories = _feasible_cells(
         known,
         objective=objective,
         threshold=threshold,
-        capability_floor_pairs=capability_floor_pairs,
         now=now,
         max_age=max_age,
     )
     excluded.update(constraint_counts)
     excluded["operator_disabled"] = disabled_count
     excluded["unknown_effort"] = len(unknown)
-    selected = _select_cell(feasible, pinned, objective=objective, cost_tolerance=cost_tolerance, original_count=original_count, excluded=excluded, threshold=threshold)
+    feasible = _clearing_cells(eligible, threshold)
+    selected = _select_cell(feasible, eligible, pinned, objective=objective, cost_tolerance=cost_tolerance, original_count=original_count, excluded=excluded, threshold=threshold)
+    feasible, shortfall = _shortfall_pool(feasible, eligible, pinned, selected, advisories, required_score=required_score, threshold=threshold, now=now, max_age=max_age)
     overrides, below = _pin_flags(pin, selected, constraints, threshold)
-    readings = _include_pinned_reading(feasible, selected, advisories, capability_floor_pairs=capability_floor_pairs, now=now, max_age=max_age)
+    readings = _include_pinned_reading(feasible, selected, advisories, now=now, max_age=max_age)
     if max_age is None:
         advisories["unknown_freshness_window"] = len(readings)
     frontier = _frontier(feasible, objective)
@@ -470,6 +517,7 @@ def select_tier(
         pin_cost_delta=_pin_delta(pin, selected, feasible, objective),
         pin_overrides_constraints=overrides,
         pin_below_threshold=below,
+        shortfall=shortfall,
     )
 
 
@@ -480,6 +528,7 @@ __all__ = [
     "Constraints",
     "LadderStep",
     "Pin",
+    "Shortfall",
     "StaleReading",
     "TierSelection",
     "TierSelectionError",

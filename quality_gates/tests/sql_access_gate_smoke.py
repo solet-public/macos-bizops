@@ -16,7 +16,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+from unittest import mock
 
 _GATE_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _GATE_DIR.parent
@@ -297,6 +299,13 @@ _CANONICAL_ARGS = (
 )
 
 
+# A ceiling, not a wait. It bounds a hung gate, and nothing else does: no runner
+# deadline exists. The gate takes about 14 s on a quiet host (the whole smoke
+# about 95 s, smoke_budgets.json), and one loaded release-74 run passed the former
+# 120 s (gr_202a8eaa). 300 s clears an 11x slowdown with room to spare.
+_GATE_TIMEOUT_S = 300
+
+
 def _run_gate(extra_args: tuple[str, ...], cwd: Path) -> tuple[int, str]:
     """Invoke the gate as a real subprocess (exercises actual argv parsing)."""
     proc = subprocess.run(
@@ -304,7 +313,7 @@ def _run_gate(extra_args: tuple[str, ...], cwd: Path) -> tuple[int, str]:
         cwd=str(cwd),
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=_GATE_TIMEOUT_S,
     )
     return proc.returncode, proc.stdout
 
@@ -350,6 +359,37 @@ def test_explicit_args_override_defaults() -> None:
     check("nonexistent explicit --allowlist path is honored as an EMPTY allowlist (load_allowlist returns Allowlist() for a missing path — every finding surfaces non-allowlisted, proving the canonical default was overridden)", code == 1 and _summary_counts(out)[1] > 0)
 
 
+def test_gate_ceiling_clears_a_loaded_host_run() -> None:
+    print("The gate ceiling clears a slow working run (measured 14 s quiet; one loaded release-74 run passed 120 s, an 8.6x stall): the subprocess timeout is _GATE_TIMEOUT_S, at least 300 s:")
+    passed_timeouts: list[object] = []
+
+    def _recording_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        passed_timeouts.append(kwargs.get("timeout"))
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    with mock.patch.object(subprocess, "run", _recording_run):
+        _run_gate((), cwd=_REPO_ROOT)
+    check("_run_gate passes the named ceiling to subprocess.run", passed_timeouts == [_GATE_TIMEOUT_S])
+    check("_GATE_TIMEOUT_S >= 300 s (about 21x the 14 s quiet run, past the 8.6x stall)", _GATE_TIMEOUT_S >= 300)
+
+
+def test_a_hung_gate_still_fails_at_the_ceiling() -> None:
+    print("A hung gate still fails: with a 1 s ceiling, a gate that sleeps 25 s raises TimeoutExpired in under 20 s:")
+    with tempfile.TemporaryDirectory() as td:
+        gate_dir = Path(td)
+        (gate_dir / "sql_access_gate.py").write_text("import time\ntime.sleep(25)\n", encoding="utf-8")
+        raised = False
+        started = time.monotonic()
+        with mock.patch.dict(globals(), {"_GATE_DIR": gate_dir, "_VENV_PYTHON": Path(sys.executable), "_GATE_TIMEOUT_S": 1}):
+            try:
+                _run_gate((), cwd=gate_dir)
+            except subprocess.TimeoutExpired:
+                raised = True
+        elapsed = time.monotonic() - started
+    check("hung gate raises TimeoutExpired at the ceiling", raised)
+    check("hung gate fails in under 20 s (the 25 s hang does not finish, and the ceiling is not unbounded)", elapsed < 20)
+
+
 def main() -> int:
     for test in (
         test_s0_driver_import,
@@ -369,6 +409,8 @@ def main() -> int:
         test_bare_invocation_cwd_independent,
         test_explicit_allowlist_only_unaffected,
         test_explicit_args_override_defaults,
+        test_gate_ceiling_clears_a_loaded_host_run,
+        test_a_hung_gate_still_fails_at_the_ceiling,
     ):
         test()
     print()

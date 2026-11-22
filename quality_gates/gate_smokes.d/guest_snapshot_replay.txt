@@ -1,0 +1,4 @@
+# Guest snapshot replay (prb_e61e52e1 / chg_72c0ab55): a preserved failure
+# snapshot replays its failed stage and every later stage on an owned clone,
+# under its own contract identity, through the shared stage engine, and leaves
+# an append-only receipt; owned clones only are shut down in-guest and deleted.

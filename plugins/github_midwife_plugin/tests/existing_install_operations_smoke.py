@@ -196,7 +196,7 @@ def _target(root: Path, *, previous_zshrc_body: str | None = None) -> tuple[Path
     (target / "plugins/github_midwife_plugin/knowledge_base/existing_install_flow.json").write_text(json.dumps(_bundle(predecessor), indent=2))
     hooks = target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks"
     hooks.mkdir(parents=True)
-    for name in ("coordination_owner.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "wake_waiter.py", "hooks.json"):
+    for name in ("coordination_owner.py", "rotation_due_watch.py", "wake_waiter.py", "hooks.json"):
         (hooks / name).write_bytes((_PLUGIN_ROOT / "claude_plugin" / "coordination-hooks" / "hooks" / name).read_bytes())
     _git(target, "add", "-A")
     _git(target, "commit", "--quiet", "-m", "candidate")
@@ -845,6 +845,23 @@ def _check_plugin_cache(target: Path, runtime: FakeRuntime) -> None:
     _settle_as_create(target, runtime, cache)
     current = cast(dict[str, Any], dispatch_request(_request(target, ref, purpose="post_apply"), runtime))
     _check(current["checkpoint_status"] == "verified", "a matching, pinned and received cache copy verifies")
+    receipt = target / "profile/data/coordination-hooks/claude/installation.v1.json"
+    legacy = json.loads(receipt.read_text(encoding="utf-8"))
+    legacy["surfaces"][0]["files"]["heartbeat_report_alive.py"] = "0" * 64
+    unsigned = {key: value for key, value in legacy.items() if key != "receipt_sha256"}
+    legacy["receipt_sha256"] = hashlib.sha256(json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    receipt.write_text(json.dumps(legacy), encoding="utf-8")
+    old_surface = cast(dict[str, Any], dispatch_request(_request(target, ref), runtime))
+    _check(
+        (old_surface["checkpoint_status"], [action["id"] for action in old_surface["planned_actions"]]) == ("pending", ["claude.publish_coordination_receipt"]),
+        "an old four-file receipt plans republication without reinstalling current cache bytes",
+    )
+    republished = cast(dict[str, Any], dispatch_request(_request(target, ref, phase="apply"), runtime))
+    refreshed_files = json.loads(receipt.read_text(encoding="utf-8"))["surfaces"][0]["files"]
+    _check(
+        republished["checkpoint_status"] == "applied" and set(refreshed_files) == {"coordination_owner.py", "rotation_due_watch.py", "wake_waiter.py"},
+        "the existing-install migration republishes the receipt with the retired heartbeat removed",
+    )
     (cache / "hooks" / "wake_waiter.py").write_bytes(b"# stale\n")
     stale = cast(dict[str, Any], dispatch_request(_request(target, ref), runtime))
     _check((stale["checkpoint_status"], [action["id"] for action in stale["planned_actions"]]) == ("pending", ["cache.reinstall", "claude.publish_coordination_receipt"]), "diff-based check plans the refresh and the republish")
@@ -855,7 +872,7 @@ def _check_plugin_cache(target: Path, runtime: FakeRuntime) -> None:
 
 
 def _copy_hooks(target: Path, cache: Path) -> None:
-    for name in ("coordination_owner.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "wake_waiter.py", "hooks.json"):
+    for name in ("coordination_owner.py", "rotation_due_watch.py", "wake_waiter.py", "hooks.json"):
         (cache / "hooks" / name).write_bytes((target / "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks" / name).read_bytes())
 
 

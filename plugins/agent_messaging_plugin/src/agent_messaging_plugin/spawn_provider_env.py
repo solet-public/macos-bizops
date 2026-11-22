@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final
 
-from .register_unit_client import VerbError
+from .verb_errors import VerbError
 
 if TYPE_CHECKING:
     from .session_lifecycle_verbs import SpawnSessionRequest

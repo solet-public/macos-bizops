@@ -32,8 +32,8 @@ off with a bounded cap.
 
 A4 (2026-08-04): this module used to cover BOTH role and direct-IMPORTANT owed
 kinds ("one delivery discipline"). The direct half (the REL-05 deaf-wake
-insurance outbox) retired — sweep_overdue_sessions + _notify_steward_of_overdue
-is its successor. This is a surgical extraction, not a module rewrite: every
+insurance outbox) retired with nothing in its place: no timer or sweep watches
+for an unconsumed direct message. This is a surgical extraction, not a module rewrite: every
 role-only code path here is untouched byte-for-byte.
 """
 
@@ -194,7 +194,9 @@ class OwedDeliveryCoordinator:
     ) -> None:
         """Settle a role delivery that arrived live on ``/events``."""
         await self._settle(
-            external_id=external_id, recipient_key=recipient_key, event=event,
+            external_id=external_id,
+            recipient_key=recipient_key,
+            event=event,
         )
 
     # ------------------------------------------------------------------
@@ -239,8 +241,7 @@ class OwedDeliveryCoordinator:
             for row in role_rows:
                 await self._deliver_drain_row(row, cap=cap_int)
         _log(
-            f"repair drain hit {REPAIR_DRAIN_MAX_PASSES}-pass cap; "
-            "rows still pending (will retry next interval)",
+            f"repair drain hit {REPAIR_DRAIN_MAX_PASSES}-pass cap; rows still pending (will retry next interval)",
         )
 
     async def _deliver_drain_row(self, row: dict[str, Any], *, cap: int) -> None:
@@ -251,11 +252,15 @@ class OwedDeliveryCoordinator:
             _log(f"drain row missing external_id/recipient_key, skipping: {row!r}")
             return
         event = _drain_row_to_event(
-            row, external_id=external_id, recipient_key=recipient_key,
+            row,
+            external_id=external_id,
+            recipient_key=recipient_key,
         )
         _apply_reemit_marker(event, row, message_id=external_id, cap=cap)
         await self._settle(
-            external_id=external_id, recipient_key=recipient_key, event=event,
+            external_id=external_id,
+            recipient_key=recipient_key,
+            event=event,
         )
 
     async def _settle(
@@ -281,7 +286,8 @@ class OwedDeliveryCoordinator:
         """
         await self._emit_once(external_id, event)
         await self._transport.flip_delivered(
-            external_id=external_id, recipient_key=recipient_key,
+            external_id=external_id,
+            recipient_key=recipient_key,
         )
 
     async def _emit_once(self, external_id: str, event: dict[str, Any]) -> None:
@@ -312,7 +318,10 @@ class OwedDeliveryCoordinator:
 
 
 def _drain_row_to_event(
-    row: dict[str, Any], *, external_id: str, recipient_key: str,
+    row: dict[str, Any],
+    *,
+    external_id: str,
+    recipient_key: str,
 ) -> dict[str, Any]:
     """Shape a ``/peer/drain`` row into the event the forwarder emits.
 
@@ -383,12 +392,7 @@ def _apply_reemit_marker(
     body = str(event.get("content") or "")
     prefix = f"[re-emit {n}/{cap} of message_id={message_id} originally sent {created}"
     whole = f"{prefix}]\n\n{body}"
-    condensed = (
-        f"{prefix} — body truncated here to save context; the FULL text is "
-        "persisted in the thread. Read it whole with solet-bridge inbox, "
-        f"matching message_id={message_id}.]"
-        f"\n\n{body[:REEMIT_BODY_HEAD_CHARS]}…"
-    )
+    condensed = f"{prefix} — body truncated here to save context; the FULL text is persisted in the thread. Read it whole with solet-bridge inbox, matching message_id={message_id}.]\n\n{body[:REEMIT_BODY_HEAD_CHARS]}…"
     # Condense only when it actually SAVES: the pointer prose is itself a few
     # hundred characters, so on a mid-sized body the "condensed" form can be
     # LONGER than simply re-sending it. Comparing the two rendered forms makes

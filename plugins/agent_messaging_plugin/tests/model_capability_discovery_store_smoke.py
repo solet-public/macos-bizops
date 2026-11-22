@@ -91,7 +91,7 @@ def _synthetic_run(cells: Sequence[fetch.DiscoveredCell], *, score: float = 40.0
     return fetch.DiscoveryRun(
         readings=tuple(reading for cell in ordered for reading in _agreeing_readings(cell, score=score, cost=cost)),
         failures=(),
-        sources_ok=(fetch.SOURCE_LEADERBOARD_HTML, fetch.SOURCE_MODEL_DETAIL_HTML),
+        sources_ok=(fetch.SOURCE_LEADERBOARD_HTML, fetch.SOURCE_MODEL_DETAIL_HTML) if leaderboard_ok else (),
         cells=tuple(ordered),
         leaderboard_ok=leaderboard_ok,
         leaderboard_rows=100 if leaderboard_ok else 0,
@@ -217,7 +217,7 @@ def test_a_harness_listed_unscored_model_keeps_its_score_and_is_never_withdrawn(
     _check(all(row["acceptance"] == CELL_ACCEPTANCE_ACCEPTED for row in kept), "every one of them stays accepted")
     _check([row["capability_score"] for row in kept] == [33.0] * 5 + [41.0, 16.0], "and keeps its last score")
     _check(_cell(state, "gpt-6-astra", "max")["capability_score"] == 53.0, "while the model the leaderboard still scores is renewed")
-    _check("claude_code/claude-sonnet-5" in str(report.note) and "no leaderboard row" in str(report.note), "the run note names them")
+    _check("claude_code/claude-sonnet-5" in str(report.note) and "unrenewable historical cells" in str(report.note), "the run note names each historical model with absent per-effort measurements")
 
 
 def test_a_failed_page_says_nothing_about_the_models() -> None:

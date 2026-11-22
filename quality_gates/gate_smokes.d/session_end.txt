@@ -1,0 +1,2 @@
+# One writer of a session end: a host notice ends a record only after the exact host check says gone.
+plugins/agent_messaging_plugin/tests/session_end_smoke.py

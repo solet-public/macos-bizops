@@ -144,7 +144,7 @@ def _invoke(args: list[str], handler: Handler) -> Result:
 
 def test_send_by_name_uses_attributed_direct_route() -> None:
     """Both controller shapes use their launcher key; no receiving bridge id input."""
-    for session in ("ases-origin-controller", "ases-project-solet-controller"):
+    for session in ("ases-origin-controller", "ases-sibling-controller"):
         opened: list[dict[str, Any]] = []
         paths: list[str] = []
         base, _ = _make_handler(["queued"], opened)
@@ -1815,13 +1815,14 @@ def test_working_watch_terminal_refusal_preserves_deadline() -> None:
 def main() -> None:
     tests = [obj for name, obj in sorted(globals().items()) if name.startswith("test_")]
     failures = 0
-    for test in tests:
-        try:
-            test()
-            print(f"PASS {test.__name__}")
-        except AssertionError as exc:
-            failures += 1
-            print(f"FAIL {test.__name__}: {exc}")
+    with tempfile.TemporaryDirectory(prefix="local-cli-smoke-runtime-") as runtime, patch.dict(os.environ, {"XDG_RUNTIME_DIR": runtime}):
+        for test in tests:
+            try:
+                test()
+                print(f"PASS {test.__name__}")
+            except AssertionError as exc:
+                failures += 1
+                print(f"FAIL {test.__name__}: {exc}")
     if failures:
         print(f"{failures}/{len(tests)} failed")
         sys.exit(1)

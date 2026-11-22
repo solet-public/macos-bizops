@@ -8,7 +8,7 @@ import json
 import os
 import sys
 import tempfile
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,8 +20,11 @@ sys.path.insert(0, str(_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _deploy_by_rule_fixture_support import (  # noqa: E402
+    CLOCK,
     NOTICE,
     OLD,
+    RECORD,
+    RELEASE,
     TARGET,
     Fixture,
     envelope,
@@ -32,6 +35,22 @@ from _deploy_by_rule_fixture_support import (  # noqa: E402
 
 def test_command_available() -> None:
     load()
+
+
+def test_fixture_refuses_external_register_command() -> None:
+    """Keep the proof meaningful: the fake serves git and the bridge only.
+
+    An external register call would otherwise pass by being ignored, so the fake
+    refuses it loudly and this case pins that refusal.
+    """
+    f = Fixture()
+    for argv in (["/fixture/" + "p" + "solet", "db", "version", "current"], ["/fixture/" + "p" + "solet", "deployed", "fixture-solet"]):
+        try:
+            f.command(argv)
+        except AssertionError as refused:
+            assert "UNEXPECTED_COMMAND" in str(refused), "FIXTURE_REFUSAL_IS_NAMED"
+        else:
+            raise AssertionError("FIXTURE_ACCEPTED_A_REGISTER_COMMAND")
 
 
 def test_docs_landing_no_swap() -> None:
@@ -55,9 +74,26 @@ def test_production_deploy_recorded() -> None:
     assert result["decision"] == "deployed" and writes(f) == ["REACHED_APPLY_COMMIT", "REACHED_RECORD"], "PRODUCTION_DEPLOY_RECORDED"
     assert f.log.index("REACHED_VERIFY") < f.log.index("REACHED_RECORD")
     assert f.s.polls == 2, "DRAIN_BEFORE_RECORD"
-    recorded = next(a for a in f.log if isinstance(a, list) and a[1] == "deployed")
-    assert recorded[recorded.index("--commit") + 1] == TARGET
-    assert recorded[-6:] == ["--agent-instance-id", "agi-fixture", "--actor-model", "fixture-model", "--actor-effort", "medium"]
+    _assert_recorded_through_the_verb(f, result)
+
+
+def _assert_recorded_through_the_verb(f: Fixture, result: dict[str, object]) -> None:
+    """The record_deployment call carries the deploy's identity, and the store holds that one row."""
+    recorded = next(json.loads(a[3]) for a in f.log if isinstance(a, list) and a[1] == "call" and a[2] == RECORD)
+    assert recorded == {
+        "solet_name": "fixture-solet",
+        "release_id": RELEASE,
+        "git_sha": TARGET,
+        "deployed_at": CLOCK,
+        "trigger": "landing",
+        "manifest_sha256": f.attested_manifest_sha256,
+        "agent_instance_id": "agi-fixture",
+        "actor_model": "fixture-model",
+        "actor_effort": "medium",
+    }, "RECORD_DEPLOYMENT_ARGUMENTS"
+    newest = f.store.stored()[0]
+    assert (newest["git_sha"], newest["release_id"], newest["trigger"], newest["state"]) == (TARGET, RELEASE, "landing", "recorded"), "RECORD_LANDED_IN_THE_STORE"
+    assert result["deployment_id"] == newest["deployment_id"], "RESULT_ID_IS_THE_STORES_ID"
 
 
 def test_bridge_jobs_are_awaited_at_the_shared_process_seam() -> None:
@@ -148,7 +184,7 @@ def test_deploy_notice_after_verified_record() -> None:
     f = Fixture()
     result = f.run()
     assert result["decision"] == "deployed" and "REACHED_RECORD" in f.log, "DEPLOY_NOTICE_FIXTURE_REACHED_RECORD"
-    assert "REACHED_VERIFIED_RECORD" in f.log and result["measurement_id"] == "cme-fixture", "DEPLOY_NOTICE_FIXTURE_VERIFIED_READBACK"
+    assert "REACHED_VERIFIED_RECORD" in f.log and result["deployment_id"] == f.store.row_id(TARGET), "DEPLOY_NOTICE_FIXTURE_VERIFIED_READBACK"
     calls = [a for a in f.log if isinstance(a, list) and len(a) > 2 and a[2] == NOTICE]
     assert not calls and "notice" not in result, "DEPLOY_NOTICE_AFTER_VERIFIED_RECORD: success is silent"
 
@@ -215,7 +251,7 @@ def test_notice_failures_are_not_read_on_success() -> None:
         f = Fixture()
         f.s.notice_reply = reply
         result = f.run()
-        assert result["decision"] == "deployed" and result["measurement_id"] == "cme-fixture", "SUCCESS_PRESERVES_DEPLOYMENT"
+        assert result["decision"] == "deployed" and result["deployment_id"] == f.store.row_id(TARGET), "SUCCESS_PRESERVES_DEPLOYMENT"
         assert "notice" not in result and f.log.count("REACHED_NOTICE") == 0, "SUCCESS_HAS_NO_NOTICE_TRANSPORT"
     f = Fixture()
     f.s.notice_timeout = True
@@ -248,12 +284,10 @@ def test_notice_identity_recurrence_and_reversal() -> None:
     f = Fixture()
     first = f.run()
     assert first["decision"] == "deployed" and "notice" not in first and f.log.count("REACHED_NOTICE") == 0, "SUCCESS_NO_NOTICE"
-    for measurement in ("cme-fixture", "cme-reversal"):
-        f = Fixture()
-        f.s.serving, f.s.recorded, f.s.stale_first = TARGET, True, True
-        f.s.measurement_id = measurement
-        repeat = f.run()
-        assert repeat["decision"] == "already_recorded" and not writes(f) and f.log.count("REACHED_NOTICE") == 0 and "notice" not in repeat, "VERIFIED_ALREADY_RECORDED_NO_NOTICE"
+    f = Fixture()
+    f.s.serving, f.s.recorded, f.s.stale_first = TARGET, True, True
+    repeat = f.run()
+    assert repeat["decision"] == "already_recorded" and repeat["deployment_id"] == f.store.row_id(TARGET) and not writes(f) and f.log.count("REACHED_NOTICE") == 0 and "notice" not in repeat, "VERIFIED_ALREADY_RECORDED_NO_NOTICE"
     _assert_reversal_no_notice()
     for field, value in (("baseline", TARGET), ("occupied", True), ("stuck", True), ("reject", True), ("delta", "M\0docs/x\0"), ("plugins_never_ready", True)):
         f = Fixture()
@@ -270,9 +304,9 @@ def _assert_reversal_no_notice() -> None:
     """A later run verifies the opposite target with no completion notice."""
     f = Fixture()
     f.s.target, f.s.baseline, f.s.serving = OLD, TARGET, TARGET
-    f.s.measurement_id = "cme-rollback"
     result = f.run()
-    assert result["decision"] == "deployed" and result["target"] == OLD and result["measurement_id"] == "cme-rollback", "REVERSAL_VERIFIED_SEPARATELY"
+    assert result["decision"] == "deployed" and result["target"] == OLD and result["deployment_id"] == f.store.row_id(OLD), "REVERSAL_VERIFIED_SEPARATELY"
+    assert f.store.row_id(OLD) != f.store.row_id(TARGET), "REVERSAL_IS_ITS_OWN_RECORD"
     assert "notice" not in result and f.log.count("REACHED_NOTICE") == 0, "REVERSAL_NO_NOTICE"
 
 
@@ -518,7 +552,7 @@ def cli_adapters(f: Fixture) -> None:
             raise AssertionError("CLI_ERROR_ENVELOPE")
     f = Fixture()
     argv = ["--trigger", "landing"]
-    for key in ("repo", "app_home", "releases_root", "psolet", "bridge", "agent_instance_id", "actor_model", "actor_effort"):
+    for key in ("repo", "app_home", "releases_root", "bridge", "agent_instance_id", "actor_model", "actor_effort"):
         argv.extend(["--" + key.replace("_", "-"), str(getattr(f.args, key))])
     f.s.notice_timeout = True
     output = io.StringIO()
@@ -526,15 +560,40 @@ def cli_adapters(f: Fixture) -> None:
         assert f.m.main(argv) == 0
     terminal = json.loads(output.getvalue().splitlines()[-1])
     assert terminal["decision"] == "deployed" and "notice" not in terminal, "SUCCESS_TERMINAL_JSON_HAS_NO_NOTICE"
+    _assert_retired_argument_refused(f, argv)
+    _assert_help_lists_no_retired_argument(f)
     with patch.object(f.m.subprocess, "run", return_value=SimpleNamespace(stdout="fixture")) as run:
         assert f.m.command(["fixture"]) == "fixture"
         assert run.call_args.kwargs["timeout"] == 30
+
+
+def _assert_retired_argument_refused(f: Fixture, argv: list[str]) -> None:
+    """The retired register argument is a usage error, exit 2, not a silently ignored option."""
+    with redirect_stderr(io.StringIO()):
+        try:
+            f.m.main([*argv, "--p" + "solet", "/fixture/" + "p" + "solet"])
+        except SystemExit as refused:
+            assert refused.code == 2, "RETIRED_ARGUMENT_REFUSED_AS_A_USAGE_ERROR"
+        else:
+            raise AssertionError("RETIRED_ARGUMENT_ACCEPTED")
+
+
+def _assert_help_lists_no_retired_argument(f: Fixture) -> None:
+    """--help still lists the real arguments and names no external register executable."""
+    usage = io.StringIO()
+    with redirect_stdout(usage):
+        try:
+            f.m.main(["--help"])
+        except SystemExit as shown:
+            assert shown.code == 0, "HELP_EXITS_CLEANLY"
+    assert "--bridge" in usage.getvalue() and ("p" + "solet") not in usage.getvalue().lower(), "HELP_LISTS_NO_RETIRED_ARGUMENT"
 
 
 def main() -> None:
     failures: list[AssertionError] = []
     for test in (
         test_command_available,
+        test_fixture_refuses_external_register_command,
         test_bridge_jobs_are_awaited_at_the_shared_process_seam,
         test_finished_job_records_preserve_the_original_result,
         test_synchronous_bridge_results_are_unchanged,

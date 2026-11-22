@@ -2,7 +2,7 @@
 
 Each event is an exclusively created, fsynced file. Current projections are
 derived from history, so a crash between an event and a projection cannot
-resurrect an obsolete PASS. Corrections change optional links, never results.
+resurrect an obsolete PASS. Corrections change opaque annotations, never results.
 """
 
 from __future__ import annotations
@@ -11,8 +11,10 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import tempfile
-from collections.abc import Generator, Mapping
+import time
+from collections.abc import Collection, Generator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,7 +23,11 @@ from typing import Any
 from quality_gates.smoke_identity import canonical, digest
 
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
-_METADATA = frozenset({"change_id", "unit_id", "annotation"})
+_METADATA = frozenset({"annotation"})
+# A recent write may still serve an in-flight run or a landing after check-in.
+GRACE_SECONDS = 24 * 60 * 60
+# Reused passes are not refreshed, so every proof is measured again within a week.
+CAP_SECONDS = 7 * 24 * 60 * 60
 
 
 class StaleProofVersionError(ValueError):
@@ -67,6 +73,8 @@ def _project(key: str, events: list[dict[str, Any]]) -> dict[str, Any]:
         elif operation == "begin":
             current.update(active_attempt=event["event_id"], reusable=False)
         elif operation == "correct":
+            # Historical fields remain opaque provenance; the write API owns
+            # which annotations new events may set or clear.
             current["metadata"].update(payload["metadata"])
         elif operation == "clear":
             for field in payload["fields"]:
@@ -137,6 +145,14 @@ class SmokePassStore:
     def list(self) -> list[dict[str, Any]]:
         return [self.get(path.name) for path in sorted(self.root.glob("*")) if _KEY.fullmatch(path.name)]
 
+    def prune(self, open_trees: Collection[str] | None, *, principal: str, now: float | None = None) -> dict[str, int]:
+        """End keys no open tree can read after grace, all old keys, and the raw attempt copies earlier runs left in attempts/."""
+        self._authorize(principal)
+        moment = time.time() if now is None else now
+        kept, removed_keys, unreadable = _prune_keys(self.root, open_trees, moment)
+        removed_attempts = _prune_attempts(self.root / "attempts", moment)
+        return {"kept": kept, "removed_keys": removed_keys, "removed_attempts": removed_attempts, "unreadable": unreadable}
+
     def _append(self, key: str, operation: str, payload: Mapping[str, Any], *, expected_version: int, principal: str, reason: str) -> dict[str, Any]:
         if not reason.strip():
             raise ValueError("proof write requires a reason")
@@ -160,24 +176,9 @@ class SmokePassStore:
         """Durably mark an attempt before any test runs; never implies PASS."""
         return self._append(key, "begin", identity, expected_version=expected_version, principal=principal, reason="smoke execution starts")
 
-    def retain_attempt(self, observation: Mapping[str, Any], *, principal: str) -> str:
-        """Retain original output even if concurrent metadata makes CAS stale."""
-        self._authorize(principal)
-        directory = self.root / "attempts"
-        directory.mkdir(mode=0o700, exist_ok=True)
-        _check_store_path(directory)
-        path = directory / (digest(observation) + ".json")
-        if not path.exists():
-            try:
-                _publish_event(path, observation)
-            except FileExistsError:
-                if path.is_symlink() or path.read_bytes() != canonical(observation):
-                    raise ValueError("retained attempt identity collision") from None
-        return str(path)
-
     def correct(self, key: str, metadata: Mapping[str, Any], *, expected_version: int, principal: str, reason: str) -> dict[str, Any]:
         if not metadata.keys() <= _METADATA or any(value is None for value in metadata.values()):
-            raise ValueError("only optional change_id/unit_id/annotation may be set or corrected; use clear for None")
+            raise ValueError("only optional annotation may be set or corrected; use clear for None")
         target = self.get(key)["observation_event_id"]
         if target is None:
             raise ValueError("correct requires an existing measured observation")
@@ -205,6 +206,62 @@ def _read_event(path: Path, version: int) -> dict[str, Any]:
     if event["version"] != version or event["event_id"] != digest(identity):
         raise ValueError("corrupt proof history")
     return event
+
+
+def _tree_bound(folder: Path) -> str | None:
+    for path in sorted(folder.glob("*.json"), reverse=True):
+        try:
+            event = _read_event(path, int(path.stem))
+        except (AttributeError, KeyError, TypeError) as error:
+            raise ValueError("corrupt proof event") from error
+        if event["operation"] == "observe":
+            payload = event["payload"]
+            return payload.get("candidate_tree") if payload.get("key_scope") == "tree" else None
+    return None
+
+
+def _expired_key(folder: Path, age: float, open_trees: Collection[str] | None) -> tuple[bool, bool]:
+    if age > CAP_SECONDS:
+        return True, False
+    if age <= GRACE_SECONDS or open_trees is None:
+        return False, False
+    try:
+        tree = _tree_bound(folder)
+    except (ValueError, OSError):
+        return False, True
+    return tree is not None and tree not in open_trees, False
+
+
+def _prune_keys(root: Path, open_trees: Collection[str] | None, moment: float) -> tuple[int, int, int]:
+    kept = removed = unreadable = 0
+    for folder in root.iterdir():
+        if not _KEY.fullmatch(folder.name) or folder.is_symlink() or not folder.is_dir():
+            continue
+        expired, unreadable_event = _expired_key(folder, moment - folder.stat().st_mtime, open_trees)
+        unreadable += unreadable_event
+        if expired:
+            try:
+                shutil.rmtree(folder)
+            except FileNotFoundError:
+                pass
+            removed += 1
+        else:
+            kept += 1
+    return kept, removed, unreadable
+
+
+# attempts/ holds only copies that earlier runs wrote; nothing writes them now, and this ends them after seven days.
+def _prune_attempts(directory: Path, moment: float) -> int:
+    removed = 0
+    if directory.is_dir():
+        for path in directory.iterdir():
+            if path.is_file() and moment - path.stat().st_mtime > CAP_SECONDS:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                removed += 1
+    return removed
 
 
 def _publish_event(path: Path, event: Mapping[str, Any]) -> None:

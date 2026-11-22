@@ -1,0 +1,4 @@
+# Guest disk sizing (prb_2be0b262): the release ladder sizes the guest disk for the
+# model seed before first boot, and the models stage refuses with measured free
+# bytes instead of failing inside cp; a resumed clone of an already grown snapshot
+# is not grown again, and a df the guest cannot answer is an advisory.

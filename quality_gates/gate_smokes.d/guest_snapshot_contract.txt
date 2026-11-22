@@ -1,0 +1,3 @@
+# Per-snapshot guest replay contract (prb_e61e52e1 / chg_72c0ab55): a preserved
+# failure snapshot carries its own recorded instance and install target, frozen
+# at failure, so a replay never aims it at a caller-recomputed default.

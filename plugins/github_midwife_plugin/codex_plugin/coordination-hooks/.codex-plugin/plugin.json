@@ -1,7 +1,7 @@
 {
   "name": "coordination-hooks",
-  "version": "0.1.0+codex.20261017023327",
-  "description": "Project-orientation and coordination reminders, an async Codex context-status reporter, and a synchronous peer-inbox consumer. Live session context (session_start_context.py) observes a register-wide digest and peer inbox counts.",
+  "version": "0.2.0+codex.20261118172015",
+  "description": "Project-orientation and coordination reminders, an async Codex context-status reporter, a synchronous peer-inbox consumer, and working-tree recovery hooks that save uncommitted work before a discarding shell command and at the end of every turn. Live session context (session_start_context.py) observes a register-wide digest, the session principles and peer inbox counts.",
   "author": {
     "name": "seed-factory"
   },
@@ -9,12 +9,13 @@
     "coordination",
     "hooks",
     "context-status",
-    "inbox-consumer"
+    "inbox-consumer",
+    "working-tree-recovery"
   ],
   "interface": {
     "displayName": "Coordination Hooks",
     "shortDescription": "Reviewable hooks for coordinated Codex sessions.",
-    "longDescription": "Adds project-orientation, measured register and peer inbox context; context_status_reporter.py, a stock-Codex async Stop hook that reads the current transcript and reports only fresh post-compaction native context measurements; and inbox_consumer.py (CDX-06), a SYNCHRONOUS Stop hook that checks the session's peer inbox for anything already queued and, if so, forces the turn to continue (Codex decision:block) with a fixed nudge -- plus report_inbox_consumption, an honesty attestation recorded on every check regardless of outcome, so a session that has not actually consumed its inbox can never be mistaken for one that has. Deployment-specific guidance stays in the project's native AGENTS.md instructions, and hook revocation remains an explicit operator action in Codex's supported /hooks surface.",
+    "longDescription": "Adds project-orientation, measured register and peer inbox context; context_status_reporter.py, a stock-Codex async Stop hook that reads the current transcript and reports only fresh post-compaction native context measurements; and inbox_consumer.py (CDX-06), a SYNCHRONOUS Stop hook that checks the session's peer inbox for anything already queued and, if so, forces the turn to continue (Codex decision:block) with a fixed nudge -- plus report_inbox_consumption, an honesty attestation recorded on every check regardless of outcome, so a session that has not actually consumed its inbox can never be mistaken for one that has. recovery_codex.py (working-tree recovery) saves every file git can see into a local store outside the repository before a shell command that discards working-tree state (stash, checkout or restore of paths, reset --hard, clean, rebase, branch -D, worktree remove --force) and at the end of every turn, then lets the command run: it never blocks, never prints a decision, and tells you what it saved when the discarded changes were not made by this session. Deployment-specific guidance stays in the project's native AGENTS.md instructions, and hook revocation remains an explicit operator action in Codex's supported /hooks surface.",
     "developerName": "seed-factory",
     "category": "Productivity",
     "capabilities": [

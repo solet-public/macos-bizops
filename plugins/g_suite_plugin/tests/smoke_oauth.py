@@ -48,7 +48,7 @@ from g_suite_plugin.oauth.token_store import (  # noqa: E402
     _build_access_envelope,
 )
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
-from gsuite_fakes import run_queued  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import run_queued  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []

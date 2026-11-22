@@ -8,18 +8,15 @@ separately, because that fake does not enforce the provider's read cap.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections.abc import Generator
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -30,24 +27,17 @@ ROOT = Path(__file__).resolve().parents[3]
 for source in (ROOT, ROOT / "ananta/src", ROOT / "plugins/agent_messaging_plugin/src", ROOT / "plugins/agent_messaging_plugin/tests"):
     sys.path.insert(0, str(source))
 
-import managed_dispatch_smoke as dispatch_fixture  # noqa: E402
 import model_cell_enablement_smoke as cells_fixture  # noqa: E402
 import peer_inbox_horizon_both_sections_smoke as inbox_fixture  # noqa: E402
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.core.actions.action_processor import ActionProcessor  # noqa: E402
 from ananta.core.actions.action_queue_poller import ActionQueuePoller, QueuedAction  # noqa: E402
 from ananta.core.state.execution_token_context import action_execution_context  # noqa: E402
-from session_lifecycle_transport_smoke import packet_lane  # noqa: E402
 from session_lifecycle_verbs_smoke import _FakeDriverWithChannel  # noqa: E402
 
-from agent_messaging_plugin import (  # noqa: E402
-    managed_dispatch,  # noqa: E402
-    session_hosts,  # noqa: E402
-)
 from agent_messaging_plugin import plugin as plugin_module  # noqa: E402
+from agent_messaging_plugin import session_hosts  # noqa: E402
 from agent_messaging_plugin import session_lifecycle_verbs as lifecycle_bodies  # noqa: E402
-from agent_messaging_plugin.operation_jobs import RegisteredOperations  # noqa: E402
 from agent_messaging_plugin.session_lifecycle_store import ManagedSessionSpec, insert_managed_session, transition_lifecycle_state  # noqa: E402
 from plugins.agent_messaging_plugin.tests.small_plugin_job_support import Ledger, check_wrapper, execute, measure_case, terminal  # noqa: E402
 
@@ -56,18 +46,14 @@ REGISTERED_CASES = (
     "deliver_result",
     "deliver_error",
     "deliver_job_completion",
-    "managed_dispatch_status",
-    "report_managed_dispatch",
     "set_model_cells_enabled",
     "peer_inbox",
     "retire_role",
-    "send_peer_message",
+    "peer_send",
     "set_autonomic_slot",
     "reconcile_operator_session_liveness",
     "clear_session",
     "compact_session",
-    "preserve_lane_evidence",
-    "read_lane_evidence",
     "drive_session",
     "retire_session",
     "start_interface",
@@ -106,6 +92,7 @@ def _u1_adapter_contract() -> Generator[None]:
 @contextmanager
 def fixture(module: ModuleType, _verb: str, *, delay: float = 0.0, failed: bool = False, failure_message: str = "fixture transport failure") -> Generator[tuple[Any, Ledger, list[int]]]:
     ledger, touches = Ledger(), []
+    collector = module.collect_ledger_tmux_report
 
     def transport(result: Any) -> Any:
         touches.append(threading.get_ident())
@@ -120,7 +107,8 @@ def fixture(module: ModuleType, _verb: str, *, delay: float = 0.0, failed: bool 
     plugin.orchestrator_ref = SimpleNamespace(async_job_manager=ledger, get_service=lambda _name: state)
     with ExitStack() as stack:
         stack.enter_context(patch.dict("os.environ", {"SOLET_NAME": "fixture"}))
-        stack.enter_context(patch("subprocess.run", side_effect=lambda *_args, **_kwargs: transport(subprocess.CompletedProcess([], 0, b""))))
+        stack.enter_context(patch.object(module, "collect_ledger_tmux_report", side_effect=lambda observed_state: transport(collector(observed_state))))
+        stack.enter_context(patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")))
         yield plugin, ledger, touches
 
 
@@ -178,7 +166,15 @@ def test_registered_driver_admission() -> None:
     plugin, ledger, state = plugin_module.AgentMessagingPlugin(), Ledger(), RealShapeState()
     plugin.logger = logging.getLogger("registered-messaging-fixture")
     plugin.orchestrator_ref = SimpleNamespace(async_job_manager=ledger, get_service=lambda _name: state)
-    insert_managed_session(cast("Any", state), ManagedSessionSpec(agent_instance_id="agi-compact", lane_id="compact", assignment=fixture_assignment(), work_class="read_only", budget_line="fixture", host="registered-fixture"))
+    insert_managed_session(
+        cast("Any", state),
+        ManagedSessionSpec(
+            agent_instance_id="agi-compact",
+            host="registered-fixture",
+            label="compact",
+            session_origin="registered",
+        ),
+    )
     transition_lifecycle_state(cast("Any", state), agent_instance_id="agi-compact", from_state="spawning", to_state="live", directed_by="fixture")
     driver = _FakeDriverWithChannel()
     entered, release = threading.Event(), threading.Event()
@@ -234,7 +230,7 @@ def _registered_operation_case(verb: str) -> None:
             stale = ledger.create_job(plugin_name=plugin.name, action_name=verb, request_data={})["data"]["job_id"]
             ledger.update_job(stale, {"status": "completed", "result": {"old": index}})
         entered, release = threading.Event(), threading.Event()
-        body_name = "peer_inbox_action" if verb == "peer_inbox" else verb
+        body_name = f"{verb}_action" if verb in {"peer_inbox", "peer_send"} else verb
         body = getattr(plugin, body_name)
         expected = {"action_status": "completed", "data": {"exact": verb, "history": list(range(500))}, "actions": [], "error": None, "timestamp": "fixture"}
 
@@ -257,80 +253,6 @@ def _registered_operation_case(verb: str) -> None:
             assert terminal(plugin, ledger, job_id)["result"] == expected, "complete_exact_id_envelope"
             assert operation({"event_kind": "completion", "value": verb}, {"session_id": "fixture-session"}) == expected and len(ledger.rows) == 201, "direct_body_has_no_recursive_admission"
         print(f"PASS registered dispatch control {verb}: exact id, one job, complete history, synchronous body")
-
-
-def test_registered_ack_and_completion() -> None:
-    """Native ACK/milestone are immediate; only the real artifact hash is queued."""
-    with tempfile.TemporaryDirectory() as raw:
-        state = dispatch_fixture._state()
-        prepared = dispatch_fixture._prepare(state, Path(raw))
-        dispatch_fixture._first_turn(state, delivered=True)
-        plugin, ledger = plugin_module.AgentMessagingPlugin(), Ledger()
-        plugin.orchestrator_ref = SimpleNamespace(async_job_manager=ledger, get_service=lambda _name: state)
-        base = {"dispatch_id": "mdp-fixture", "attempt_agent_instance_id": "agi-worker-1"}
-        identity = dispatch_fixture._assignment_identity(managed_dispatch.read_managed_dispatch(state, "mdp-fixture"))
-        with patch.object(plugin, "_dispatch_actor_from_state", return_value=dispatch_fixture._worker_actor()):
-            ack = asyncio.run(_poll_registered(plugin, "report_managed_dispatch", {**base, "event_id": "outer-ack", "event_kind": "ack", "prior_version": 1, "payload": {**identity, "role_binding": "Codex-Fixture-Builder", "scope_readback_sha256": "a" * 64, "plan_sha256": "b" * 64}}))
-            assert ack["data"]["state"] == "active" and not ledger.rows, "native_ack_immediately_accepted_without_job"
-            milestone = asyncio.run(
-                _poll_registered(
-                    plugin,
-                    "report_managed_dispatch",
-                    {**base, "event_id": "outer-milestone", "event_kind": "milestone", "prior_version": 2, "payload": {"completed_work": ["fixture"], "current_evidence": {"fixture": "pass"}, "next_action": "completion", "next_report_deadline": (datetime.now(UTC) + timedelta(minutes=10)).isoformat()}},
-                )
-            )
-            assert milestone["data"]["version"] == 3 and not ledger.rows, "native_milestone_immediately_readable"
-            _completion_hash_case(plugin, ledger, state, prepared, base, identity)
-
-
-def _completion_hash_case(plugin: Any, ledger: Ledger, state: Any, prepared: dict[str, Any], base: dict[str, Any], identity: dict[str, Any]) -> None:
-    artifact = Path(prepared["expected_path"])
-    artifact.write_text("complete fixture\n")
-    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    entered, release = threading.Event(), threading.Event()
-    original = managed_dispatch._file_sha256
-
-    def hashed(path: Path) -> str:
-        assert len(ledger.rows) == 1, "job_persisted_before_actual_hash"
-        entered.set()
-        assert release.wait(5), "hash_leaf_released"
-        return original(path)
-
-    parameters = {
-        **base,
-        "event_id": "outer-completion",
-        "event_kind": "completion",
-        "prior_version": 3,
-        "payload": {**identity, "artifact_path": str(artifact), "artifact_sha256": digest, "completion_contract_sha256": prepared["completion_contract_sha256"], "verdict": "READY-FOR-REVIEW", "evidence": {"focused": {"status": "pass", "detail": "fixture"}, "registered": {"status": "pass", "detail": "fixture"}}},
-    }
-    with patch.object(managed_dispatch, "_file_sha256", side_effect=hashed):
-        try:
-            receipt = asyncio.run(_poll_registered(plugin, "report_managed_dispatch", parameters))
-            job_id = _assert_admission(receipt, ledger, "report_managed_dispatch")
-            assert entered.wait(2) and managed_dispatch.read_managed_dispatch(state, "mdp-fixture")["state"] == "active", "receipt_is_not_completion_acceptance"
-            ordinary = asyncio.run(_poll_registered(plugin, "check_choreography_job_status", {"job_id": job_id}))
-            assert ordinary["success"] and not release.is_set(), "ordinary_dispatch_during_actual_hash"
-        finally:
-            release.set()
-        outcome = terminal(plugin, ledger, job_id)["result"]
-    assert outcome["data"]["state"] == "completion_reported" and outcome["data"]["version"] == 4, outcome
-    stale = asyncio.run(_poll_registered(plugin, "report_managed_dispatch", {**parameters, "event_id": "outer-stale"}))
-    rejected = terminal(plugin, ledger, stale["data"]["job_id"])
-    assert rejected["status"] == "error" and rejected["result"]["error"]["code"] == "stale_dispatch_version", "stale_cas_refusal_retained_in_terminal_job"
-    assert managed_dispatch.read_managed_dispatch(state, "mdp-fixture")["version"] == 4, "stale_completion_does_not_advance_state"
-    print("PASS native ACK/milestone, real parked completion hash, exact result, stale CAS refusal")
-
-
-def test_unselected_operations() -> None:
-    """Unselected work and carved-out receipt consumers retain their direct path."""
-    with fixture(plugin_module, "compact_session") as (plugin, ledger, _touches):
-        assert isinstance(plugin, RegisteredOperations), "registered_owner_mixin_is_bound"
-        assert plugin.admit_registered_operation("report_alive", {}, {}) is None and not ledger.rows, "unselected_has_no_admission_or_effect"
-        for verb in ("peer_ack_role_read_page", "peer_role_read_receipts"):
-            assert plugin.admit_registered_operation(verb, {}, {}) is None and not ledger.rows, "synchronous_receipt_consumer_carveout"
-        for kind in ("ack", "milestone", "blocked", "invalid"):
-            assert plugin.admit_registered_operation("report_managed_dispatch", {"event_kind": kind}, {}) is None and not ledger.rows, "noncompletion_reporting_keeps_native_path"
-    print("PASS unselected and carved-out operations have no admission or effects")
 
 
 def test_uncertain_operations() -> None:
@@ -386,36 +308,12 @@ def _parked_result(plugin: Any, ledger: Ledger, verb: str, parameters: dict[str,
         return terminal(plugin, ledger, job_id)["result"]
 
 
-def test_complete_dispatch_event_population() -> None:
-    with tempfile.TemporaryDirectory() as raw:
-        state = cast("Any", dispatch_fixture._state())
-        dispatch_fixture._prepare(state, Path(raw))
-        dispatch_fixture._first_turn(state, delivered=True)
-        dispatch_fixture._ack(state)
-        # Derive the declared namespace/table from the same schema as the reader.
-        from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
-
-        from agent_messaging_plugin.schema import TABLE_MANAGED_DISPATCH_EVENT
-
-        namespace, table = AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_DISPATCH_EVENT
-        seed = {key: value for key, value in state.rows(namespace, table)[0].items() if key not in {"id", "external_id"}}
-        for index in range(300):
-            state.write_state(namespace, {"table": table, "record": {**seed, "event_id": f"population-{index}", "event_kind": "fixture-rejected", "accepted": False}})
-        plugin, ledger = plugin_module.AgentMessagingPlugin(), Ledger()
-        plugin.orchestrator_ref = SimpleNamespace(async_job_manager=ledger, get_service=lambda _name: state)
-        from agent_messaging_plugin import managed_dispatch_bridge
-
-        outcome = _parked_result(plugin, ledger, "managed_dispatch_status", {"dispatch_id": "mdp-fixture"}, managed_dispatch_bridge, "all_managed_dispatch_events")
-        assert outcome["data"]["event_count"] == len(state.rows(namespace, table)) and outcome["data"]["rejected_event_count"] == 300, "complete_event_population_not_sliced"
-        print("PASS native status: 300 rejected events plus full original receipt history")
-
-
 def test_complete_cell_population_and_stale_policy() -> None:
     state, plugin, ledger = cells_fixture.fixture(), plugin_module.AgentMessagingPlugin(), Ledger()
     for index in range(300):
         state.write_state(cells_fixture.NS, {"table": cells_fixture.CELLS, "record": cells_fixture.cell(f"fixture-{index}")})
     plugin.orchestrator_ref = SimpleNamespace(async_job_manager=ledger, get_service=lambda _name: state)
-    actor = managed_dispatch.DispatchActor("agi-operator", "ases-operator", "live_peer_binding")
+    actor = lifecycle_bodies.DispatchActor("agi-operator", "ases-operator", "live_peer_binding")
     parameters = {"selector": {}, "enabled": False, "reason": "fixture policy", "expected_updated_at": None}
     with patch.object(plugin, "_dispatch_actor_from_state", return_value=actor):
         outcome = _parked_result(plugin, ledger, "set_model_cells_enabled", parameters, cells_fixture.policy, "read_cells_page")
@@ -451,32 +349,13 @@ def test_complete_role_population_and_receipts() -> None:
     print("PASS in-memory inbox: 151 held roles, 155 role messages, exact page acknowledgement; real-PG >100 remains RED")
 
 
-def test_real_custody_leaves() -> None:
-    with tempfile.TemporaryDirectory() as raw:
-        lane = packet_lane(Path(raw), "registered-custody")
-        plugin_module.AgentMessagingPlugin.__init__(lane.plugin)
-        ledger = Ledger()
-        lane.plugin.orchestrator_ref = SimpleNamespace(async_job_manager=ledger, get_service=lambda _name: lane.state)
-        with patch.dict("os.environ", lane.environment, clear=True):
-            snapshot = _parked_result(lane.plugin, ledger, "read_lane_evidence", lane.identity, lifecycle_bodies, "snapshot_lane_custody")
-            parameters = {**lane.identity, "expected_fingerprint": snapshot["data"]["fingerprint"], "disposition": "preserved", "rationale": "registered custody fixture"}
-            saved = _parked_result(lane.plugin, ledger, "preserve_lane_evidence", parameters, lifecycle_bodies, "capture_lane_custody")
-            assert saved["data"]["complete"] and saved["data"]["custody_verified"], "actual_custody_packet_read_verified"
-            assert saved["data"]["binding"]["agent_instance_id"] == lane.identity["agent_instance_id"] and lane.lane.path.exists(), "exact_bound_custody_without_retirement"
-        print("PASS real custody snapshot and capture: persisted jobs precede filesystem leaves")
-
-
 if __name__ == "__main__":
     print(f"ADAPTER EVIDENCE: U1 owner-hook double={USES_U1_ADAPTER_DOUBLE}; real merged route required at landing")
     test_registered_driver_admission()
     test_registered_operation_matrix()
-    test_registered_ack_and_completion()
-    test_unselected_operations()
     test_uncertain_operations()
-    test_complete_dispatch_event_population()
     test_complete_cell_population_and_stale_policy()
     test_complete_role_population_and_receipts()
-    test_real_custody_leaves()
     test_execute_paths()
     test_wrapper_selection()
     test_empty_exception_message()

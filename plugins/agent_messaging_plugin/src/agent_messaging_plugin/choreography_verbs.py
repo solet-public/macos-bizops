@@ -191,7 +191,6 @@ def dispatch_rotate_session(
 class RestartSessionDispatchRequest:
     agent_instance_id: str
     role_name: str
-    role_class: str
     grace_seconds: int = 30
 
 
@@ -202,12 +201,7 @@ def dispatch_restart_session(
 ) -> dict[str, Any]:
     """§2.2 ``restart_session`` dispatch. Validates required fields + flow
     context, then creates a queued job — no ``terminate_session``/
-    ``spawn_session`` call happens on this path. ``role_class`` is required
-    from the caller because ``managed_session`` (what the worker reads back
-    for the other spawn fields) has no ``role_class`` column of its own —
-    verified at source; the caller already knows it from having spawned or
-    managed this session originally, so it is not worth a second lookup
-    against the ``role`` table. Errors: ``missing_argument``,
+    ``spawn_session`` call happens on this path. Errors: ``missing_argument``,
     ``missing_flow_context``, ``job_creation_failed``."""
     if not req.agent_instance_id.strip():
         raise VerbError(
@@ -216,8 +210,6 @@ def dispatch_restart_session(
         )
     if not req.role_name.strip():
         raise VerbError("missing_argument", "restart_session requires a non-empty role_name.")
-    if not req.role_class.strip():
-        raise VerbError("missing_argument", "restart_session requires a non-empty role_class.")
     session_id, flow_id = validate_flow_session_context(state)
     return _create_job(
         async_job_manager,
@@ -226,7 +218,6 @@ def dispatch_restart_session(
         request_data={
             "agent_instance_id": req.agent_instance_id,
             "role_name": req.role_name,
-            "role_class": req.role_class,
             "grace_seconds": req.grace_seconds,
         },
         session_id=session_id,

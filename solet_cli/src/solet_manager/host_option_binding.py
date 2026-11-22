@@ -9,7 +9,19 @@ is later upgraded keeps the choice it was created with.
 
 The host is measured with r52's :func:`host_platform.read_host_platform`, and
 only while such a choice is pending; a Mac that cannot be measured refuses the
-choice rather than guessing.  Binding marks each option the host does not
+choice rather than guessing.
+
+A profile named in ``_MODEL_PROFILES`` also needs the Apple model to be usable
+(prb_66bfd36b): a Mac that meets its macOS version and machine but whose
+measured model is unavailable is treated as not meeting it, so it takes the
+route a Mac below the threshold takes.  The requirement is declared here and
+not in the flow's ``host_profiles``, because that table is shared with the
+existing-install flow, which never re-judges a route.  Only the macOS version
+and machine can refuse. A model that could not be measured withholds neither
+option of the profile, so the owner or the config chooses and no default follows
+from it; an advisory says so (rul_becb4bed).
+
+Binding marks each option the host does not
 satisfy ``unavailable`` with an owner-facing ``unavailable_reason`` and drops it
 from ``recommended_option_refs``, so the existing default rule (exactly one
 recommendation) and the existing option refusal apply unchanged.
@@ -19,6 +31,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import logging
 from collections.abc import Callable, Iterator, Mapping
 from typing import TYPE_CHECKING, cast
 
@@ -43,6 +56,8 @@ type JsonObject = dict[str, JsonValue]
 _CONDITION_KEYS = frozenset({"host_profile", "operator"})
 _PROFILE_KEYS = frozenset({"macos_major_min", "machine"})
 _OPERATORS = frozenset({"meets", "below"})
+_MODEL_PROFILES = frozenset({"apple_fm"})
+_LOG = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -53,8 +68,16 @@ class HostProfile:
     macos_major_min: int
     machine: str
 
-    def met_by(self, host: HostPlatform) -> bool:
+    def platform_met_by(self, host: HostPlatform) -> bool:
         return host.macos_major >= self.macos_major_min and host.machine == self.machine
+
+    def met_by(self, host: HostPlatform) -> bool:
+        if not self.platform_met_by(host):
+            return False
+        return not (self.name in _MODEL_PROFILES and host.model is not None and not host.model.available)
+
+    def model_unknown_on(self, host: HostPlatform) -> bool:
+        return self.name in _MODEL_PROFILES and host.model is None and self.platform_met_by(host)
 
     def describe(self) -> str:
         return f"macOS {self.macos_major_min} or later on {self.machine}"
@@ -101,12 +124,27 @@ def host_bound(
     host = _measure(read_host_platform if read is None else read)
     flow = copy.deepcopy(bundle.flow)
     profiles = host_profiles(flow)
+    unknown: set[str] = set()
     for decision_id, option_id, condition in _host_conditions(flow):
         profile = profiles[str(condition["host_profile"])]
+        if profile.model_unknown_on(host):
+            unknown.add(profile.name)
+            continue
         if profile.met_by(host) != (condition["operator"] == "meets"):
-            _withhold(cast(JsonObject, cast(JsonObject, flow["decisions"])[decision_id]), option_id,
-                      profile, host, str(condition["operator"]))
+            _withhold(cast(JsonObject, cast(JsonObject, flow["decisions"])[decision_id]), option_id, profile, host, str(condition["operator"]))
+    _advise_unknown_model(unknown, host)
     return dataclasses.replace(bundle, flow=flow)
+
+
+def _advise_unknown_model(profiles: set[str], host: HostPlatform) -> None:
+    """Say, once per binding, that an unknown Apple model left every option of a model-dependent profile offered, with none preselected."""
+    if profiles:
+        _LOG.warning(
+            "Apple model availability is unknown on this Mac (macOS %s, %s), so the %s route is not chosen for it: the Apple-native option and the options of a Mac below that profile are all offered and no option is preselected; the setup wizard asks, and a configured answer is accepted",
+            host.product_version,
+            host.machine,
+            ", ".join(sorted(profiles)),
+        )
 
 
 def _withhold(definition: JsonObject, option_id: str, profile: HostProfile, host: HostPlatform, operator: str) -> None:
@@ -127,11 +165,7 @@ def require_host_available(bound: ContractBundle, selections: Mapping[str, JsonV
         option = _static_options(bound.decisions[decision_id])[option_id]
         if option.get("availability") != "unavailable":
             continue
-        offered = sorted(
-            candidate_id
-            for candidate_id, candidate in _static_options(bound.decisions[decision_id]).items()
-            if candidate.get("availability") == "supported"
-        )
+        offered = sorted(candidate_id for candidate_id, candidate in _static_options(bound.decisions[decision_id]).items() if candidate.get("availability") == "supported")
         raise ContractError(
             f"decision {decision_id!r} option {option_id!r} is not available on this Mac: {option['unavailable_reason']}",
             repair=f"Choose one of {offered} for {decision_id}, or run setup on a Mac that meets the requirement.",
@@ -151,6 +185,8 @@ def _measure(read: HostReader) -> HostPlatform:
 def _unavailable_reason(label: str, profile: HostProfile, host: HostPlatform, operator: str) -> str:
     running = f"this Mac runs macOS {host.product_version} ({host.machine})"
     if operator == "meets":
+        if profile.platform_met_by(host) and host.model is not None:
+            return f"{running}; its Apple model is not available ({host.model.reason}), so {label} cannot run here and this Mac takes the route of a Mac that does not meet {profile.describe()}"
         return f"{running}; {label} requires {profile.describe()}"
     return f"{running}; this Mac meets the {profile.describe()} profile and uses the Apple-native option instead of {label}"
 

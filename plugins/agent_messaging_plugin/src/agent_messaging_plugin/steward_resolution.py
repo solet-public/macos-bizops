@@ -1,10 +1,13 @@
-"""Steward-binding resolution for the platform sweep's notify legs (GAU-26).
+"""Steward-binding resolution from a worker's recorded spawner id (GAU-26).
 
-Every steward-notify leg in :mod:`session_sweep` keys on the LEDGER
-``spawned_by_instance_id`` recorded on the worker's row, but this fleet runs
-TWO session-id minting schemes at once and a live bridge binding is not
-guaranteed to be registered under that id. Resolution therefore has three
-legs, in order; they are complementary rather than redundant, which is what
+:mod:`session_sweep` reads the agent id of a dependency waiter through
+:func:`managed_session_agent_id`; :func:`resolve_steward_binding` has no
+caller now.
+
+A lookup keyed on the LEDGER ``spawned_by_instance_id`` recorded on the
+worker's row has a problem: this fleet runs TWO session-id minting schemes at
+once and a live bridge binding is not guaranteed to be registered under that
+id. Resolution therefore has three legs, in order; they are complementary rather than redundant, which is what
 makes the set complete:
 
 1. the peer registry by instance id — a bridge-bound steward, registered under
@@ -45,7 +48,8 @@ logger = logging.getLogger(__name__)
 
 
 def _managed_session_row(
-    state: StateManagementInterface, agent_instance_id: str,
+    state: StateManagementInterface,
+    agent_instance_id: str,
 ) -> dict[str, Any] | None:
     """The spawner's own ``managed_session`` row, or ``None`` when it has
     none (an operator-launched steward is the normal case here, not a
@@ -60,7 +64,8 @@ def _managed_session_row(
 
 
 def managed_session_agent_id(
-    state: StateManagementInterface, agent_instance_id: str,
+    state: StateManagementInterface,
+    agent_instance_id: str,
 ) -> str:
     row = _managed_session_row(state, agent_instance_id)
     return str(row.get("agent_id") or "") if row is not None else ""
@@ -113,9 +118,9 @@ def _resolve_steward_via_agent_session_id(
         return peer_registry.resolve_by_agent_session_id(agent_session_id)
     except PeerSessionAmbiguousError:
         logger.warning(
-            "steward resolution: agent_session_id %s has more than one live "
-            "binding; not guessing a delivery target",
-            agent_session_id, exc_info=True,
+            "steward resolution: agent_session_id %s has more than one live binding; not guessing a delivery target",
+            agent_session_id,
+            exc_info=True,
         )
         return None
 
@@ -126,7 +131,7 @@ def _resolve_steward_via_managed_session(
     spawner_instance_id: str,
     managed_row: dict[str, Any],
 ) -> BridgeBinding | None:
-    """Fallback path for :func:`_notify_steward_of_overdue` — the ORIGINAL
+    """Fallback path for :func:`resolve_steward_binding` — the ORIGINAL
     (pre-fix) resolution route: look up the spawner's ``agent_id`` via its
     own ``managed_session`` row, then resolve ``(agent_id, instance_id)``.
     Kept for a direct registry-by-instance-id miss; no longer the primary
@@ -147,13 +152,12 @@ def resolve_steward_binding(
     peer_registry: PeerRegistry,
     spawner_instance_id: str,
 ) -> BridgeBinding | None:
-    """Shared resolution step for every steward-notify path below: resolve
-    straight from the peer registry by instance id, then — on a miss — through
-    the spawner's own ``managed_session`` row, first by the stable
-    ``agent_session_id`` it records (GAU-26, see
+    """Resolve a spawner's live binding: straight from the peer registry by
+    instance id, then — on a miss — through the spawner's own ``managed_session``
+    row, first by the stable ``agent_session_id`` it records (GAU-26, see
     :func:`_resolve_steward_via_agent_session_id`) and finally by the original
-    ``(agent_id, instance_id)`` detour. See :func:`_notify_steward_of_overdue`
-    for why the direct lookup is primary.
+    ``(agent_id, instance_id)`` detour. The direct lookup is primary because the
+    detour fails for any spawner with no ``managed_session`` row of its own.
 
     The two ledger-backed legs are complementary rather than redundant, which
     is what makes the pair complete: a bridge-bound steward that has no
@@ -167,11 +171,13 @@ def resolve_steward_binding(
     if managed_row is None:
         return None
     binding = _resolve_steward_via_agent_session_id(
-        peer_registry=peer_registry, managed_row=managed_row,
+        peer_registry=peer_registry,
+        managed_row=managed_row,
     )
     if binding is not None:
         return binding
     return _resolve_steward_via_managed_session(
-        peer_registry=peer_registry, spawner_instance_id=spawner_instance_id,
+        peer_registry=peer_registry,
+        spawner_instance_id=spawner_instance_id,
         managed_row=managed_row,
     )

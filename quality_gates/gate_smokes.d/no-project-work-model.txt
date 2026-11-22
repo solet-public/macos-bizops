@@ -1,0 +1,5 @@
+# chg_9a9da28b, plan r74-d1-z1 (upl_ca45e914b0b74a5caf03c4967e6d468a version 9), requirement no-project-work-model:
+# no seed profile ships the removed work model outside its reviewed lines, and a session starts, lists, meters and
+# stops from generic fields alone with HOME empty. Offline; its upgrade leg needs PRIVATE_TEST_PG_MANIFEST and is a
+# disclosed skip (exit 77) without it.
+plugins/agent_messaging_plugin/tests/no_project_work_model_smoke.py

@@ -8,7 +8,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -24,6 +24,7 @@ from agent_messaging_plugin import model_catalog_policy as catalog  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 
 CONTEXT = {"caller_attribution_instance_id": "agi-operator"}
+WORKER = {"caller_attribution_instance_id": "agi-worker"}  # derived identity of a session that does not hold Operator
 VERBS = ("set_model_catalog_policy", "set_model_catalog_source", "read_model_catalog_policy")
 
 
@@ -46,9 +47,9 @@ def invoke(plugin: OperatorPlugin, name: str, arguments: dict[str, Any], *, cont
     actions: list[dict[str, Any]] = []
     factory = ActionFactory(
         process_registry={"processes": {key: {"parameters": {field: param.to_dict() for field, param in metadata.parameters.items()}}}},
-        template_engine=SimpleNamespace(resolve_templates=lambda definition, _context: definition),
-        state_service=SimpleNamespace(generate_unique_string=lambda **_kw: {"action_status": "completed", "data": {"random_string": "catalog-smoke"}}),
-        action_event_recorder=SimpleNamespace(store_action_event=lambda action: actions.append(action) or "ae-catalog-smoke"),
+        template_engine=cast(Any, SimpleNamespace(resolve_templates=lambda definition, _context: definition)),
+        state_service=cast(Any, SimpleNamespace(generate_unique_string=lambda **_kw: {"action_status": "completed", "data": {"random_string": "catalog-smoke"}})),
+        action_event_recorder=cast(Any, SimpleNamespace(store_action_event=lambda action: actions.append(action) or "ae-catalog-smoke")),
     )
     factory.submit_action_definition({"process_key": key, "arguments": arguments, "flow_id": "flow-catalog-smoke", "result_processor_kind": None, "error_processor_kind": None})
     return method(actions[0]["parameters"], CONTEXT if context is None else context)
@@ -60,7 +61,9 @@ def data(answer: dict[str, Any]) -> dict[str, Any]:
 
 
 def write(plugin: OperatorPlugin, kind: str, action: str, expected: int | None, **kwargs: Any) -> dict[str, Any]:
-    return invoke(plugin, f"set_model_catalog_{kind}", {"stable_id": kind, "action": action, "expected_revision": expected, "reason": "explicit operator fixture", **kwargs})
+    """``context`` (default: the Operator session) picks the calling session; the rest are verb arguments."""
+    context = kwargs.pop("context", None)
+    return invoke(plugin, f"set_model_catalog_{kind}", {"stable_id": kind, "action": action, "expected_revision": expected, "reason": "explicit operator fixture", **kwargs}, context=context)
 
 
 def read(plugin: OperatorPlugin, kind: str, **kwargs: Any) -> dict[str, Any]:
@@ -110,7 +113,7 @@ class CatalogVerbsSmoke(unittest.TestCase):
             self.assertEqual(read(plugin, kind)["current"], records[-1])
         self.assertFalse(any(table == "model_cell_policy" for _, table in state._rows), "CELL_ENABLEMENT_UNTOUCHED")
 
-    def test_t2_stale_spoofed_nonoperator_and_atomic_rollback(self) -> None:
+    def test_t2_stale_spoofed_unidentified_and_atomic_rollback_with_a_nonoperator_session_writing(self) -> None:
         state, plugin = setup()
         for kind, values in (("policy", {}), ("source", source_values())):
             data(write(plugin, kind, "set", None, values=values))
@@ -121,9 +124,13 @@ class CatalogVerbsSmoke(unittest.TestCase):
                 self.assertEqual(state._rows, before, "STALE_WRITES_NOTHING")
             arguments = {"stable_id": kind, "action": "retire", "expected_revision": 1, "reason": "fixture"}
             method = getattr(plugin, f"set_model_catalog_{kind}")
-            for context, extra in (({}, {}), ({"caller_attribution_instance_id": "agi-worker"}, {}), (CONTEXT, {"actor": "ases-operator"}), (CONTEXT, {"agent_session_id": "ases-operator"})):
-                self.assertEqual(method({**arguments, **extra}, context)["action_status"], "failed", "SPOOFED_OR_NONOPERATOR_REFUSED")
+            # Refused: no derived identity at all, and every attempt to supply an actor. Holding Operator is not a condition.
+            for context, extra in (({}, {}), (CONTEXT, {"actor": "ases-operator"}), (CONTEXT, {"agent_session_id": "ases-operator"}), (WORKER, {"agent_instance_id": "agi-operator"})):
+                self.assertEqual(method({**arguments, **extra}, context)["action_status"], "failed", "UNIDENTIFIED_OR_SPOOFED_REFUSED")
                 self.assertEqual(state._rows, before)
+            # A session that does not hold Operator is held to the same stale-premise refusal and writes nothing.
+            self.assertEqual(write(plugin, kind, "retire", 9, context=WORKER)["action_status"], "failed", "NONOPERATOR_STALE_REFUSED")
+            self.assertEqual(state._rows, before, "NONOPERATOR_STALE_WRITES_NOTHING")
             state.fail_next("write")  # history insertion follows the projection CAS
             with self.assertRaises(RuntimeError):
                 write(plugin, kind, "retire", 1)
@@ -132,11 +139,16 @@ class CatalogVerbsSmoke(unittest.TestCase):
             with patch.object(_RealShapeTransaction, "update_state", return_value=0):
                 self.assertEqual(write(plugin, kind, "retire", 1)["action_status"], "failed", "CAS_LOSER_REFUSED")
             self.assertEqual(state._rows, before, "CAS_LOSER_HAS_NO_HISTORY")
-            data(write(plugin, kind, "retire", 1))
-            self.assertEqual(read(plugin, kind)["current"]["provenance"]["revision"], 2, "CURRENT_OPERATOR_AFTER_REFUSAL_PASSES")
+            # Pass path: a derived session that does not hold Operator may set the value; the history row names it and its reason.
+            retired = data(write(plugin, kind, "retire", 1, context=WORKER, reason="nonoperator session applying the user's order"))["current"]["provenance"]
+            self.assertEqual(retired["actor"], "ases-worker", "NONOPERATOR_ACTOR_RECORDED")
+            self.assertEqual(retired["reason"], "nonoperator session applying the user's order", "NONOPERATOR_REASON_RECORDED")
+            self.assertEqual(read(plugin, kind)["current"]["provenance"]["revision"], 2, "CURRENT_AFTER_NONOPERATOR_WRITE")
+            history = read(plugin, kind, history_limit=5)["history"]
+            self.assertEqual([(row["provenance"]["actor"], row["provenance"]["revision"]) for row in history], [("ases-operator", 1), ("ases-worker", 2)], "HISTORY_NAMES_EACH_WRITER")
 
     def test_t3_every_optional_field_clear_and_reversal(self) -> None:
-        state, plugin = setup()
+        _, plugin = setup()
         values = {
             "dispatch_score_margin": 2.0,
             "cost_tie_tolerance": 0.03,

@@ -343,12 +343,8 @@ class CoreSchemaDefinitions:
                     table_name="action_definitions",
                     id_prefix="ad",
                     columns={
-                        "action_name": ColumnDefinition(
-                            type=ColumnType.TEXT, unique=True, not_null=True
-                        ),
-                        "process_external_id": ColumnDefinition(
-                            type=ColumnType.TEXT, not_null=True
-                        ),
+                        "action_name": ColumnDefinition(type=ColumnType.TEXT, unique=True, not_null=True),
+                        "process_external_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
                         "description": ColumnDefinition(type=ColumnType.TEXT),
                         "default_parameters": ColumnDefinition(type=ColumnType.TEXT, default="{}"),
                         "is_enabled": ColumnDefinition(type=ColumnType.BOOLEAN, default=1),
@@ -475,9 +471,7 @@ class CoreSchemaDefinitions:
                     },
                     indexes=[
                         IndexDefinition("idx_full_table_name", ["full_table_name"]),
-                        IndexDefinition(
-                            "idx_table_column", ["full_table_name", "column_name"], unique=True
-                        ),
+                        IndexDefinition("idx_table_column", ["full_table_name", "column_name"], unique=True),
                         IndexDefinition("idx_namespace_table", ["table_namespace", "table_name"]),
                     ],
                 ),
@@ -493,18 +487,14 @@ class CoreSchemaDefinitions:
                     table_name="key_value_store",
                     id_prefix="kv",
                     columns={
-                        "scope": ColumnDefinition(
-                            type=ColumnType.TEXT, not_null=True, default="GLOBAL"
-                        ),
+                        "scope": ColumnDefinition(type=ColumnType.TEXT, not_null=True, default="GLOBAL"),
                         "key": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
                         "value": ColumnDefinition(type=ColumnType.TEXT),
                         "ttl": ColumnDefinition(type=ColumnType.INTEGER),
                         "expires_at": ColumnDefinition(type=ColumnType.DATETIME),
                     },
                     indexes=[
-                        IndexDefinition(
-                            "idx_namespace_scope_key", ["namespace", "scope", "key"], unique=True
-                        ),
+                        IndexDefinition("idx_namespace_scope_key", ["namespace", "scope", "key"], unique=True),
                         IndexDefinition("idx_namespace", ["namespace"]),
                         IndexDefinition("idx_expires", ["expires_at"]),
                     ],
@@ -669,9 +659,7 @@ class CoreSchemaDefinitions:
                         ),
                         "duration_ms": ColumnDefinition(type=ColumnType.INTEGER),
                         "error_message": ColumnDefinition(type=ColumnType.TEXT),
-                        "started_at": ColumnDefinition(
-                            type=ColumnType.DATETIME, default="(NOW() AT TIME ZONE 'UTC')"
-                        ),
+                        "started_at": ColumnDefinition(type=ColumnType.DATETIME, default="(NOW() AT TIME ZONE 'UTC')"),
                         "completed_at": ColumnDefinition(type=ColumnType.DATETIME),
                     },
                     indexes=[
@@ -835,12 +823,7 @@ class CoreSchemaDefinitions:
                         ),
                         "result_processor_kind": ColumnDefinition(
                             type=ColumnType.TEXT,
-                            check=(
-                                "result_processor_kind IS NULL OR "
-                                "result_processor_kind IN ("
-                                "'inference', 'deterministic_continuation', "
-                                "'bridge_delivery')"
-                            ),
+                            check=("result_processor_kind IS NULL OR result_processor_kind IN ('inference', 'deterministic_continuation', 'bridge_delivery')"),
                             description=(
                                 "Result-processor kind ('inference' / "
                                 "'deterministic_continuation' / "
@@ -855,11 +838,7 @@ class CoreSchemaDefinitions:
                         ),
                         "error_processor_kind": ColumnDefinition(
                             type=ColumnType.TEXT,
-                            check=(
-                                "error_processor_kind IS NULL OR "
-                                "error_processor_kind IN ("
-                                "'inference', 'bridge_delivery')"
-                            ),
+                            check=("error_processor_kind IS NULL OR error_processor_kind IN ('inference', 'bridge_delivery')"),
                             description=(
                                 "Error-processor kind ('inference' / "
                                 "'bridge_delivery').  Controls how an "
@@ -1008,9 +987,7 @@ class CoreSchemaDefinitions:
                         "from_process_key": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
                         "to_process_key": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
                         "compatibility_score": ColumnDefinition(type=ColumnType.REAL, default=0.0),
-                        "transformation_required": ColumnDefinition(
-                            type=ColumnType.INTEGER, default=0
-                        ),
+                        "transformation_required": ColumnDefinition(type=ColumnType.INTEGER, default=0),
                         "transformation_function": ColumnDefinition(type=ColumnType.TEXT),
                         "common_usage_count": ColumnDefinition(type=ColumnType.INTEGER, default=0),
                         "last_used_at": ColumnDefinition(type=ColumnType.DATETIME),
@@ -1020,9 +997,7 @@ class CoreSchemaDefinitions:
                         IndexDefinition("idx_to_key", ["to_process_key"]),
                         IndexDefinition("idx_compatibility", ["compatibility_score"]),
                         IndexDefinition("idx_usage", ["common_usage_count"]),
-                        IndexDefinition(
-                            "idx_unique_chain", ["from_process_key", "to_process_key"], unique=True
-                        ),
+                        IndexDefinition("idx_unique_chain", ["from_process_key", "to_process_key"], unique=True),
                     ],
                 )
             },
@@ -1037,9 +1012,7 @@ class CoreSchemaDefinitions:
                     table_name="event_bus_events",
                     id_prefix="evt",
                     columns={
-                        "event_id": ColumnDefinition(
-                            type=ColumnType.TEXT, unique=True, not_null=True
-                        ),
+                        "event_id": ColumnDefinition(type=ColumnType.TEXT, unique=True, not_null=True),
                         "event_type": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
                         "source_plugin": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
                         "target_plugin": ColumnDefinition(type=ColumnType.TEXT),
@@ -1072,9 +1045,7 @@ class CoreSchemaDefinitions:
                     table_name="usage_stats",
                     id_prefix="stat",
                     columns={
-                        "process_key": ColumnDefinition(
-                            type=ColumnType.TEXT, unique=True, not_null=True
-                        ),
+                        "process_key": ColumnDefinition(type=ColumnType.TEXT, unique=True, not_null=True),
                         "total_executions": ColumnDefinition(type=ColumnType.INTEGER, default=0),
                         "last_used": ColumnDefinition(type=ColumnType.DATETIME),
                     },
@@ -1096,9 +1067,7 @@ class CoreSchemaDefinitions:
                     table_name="action_results",
                     id_prefix="ar",
                     columns={
-                        "core__action_events_id": ColumnDefinition(
-                            type=ColumnType.TEXT, not_null=True
-                        ),
+                        "core__action_events_id": ColumnDefinition(type=ColumnType.TEXT, not_null=True),
                         "result_data": ColumnDefinition(type=ColumnType.TEXT),
                         "result_source": ColumnDefinition(type=ColumnType.TEXT),
                     },
@@ -1127,19 +1096,12 @@ class CoreSchemaDefinitions:
                 "result_processing_violations": TableSchema(
                     table_name="result_processing_violations",
                     id_prefix="rpv",
-                    description=(
-                        "Structured record of result-processing contract "
-                        "violations raised by the validation gate; one row "
-                        "per violation."
-                    ),
+                    description=("Structured record of result-processing contract violations raised by the validation gate; one row per violation."),
                     columns={
                         "core__action_events_id": ColumnDefinition(
                             type=ColumnType.TEXT,
                             not_null=True,
-                            description=(
-                                "Foreign key to the completed action whose "
-                                "result violated the contract"
-                            ),
+                            description=("Foreign key to the completed action whose result violated the contract"),
                         ),
                         "core__flows_id": ColumnDefinition(
                             type=ColumnType.TEXT,
@@ -1161,46 +1123,28 @@ class CoreSchemaDefinitions:
                         "result_processor_kind": ColumnDefinition(
                             type=ColumnType.TEXT,
                             not_null=True,
-                            check=(
-                                "result_processor_kind IN ("
-                                "'inference', 'deterministic_continuation', "
-                                "'bridge_delivery')"
-                            ),
-                            description=(
-                                "Step-level kind that produced the violation"
-                            ),
+                            check=("result_processor_kind IN ('inference', 'deterministic_continuation', 'bridge_delivery')"),
+                            description=("Step-level kind that produced the violation"),
                         ),
                         "invariant": ColumnDefinition(
                             type=ColumnType.TEXT,
                             not_null=True,
-                            description=(
-                                "Identifier of the failed invariant (see "
-                                "ResultContractViolationDetails.invariant)"
-                            ),
+                            description=("Identifier of the failed invariant (see ResultContractViolationDetails.invariant)"),
                         ),
                         "message": ColumnDefinition(
                             type=ColumnType.TEXT,
                             not_null=True,
-                            description=(
-                                "Human-readable invariant message; mirrors "
-                                "FrameworkError.message on the violation"
-                            ),
+                            description=("Human-readable invariant message; mirrors FrameworkError.message on the violation"),
                         ),
                         "expected_json": ColumnDefinition(
                             type=ColumnType.TEXT,
                             not_null=True,
-                            description=(
-                                "Serialized expected payload from the "
-                                "violation details"
-                            ),
+                            description=("Serialized expected payload from the violation details"),
                         ),
                         "observed_json": ColumnDefinition(
                             type=ColumnType.TEXT,
                             not_null=True,
-                            description=(
-                                "Serialized observed payload from the "
-                                "violation details"
-                            ),
+                            description=("Serialized observed payload from the violation details"),
                         ),
                         # ``id`` and ``created_at`` are platform-managed
                         # standard fields; they are added automatically and
@@ -1212,10 +1156,12 @@ class CoreSchemaDefinitions:
                             ["core__action_events_id"],
                         ),
                         IndexDefinition(
-                            "idx_rpv_flows_id", ["core__flows_id"],
+                            "idx_rpv_flows_id",
+                            ["core__flows_id"],
                         ),
                         IndexDefinition(
-                            "idx_rpv_invariant", ["invariant"],
+                            "idx_rpv_invariant",
+                            ["invariant"],
                         ),
                     ],
                 ),
@@ -1523,6 +1469,12 @@ class CoreSchemaDefinitions:
         from ananta.services.inference_service.schema import (
             get_inference_deferred_vertex_schema,
         )
+        from ananta.services.lifecycle_management_service.deployment_record_schema import (
+            get_deployment_record_schema,
+        )
+        from ananta.services.lifecycle_management_service.work_folder_schema import (
+            get_work_folder_schema,
+        )
 
         return [
             CoreSchemaDefinitions.get_schema_registry_schema(),  # MUST be first - other schemas depend on it
@@ -1561,4 +1513,8 @@ class CoreSchemaDefinitions:
             # request/response queue; separate per-type table — the drain
             # shares the MECHANISM, never the deferred-vertex table).
             get_inference_completion_request_schema(),
+            # The solet's own record of its deployments (record + event tables).
+            get_deployment_record_schema(),
+            # The solet's own record of its work folders (record + event tables).
+            get_work_folder_schema(),
         ]

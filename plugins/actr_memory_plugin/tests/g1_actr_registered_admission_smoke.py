@@ -94,6 +94,27 @@ class Vectors:
         return {"action_status": "completed", "data": {"result": {"vector_count": len(self.rows)}}}
 
 
+class Schedules:
+    """An owned scheduler double: the census context cannot serve the real scheduling service."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.release.set()
+        self.threads: list[str] = []
+        self.created: list[str] = []
+
+    def clear_scheduled_actions_by_tag(self, tag: str) -> dict[str, Any]:
+        self.threads.append(threading.current_thread().name)
+        self.entered.set()
+        assert self.release.wait(5), "owned scheduler clear was not released"
+        return {"action_status": "completed", "data": {"cleared_count": 0, "tag": tag}}
+
+    def create_cron_schedule(self, **values: Any) -> dict[str, Any]:
+        self.created.append(str(values["label"]))
+        return {"action_status": "completed", "data": {"schedule_id": f"owned-{len(self.created)}"}}
+
+
 class TimedProcessor(ActionProcessor):
     """Measure the actual handler invocation, excluding factory/claim setup."""
 
@@ -172,6 +193,8 @@ class Harness:
         self.backend: Any = self.plugin._backend
         self.embeddings, self.vectors = Embeddings(), Vectors()
         self.backend.embedding_service, self.backend.vector_service = self.embeddings, self.vectors
+        self.schedules = Schedules()
+        self.plugin._scheduling_service = self.schedules
         with patch.object(self.plugin.orchestrator_ref, "async_job_manager", None):
             bootstrap = self.memory.remember(content="synchronous startup body", embed=False)
         assert bootstrap["memory_id"] and "job_id" not in bootstrap
@@ -237,6 +260,33 @@ def parked_admission(harness: Harness) -> str:
     assert first["result"]["memory_id"]
     print("PASS parked real remember, persisted bounded request, token lineage, ordinary dispatch and FIFO")
     return str(first["result"]["memory_id"])
+
+
+def parked_schedule_install(harness: Harness) -> None:
+    """The boot-time installer must return a receipt while the scheduler clear is parked."""
+    schedules = harness.schedules
+    schedules.entered.clear()
+    schedules.release.clear()
+    timer = threading.Timer(0.6, schedules.release.set)
+    timer.start()
+    try:
+        response, elapsed = harness.dispatch("ensure_schedules", {})
+        print(json.dumps({"ensure_schedules_handler_ms": elapsed * 1000, "scheduler_clear_reached": schedules.entered.is_set(), "response": response}), flush=True)
+        assert elapsed < 0.050 and response["data"]["status"] == "queued", "ensure_schedules ran before returning a receipt"
+        assert schedules.entered.wait(1), "the bound scheduler clear was not reached"
+        assert not schedules.release.is_set(), "fixture released before the admission proof"
+        job_id = response["data"]["job_id"]
+        assert harness.runtime.job(job_id)["status"] == "processing", "the receipt did not come back while the scheduler clear was parked"
+    finally:
+        schedules.release.set()
+        timer.cancel()
+        timer.join()
+    job = harness.terminal(response)
+    assert job["result"]["schedules"] == ["memorization_queue", "strength_recompute", "consolidation"] and len(schedules.created) == 3, job
+    assert schedules.threads == ["registered-actr_memory_plugin"], schedules.threads
+    direct = harness.memory.ensure_schedules()
+    assert isinstance(direct, dict) and "job_id" not in direct and direct["message"] == "Schedules already configured", direct
+    print("PASS parked ensure_schedules: receipt before the scheduler clear, owner thread, full result in the job, direct callers synchronous")
 
 
 def strength_race(harness: Harness, memory_id: str) -> None:
@@ -376,7 +426,7 @@ def family(harness: Harness, scratch: Path, memory_id: str) -> None:
     archived = memory_backend.get_memory(harness.state, memory_id)
     assert archived and archived["status"] == "archived"
     assert harness.covered == SELECTED, (SELECTED - harness.covered, harness.covered - SELECTED)
-    print("PASS all 28 registered methods, three cron pairs, synchronous export/upsert, nested bodies, tag correction and terminal deletion")
+    print("PASS all 29 registered methods, three cron pairs, synchronous export/upsert, nested bodies, tag correction and terminal deletion")
 
 
 def family_case(harness: Harness, method: str, arguments: dict[str, Any]) -> None:
@@ -457,7 +507,7 @@ def declarations() -> None:
     from ananta.core.actions.action_processor import _REGISTERED_JOB_OPERATIONS
     from ananta.services.memory_service.interfaces.public import MemoryServiceAPI
 
-    assert len(SELECTED) == 28 and _REGISTERED_JOB_OPERATIONS["memory_service"] == SELECTED
+    assert len(SELECTED) == 29 and _REGISTERED_JOB_OPERATIONS["memory_service"] == SELECTED
     for method in SELECTED | SYNCHRONOUS:
         metadata = getattr(MemoryServiceAPI, method)._service_interface_metadata
         definition = metadata.to_process_dict()
@@ -466,7 +516,7 @@ def declarations() -> None:
         if method in SELECTED:
             assert set(definition["return_value_schema"]["properties"]) == {"job_id", "status"}, method
             assert document["is_async"] is True, method
-    print("PASS 28 exact declarations and two explicit synchronous consumer exceptions")
+    print("PASS 29 exact declarations and two explicit synchronous consumer exceptions")
 
 
 def fixture_import_paths() -> None:
@@ -511,6 +561,7 @@ def main() -> int:
             faulthandler.cancel_dump_traceback_later()
             harness = Harness(context)
             memory_id = parked_admission(harness)
+            parked_schedule_install(harness)
             parked_recall_and_direct_order(harness)
             strength_race(harness, memory_id)
             from actr_memory_consolidation_kb_exclusion_smoke import verify_consolidation_effects

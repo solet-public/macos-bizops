@@ -25,7 +25,7 @@ dev-checkout workbench record — not part of the shipped tree).
 
 In router topology, the router owns it:
 ``plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/blue_green_router/install_router.py``
-writes ``<name>.bridge.port`` directly (via ``Path.write_text``) at
+writes ``<name>.bridge.port`` directly (via ``write_private_port_file``) at
 install time. the solet children do NOT maintain a bridge port file — the
 bridge HTTP server's bound port lives in-process on the
 ``agent_messaging_plugin``'s ``bridge_port`` property, and the
@@ -50,6 +50,7 @@ import asyncio
 import logging
 import os
 import socket
+import tempfile
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -262,13 +263,35 @@ def _port_file_path(runtime_dir: Path, solet_name: str, service_name: str) -> Pa
     return runtime_dir / filename
 
 
+def write_private_port_file(path: Path, port: int) -> None:
+    """Publish ``port`` at ``path`` with mode 0o600 and its whole content in one step.
+
+    The port goes to a private temp file in the same directory. ``mkstemp``
+    creates that file at 0o600 and ``fchmod`` pins the mode whatever the umask,
+    then ``os.replace`` swaps it over ``path``. A reader sees the old file or the
+    complete new one, never an empty or world-readable file. If any step fails,
+    the temp file is removed and ``path`` keeps its old bytes and mode. The temp
+    name ends in ``.tmp``, not in the port file's name, so a watcher that matches
+    the port file by name suffix does not match it.
+    """
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(str(port))
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
 def write_port_file(port: int, service_name: str = "rest", solet_name: str | None = None) -> Path:
     """Write a port number to a runtime file for service discovery.
 
     Creates a file at: ``{runtime_dir}/{solet_name}.{service_name}.port``.
 
     The bridge service file ``<name>.bridge.port`` is router-owned —
-    ``install_router.py`` writes it directly via ``Path.write_text`` at
+    ``install_router.py`` writes it directly via ``write_private_port_file`` at
     install time. Calling this function with ``service_name='bridge'``
     raises ``ValueError`` to prevent a regression where a solet-side
     component overwrites the router's canonical file (the historical
@@ -302,13 +325,7 @@ def write_port_file(port: int, service_name: str = "rest", solet_name: str | Non
     runtime_dir = get_runtime_dir(solet_name)
     port_file = _port_file_path(runtime_dir, solet_name, service_name)
 
-    # Write atomically (write to temp, then rename)
-    temp_file = port_file.with_suffix(".port.tmp")
-    temp_file.write_text(str(port))
-    temp_file.rename(port_file)
-
-    # Set user-only permissions (rw-------)
-    port_file.chmod(0o600)
+    write_private_port_file(port_file, port)
 
     return port_file
 
@@ -352,16 +369,10 @@ def write_routerless_bridge_port_file(port: int, solet_name: str | None = None) 
     runtime_dir = get_runtime_dir(solet_name)
     port_file = _port_file_path(runtime_dir, solet_name, "bridge")
 
-    # Write atomically (write to temp, then rename) — same shape as
-    # write_port_file, deliberately duplicated rather than shared so the
-    # bridge guard above can never be bypassed by refactoring this
-    # function to call write_port_file internally.
-    temp_file = port_file.with_suffix(".port.tmp")
-    temp_file.write_text(str(port))
-    temp_file.rename(port_file)
-
-    # Set user-only permissions (rw-------)
-    port_file.chmod(0o600)
+    # Publish at mode 0o600 in one step through the shared helper. The helper
+    # takes a path, not a service name, and this function never calls
+    # write_port_file, so the bridge guard above is not bypassed here.
+    write_private_port_file(port_file, port)
 
     return port_file
 

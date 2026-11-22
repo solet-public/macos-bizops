@@ -60,6 +60,13 @@ from solet_cli.tests._step5_support import (  # noqa: E402
 )
 
 
+def _previous_template_digests(template: str) -> list[str]:
+    """The manifest keeps the digest a launcher had before the unnamed-launch default."""
+    if template not in _UNNAMED_LAUNCH_DEFAULT_HUNKS:
+        return []
+    return [digest_of(_before_unnamed_launch_default(template, template_bytes(template)))]
+
+
 def retirement_artifacts() -> list[dict[str, Any]]:
     """The release's closed paths: three launchers and its sourced environment."""
     return [
@@ -72,7 +79,7 @@ def retirement_artifacts() -> list[dict[str, Any]]:
             "stamp": "# rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST}",
             "template_ref": f"{TEMPLATES}/{template}",
             "template_digest": digest_of(template_bytes(template)),
-            "previous_template_digests": [],
+            "previous_template_digests": _previous_template_digests(template),
         }
         for name, destination, template in (
             ("claude_launcher", "{TARGET}/client/bin/claude-{NAME}", "claude_launcher.template"),
@@ -120,6 +127,68 @@ def _document(baseline: Release) -> dict[str, Any]:
     return bundle_document(baseline, artifacts=[*default_artifacts(), *retirement_artifacts()])
 
 
+_UNNAMED_LAUNCH_DEFAULT_HUNKS: dict[str, tuple[tuple[str, str], ...]] = {
+    # (current text, base text): the launchers' unnamed-launch default, which the
+    # base 0f5db311 templates did not have; the base named the role "Operator".
+    "claude_launcher.template": (
+        (
+            "#           peer registry (default: the launch folder's name; no role is\n#           claimed)\n",
+            "#           peer registry (default: Operator)\n",
+        ),
+        (
+            (
+                "# An unnamed launch is named for the folder it was started from (characters\n"
+                '# outside A-Za-z0-9._- become "-", "session" at the filesystem root) and\n'
+                "# claims no role; a name the person gives is also their own role claim.\n"
+                'label="$1"\nlabel_defaulted=0\nif [[ -z "$label" ]]; then\n'
+                '  label="${PWD:t}"\n  label="${label//[^A-Za-z0-9._-]/-}"\n'
+                '  [[ -z "$label" ]] && label="session"\n  label_defaulted=1\nfi\n'
+            ),
+            'label="${1:-Operator}"\n',
+        ),
+        (
+            (
+                "# A defaulted label stays display metadata: the bridge treats a label alone as\n"
+                "# a role claim unless AGENT_ROLE_AUTOBIND=0, and refuses that setting beside an\n"
+                "# inherited AGENT_ROLE, so the unnamed launch drops it.\n"
+                "if (( label_defaulted )); then\n  unset AGENT_ROLE\n  export AGENT_ROLE_AUTOBIND=0\nfi\n"
+            ),
+            "",
+        ),
+    ),
+    "codex_launcher.template": (
+        (
+            "#   role   durable coordination role and human-facing label (default: the\n#          launch folder's name; no role is claimed)\n",
+            "#   role   durable coordination role and human-facing label (default: Operator)\n",
+        ),
+        (
+            (
+                "# An unnamed launch is named for the folder it was started from (characters\n"
+                '# outside A-Za-z0-9._- become "-", "session" at the filesystem root) and\n'
+                "# claims no role; a name the person gives is also their own role claim.\n"
+                'role="${1:-}"\nif (( $# > 0 )); then\n  shift\nfi\nrole_defaulted=0\nif [[ -z "$role" ]]; then\n'
+                '  role="${PWD:t}"\n  role="${role//[^A-Za-z0-9._-]/-}"\n'
+                '  [[ -z "$role" ]] && role="session"\n  role_defaulted=1\nfi\n'
+            ),
+            'role="${1:-Operator}"\nif (( $# > 0 )); then\n  shift\nfi\n',
+        ),
+        (
+            ('typeset -a claim_args\nif (( role_defaulted )); then\n  # The label is display metadata only: no role is exported or claimed, and an\n  # inherited one is dropped.\n  unset AGENT_ROLE\n  claim_args=(--no-claim)\nelse\n  export AGENT_ROLE="$role"\n  claim_args=(--role "$AGENT_ROLE")\nfi\n'),
+            'export AGENT_ROLE="$role"\n',
+        ),
+        ('      "${claim_args[@]}" \\\n', '      --role "$AGENT_ROLE" \\\n'),
+    ),
+}
+
+
+def _before_unnamed_launch_default(name: str, content: bytes) -> bytes:
+    """Restore the base launcher text the unnamed-launch default replaced."""
+    for current, base in _UNNAMED_LAUNCH_DEFAULT_HUNKS.get(name, ()):
+        assert current.encode() in content, f"{name}: launcher text changed; update the unnamed-launch hunks"
+        content = content.replace(current.encode(), base.encode(), 1)
+    return content
+
+
 def _legacy_controller_template(name: str) -> bytes:
     """Reconstruct immutable base templates without needing a Git checkout.
 
@@ -129,7 +198,7 @@ def _legacy_controller_template(name: str) -> bytes:
     if name == "fleet_functions.zsh.template":
         content = (_ROOT / "plugins/github_midwife_plugin/tests/fixtures/fleet_functions_before_controller_retirement.zsh").read_bytes()
     else:
-        content = template_bytes(name)
+        content = _before_unnamed_launch_default(name, template_bytes(name))
     if name == "claude_launcher.template":
         content = content.replace(b"(the quality gate path)", b"(the Git-Controller gate path)", 1)
         comment = (

@@ -37,7 +37,14 @@ DEFAULT_PROBE_TIMEOUT_SECONDS = 30
 # The first llama-server launch initializes ggml's Metal backend; the r55 macOS 26
 # guest needed about 26 s end to end, so the default 30 s budget left no margin
 # (iss_1086dfbb).  Only this probe gets more; the global default stays put.
-PROBE_TIMEOUT_OVERRIDES: dict[str, int] = {"setup::llama_cpp.server_available": 90}
+# The roster probe waits for the inference plugin to finish starting after a cold boot (the SHA of
+# the seeded model, its load, the plugin's own retry and grammar pre-warm; prb_3207f577, chg_bc21e865):
+# 390 = a 300 s wait + the 90 s margin the doctor keeps (_ROSTER_WAIT_MARGIN_SECONDS), so the last
+# poll's 60 s call ends 30 s inside this budget.  `solet-manager doctor` reads the same table.
+PROBE_TIMEOUT_OVERRIDES: dict[str, int] = {
+    "setup::llama_cpp.server_available": 90,
+    "service_interface::lifecycle_management_service.list_plugins": 390,
+}
 CREATE_FLOW_ID = "macos.repository_setup"
 EXISTING_INSTALL_FLOW_ID = "existing-install"
 EXISTING_INSTALL_REF_PREFIX = "existing::"
@@ -235,24 +242,14 @@ class PlannedAction:
             "condition_or_evidence_ref",
         }
         if set(raw) != required:
-            raise AdapterProtocolError(
-                "planned action does not match the closed v1 shape"
-            )
+            raise AdapterProtocolError("planned action does not match the closed v1 shape")
         try:
             return cls(
                 id=identifier(raw["id"], "planned action id"),
-                title=public_string(
-                    raw["title"], "planned action title", maximum=256
-                ),
-                mutation_kind=identifier(
-                    raw["mutation_kind"], "planned action mutation_kind"
-                ),
-                target=public_string(
-                    raw["target"], "planned action target", maximum=512
-                ),
-                requires_confirmation=boolean(
-                    raw["requires_confirmation"], "requires_confirmation"
-                ),
+                title=public_string(raw["title"], "planned action title", maximum=256),
+                mutation_kind=identifier(raw["mutation_kind"], "planned action mutation_kind"),
+                target=public_string(raw["target"], "planned action target", maximum=512),
+                requires_confirmation=boolean(raw["requires_confirmation"], "requires_confirmation"),
                 condition_or_evidence_ref=public_string(
                     raw["condition_or_evidence_ref"],
                     "planned action condition_or_evidence_ref",
@@ -260,9 +257,7 @@ class PlannedAction:
                 ),
             )
         except (KeyError, TypeError, ValueError) as exc:
-            raise AdapterProtocolError(
-                f"planned action fields are invalid: {exc}"
-            ) from exc
+            raise AdapterProtocolError(f"planned action fields are invalid: {exc}") from exc
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {
@@ -295,14 +290,10 @@ class DiscoveredCandidate:
             "metadata",
         }
         if set(raw) != required:
-            raise AdapterProtocolError(
-                "discovered candidate does not match the closed v1 shape"
-            )
+            raise AdapterProtocolError("discovered candidate does not match the closed v1 shape")
         metadata = raw.get("metadata")
         if not isinstance(metadata, dict):
-            raise AdapterProtocolError(
-                "discovered candidate metadata must be an object"
-            )
+            raise AdapterProtocolError("discovered candidate metadata must be an object")
         return cast(Self, _candidate_from_fields(cls, raw, metadata))
 
     def to_dict(self) -> dict[str, JsonValue]:
@@ -325,20 +316,11 @@ def _candidate_from_fields(
             decision_id=identifier(raw["decision_id"], "candidate decision_id"),
             value=public_string(raw["value"], "candidate value", maximum=256),
             label=public_string(raw["label"], "candidate label", maximum=256),
-            recommendation_rank=nonnegative_integer(
-                raw["recommendation_rank"], "candidate recommendation_rank"
-            ),
-            metadata={
-                identifier(key, "candidate metadata key"): public_value(
-                    value, f"candidate metadata {key}"
-                )
-                for key, value in metadata.items()
-            },
+            recommendation_rank=nonnegative_integer(raw["recommendation_rank"], "candidate recommendation_rank"),
+            metadata={identifier(key, "candidate metadata key"): public_value(value, f"candidate metadata {key}") for key, value in metadata.items()},
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise AdapterProtocolError(
-            f"discovered candidate fields are invalid: {exc}"
-        ) from exc
+        raise AdapterProtocolError(f"discovered candidate fields are invalid: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -384,9 +366,7 @@ class OperationResult:
             diagnostic_bytes = public_stderr.encode("utf-8")
             stdout_bytes = len(stdout.encode("utf-8", errors="replace"))
             stderr_bytes = len(stderr.encode("utf-8", errors="replace"))
-            diagnostic = diagnostic_bytes[:FAILURE_STDERR_DIAGNOSTIC_LIMIT].decode(
-                "utf-8", errors="ignore"
-            )
+            diagnostic = diagnostic_bytes[:FAILURE_STDERR_DIAGNOSTIC_LIMIT].decode("utf-8", errors="ignore")
             return cls(
                 request.request_id,
                 request.operation_id,
@@ -414,8 +394,7 @@ class OperationResult:
                     "stdout_truncated": stdout_bytes > STREAM_LIMIT_BYTES,
                     "stderr_truncated": stderr_bytes > STREAM_LIMIT_BYTES,
                     "stderr_diagnostic": diagnostic,
-                    "stderr_diagnostic_truncated": len(diagnostic_bytes)
-                    > FAILURE_STDERR_DIAGNOSTIC_LIMIT,
+                    "stderr_diagnostic_truncated": len(diagnostic_bytes) > FAILURE_STDERR_DIAGNOSTIC_LIMIT,
                 },
             )
         return cls(
@@ -485,9 +464,7 @@ class OperationResult:
             "stdout": self.stdout,
             "stderr": self.stderr,
             "planned_actions": [item.to_dict() for item in self.planned_actions],
-            "discovered_candidates": [
-                item.to_dict() for item in self.discovered_candidates
-            ],
+            "discovered_candidates": [item.to_dict() for item in self.discovered_candidates],
             "evidence": list(self.evidence),
             "reason": self.reason,
             "repair": self.repair,
@@ -502,9 +479,7 @@ def _parse_operation_result(
     normalized = _normalize_legacy_result_envelope(raw)
     _validate_result_envelope(normalized, request)
     action_objects = _object_array(normalized.get("planned_actions"), "planned_actions")
-    candidate_objects = _object_array(
-        normalized.get("discovered_candidates"), "discovered_candidates"
-    )
+    candidate_objects = _object_array(normalized.get("discovered_candidates"), "discovered_candidates")
     evidence_objects = _object_array(normalized.get("evidence"), "evidence")
     result = _result_from_fields(
         result_type,
@@ -529,9 +504,7 @@ def _normalize_legacy_result_envelope(
     return raw
 
 
-def _validate_result_envelope(
-    raw: dict[str, JsonValue], request: OperationRequest
-) -> None:
+def _validate_result_envelope(raw: dict[str, JsonValue], request: OperationRequest) -> None:
     if set(raw) != _RESULT_KEYS:
         raise AdapterProtocolError("adapter result does not match the closed v1 envelope")
     if raw.get("protocol_version") != PROTOCOL_VERSION:
@@ -620,18 +593,14 @@ def _validate_result_status(
         raise AdapterProtocolError("non-success adapter status requires error_kind")
     request.validate()
     if request.phase == "apply" and result.checkpoint_status is CheckpointStatus.VERIFIED:
-        raise AdapterProtocolError(
-            "apply results cannot own verification; run a post-apply probe"
-        )
+        raise AdapterProtocolError("apply results cannot own verification; run a post-apply probe")
     mutation_statuses = {
         CheckpointStatus.APPLYING,
         CheckpointStatus.APPLIED,
         CheckpointStatus.CONSENTED,
     }
     if request.phase == "probe" and result.checkpoint_status in mutation_statuses:
-        raise AdapterProtocolError(
-            "probe results cannot report mutation-phase checkpoint statuses"
-        )
+        raise AdapterProtocolError("probe results cannot report mutation-phase checkpoint statuses")
 
 
 def _validate_result_collections(
@@ -640,14 +609,10 @@ def _validate_result_collections(
 ) -> None:
     if request.phase == "apply" or request.probe_purpose in _EMPTY_ACTION_PURPOSES:
         if result.planned_actions:
-            raise AdapterProtocolError(
-                "apply, post-apply, and completion results must have empty planned_actions"
-            )
+            raise AdapterProtocolError("apply, post-apply, and completion results must have empty planned_actions")
     if request.probe_purpose != "decision_discovery":
         if result.discovered_candidates:
-            raise AdapterProtocolError(
-                "discovered_candidates must be empty outside a decision_discovery probe"
-            )
+            raise AdapterProtocolError("discovered_candidates must be empty outside a decision_discovery probe")
     _require_unique_action_ids(result.planned_actions)
     _require_unique_candidate_keys(result.discovered_candidates)
 
@@ -663,11 +628,7 @@ def _require_unique_candidate_keys(
 ) -> None:
     values = tuple((item.decision_id, item.value) for item in candidates)
     if len(values) != len(set(values)):
-        raise AdapterProtocolError(
-            "adapter discovered_candidates contains duplicate values"
-        )
+        raise AdapterProtocolError("adapter discovered_candidates contains duplicate values")
     ranks = tuple((item.decision_id, item.recommendation_rank) for item in candidates)
     if len(ranks) != len(set(ranks)):
-        raise AdapterProtocolError(
-            "adapter discovered_candidates contains duplicate recommendation ranks"
-        )
+        raise AdapterProtocolError("adapter discovered_candidates contains duplicate recommendation ranks")

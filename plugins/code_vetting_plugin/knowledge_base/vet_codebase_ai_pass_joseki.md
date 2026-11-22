@@ -47,8 +47,8 @@ Embedding Description: The joseki card that drives the AI layer of the code-vett
     #     Residual foreign-STALE risk is bounded by the daily self-vet heartbeat (W3C-3)
     #     — see Coherence Obligations.
     #   BLOCKING, not waiverable. Repair = re-run the assembler
-    #   (`python -m code_vetting_plugin.rulebook.assembler`), land the artifact diff via
-    #   the 5-step Git-Controller handoff, re-run this card from step 1. Two failed
+    #   (`python -m code_vetting_plugin.rulebook.assembler`), land the artifact diff through
+    #   the repository's own landing path (in the platform's own development checkout, the 5-step Git-Controller handoff), re-run this card from step 1. Two failed
     #   repair attempts → stop for an operator decision.
 
 [ ] 2. Fetch the run's L1 evidence payloads by run_id (read-verb; NO argument-piping)
@@ -163,7 +163,7 @@ Embedding Description: The joseki card that drives the AI layer of the code-vett
 - A stale rulebook HALTS at step 1's gate: no L2/L3 step runs, because every AI verdict would be computed against a moat that no longer matches canon (the run's trust chain is broken). Do not waiver the rulebook gate to "just get the AI verdicts" — a stale-moat verdict is worse than no verdict.
 - A foreign target's skipped platform-local lens (kb_doc_fidelity) is RECORDED as a coverage row, never silently dropped — the report's coverage-honesty matrix shows it as not-applicable, and the per-lens survival metric is not polluted by a phantom zero.
 - L3 creates no findings — it only re-stamps L2 candidates by preserved id. A candidate with no L3 verdict is unverified and is not rendered as confirmed.
-- Report-not-gate: a confirmed blocker here does NOT block a commit; it informs. The Git-Controller gate run remains the sole commit authority.
+- Report-not-gate: a confirmed blocker here does NOT block a commit; it informs. In the platform's own development checkout, the Git-Controller gate run remains the sole commit authority; any other repository's own landing rules apply there.
 - Foreign-target residual: STALE (as opposed to CORRUPT) rulebook drift is only detectable by rulebook_sync on a self tree; a foreign AI pass therefore trusts the artifact within the window since the last self run — the W3C-3 daily L1-only heartbeat bounds that window to ≤1 day. If the heartbeat is not yet live, run a self L1 pass first when moat-trust matters.
 - The DO-NOT-FLAG screen and POLICY directive reach L3 refuters through the assembled stack ONLY — quoting DNF rules inline into skeptic prompts re-introduces exactly the drift the assembler + rulebook_sync exist to kill.
 
@@ -176,7 +176,7 @@ Embedding Description: The joseki card that drives the AI layer of the code-vett
 
 ## Repair Joseki
 
-- Step 1 stale_rulebook → run the rulebook assembler, commit via the Git-Controller handoff, re-run this card (the AI pass resumes from step 1 against the fresh moat). Not a waiverable gate.
+- Step 1 stale_rulebook → run the rulebook assembler, commit through the repository's own landing path (in the platform's own development checkout, the Git-Controller handoff), re-run this card (the AI pass resumes from step 1 against the fresh moat). Not a waiverable gate.
 - A lens or verify step that errors (transport down, inference timeout) → re-invoke that step; the run_id + persisted evidence are stable, so the AI pass resumes without re-running L1. L3-specific: a TRANSPORT failure re-invokes the same step with the same transport; a VACANT local-inference binding is not a retry case — it fails loud and the repair is operator-side service binding (B3c) before the card resumes. Partially-verified candidate sets resume cleanly: re-stamping is idempotent by preserved finding id, and an unverified candidate is never rendered confirmed.
 - The card follows the authored-joseki PROVING-RUN discipline: it is NOT trusted as mechanized until ONE clean proving run completes (the promote-workbench card is the cautionary precedent of a card trusted before proving).
 

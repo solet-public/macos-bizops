@@ -75,7 +75,7 @@ class SelectedTests(unittest.TestCase):
     def assert_error_path(self, report: dict[str, Any], target: Path) -> None:
         failures = [item for item in report["generalDiagnostics"] if item["severity"] == "error"]
         self.assertEqual(len(failures), 1)
-        self.assertEqual(Path(failures[0]["file"]), target)
+        self.assertEqual(Path(failures[0]["file"]).resolve(), target.resolve())
         self.assertEqual(failures[0]["rule"], "reportAssignmentType")
 
     def test_selected_test_file_reports_and_clears_type_error(self) -> None:
@@ -97,7 +97,7 @@ class SelectedTests(unittest.TestCase):
         # exclusions and diagnostics. Its settings must survive the overlay.
         custom = self.write("config/custom.json", '{\n// project selection remains authoritative\n"extends": "../pyproject.toml", "reportUnusedVariable": false,\n}\n')
         target.write_text("def answer() -> int:\n    unused = 1\n    return 2\n")
-        self.run_checker("-p", str(custom), "src/clean.py", str(target), files=2)
+        self.run_checker("-p", str(custom), "src/clean.py", str(target))
         custom.write_text('{"extends": "../pyproject.toml", "exclude": ["../plugins/**/tests"]}\n')
         target.write_text(BAD)
         operand = "plugins/sample/tests/nested/../nested/test_selected.py"
@@ -124,6 +124,66 @@ class SelectedTests(unittest.TestCase):
         interpreter.symlink_to(Path(sys.executable))
         _, stderr = self.run_checker("--pythonpath", str(interpreter), "--project", "pyproject.toml", files=1)
         self.assertNotIn("Pyright selected-test config:", stderr)
+
+    def _shared_pyright_site(self) -> Path:
+        spec = importlib.util.find_spec("pyright")
+        if spec is None or spec.origin is None:
+            raise AssertionError("Pyright package is required for this smoke")
+        return Path(spec.origin).resolve().parent.parent
+
+    def _lane_fixture(self, path_file: str) -> Path:
+        fixture = Path(self.temporary.name) / "lane fixture"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(fixture)], check=True, capture_output=True, text=True)
+        sites = list((fixture / "lib").glob("python*/site-packages"))
+        self.assertEqual(len(sites), 1)
+        (sites[0] / "lane fixture.pth").write_text(path_file, encoding="utf-8")
+        return fixture / "bin/python3"
+
+    def _probe_installed_pyright(self, python: Path, environment: dict[str, str]) -> dict[str, str]:
+        probe = """
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("pyright_repo_under_test", sys.argv[1])
+assert spec is not None and spec.loader is not None
+checker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(checker)
+try:
+    result = {"script": str(checker.installed_pyright_script())}
+except checker.PyrightUnavailableError as exc:
+    result = {"error": str(exc)}
+print(json.dumps(result))
+"""
+        result = subprocess.run([str(python), "-c", probe, str(ROOT / "quality_gates/pyright_repo.py")], cwd=ROOT, env=environment, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def test_installed_pyright_follows_lane_path_files_and_rejects_ambient_sources(self) -> None:
+        shared = self._shared_pyright_site()
+        clean_environment = dict(os.environ)
+        clean_environment.pop("PYTHONPATH", None)
+
+        def assert_missing(result: dict[str, str]) -> None:
+            self.assertTrue(result["error"].startswith("Pyright package missing from invoking Python environment "), result)
+
+        for form in (
+            f"import sys; sys.path[:0] = [{str(shared)!r}]\n",
+            f"{shared}\n",
+        ):
+            with self.subTest(path_file=form):
+                python = self._lane_fixture(form)
+                result = self._probe_installed_pyright(python, clean_environment)
+                self.assertEqual(result, {"script": str(shared / "pyright/dist/index.js")})
+
+        python = self._lane_fixture("")
+        ambient_environment = dict(clean_environment, PYTHONPATH=str(shared))
+        result = self._probe_installed_pyright(python, ambient_environment)
+        assert_missing(result)
+
+        python = self._lane_fixture("")
+        result = self._probe_installed_pyright(python, clean_environment)
+        assert_missing(result)
 
 
 SKIP_EXIT_CODE = 77

@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING, Any, Final
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 
 from .held_authorization_store import CREATION_ORDER, PAGE_LIMIT, ordered_page, role_peer_filters
-from .register_unit_client import VerbError
 from .schema import (
     ACCEPTED_AUTHORIZATION_EVENT_ID_PREFIX,
     ACCEPTED_AUTHORIZATION_ID_PREFIX,
@@ -32,9 +31,13 @@ from .schema import (
     TABLE_ACCEPTED_AUTHORIZATION,
     TABLE_ACCEPTED_AUTHORIZATION_EVENT,
 )
+from .verb_errors import VerbError
 
 if TYPE_CHECKING:
-    from ananta.interfaces.state_management_interface import StateManagementInterface, StateTransaction
+    from ananta.interfaces.state_management_interface import (
+        StateManagementInterface,
+        StateTransaction,
+    )
 
 SNAPSHOT_FIELDS: Final[tuple[str, ...]] = (
     "id",

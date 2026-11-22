@@ -1,0 +1,4 @@
+# prb_531208d4 (chg_eb41c026): `solet-bridge call` prints a definite refusal alone and keeps the "Waiter release is
+# uncertain" line for outcomes that really are unknown. Drives the real `call` command over the real BridgeClient and a
+# scripted HTTP transport: offline, no solet, no database.
+plugins/agent_messaging_plugin/tests/cli_refusal_reads_as_refusal_smoke.py

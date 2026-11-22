@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -18,7 +21,11 @@ from quality_gates.candidate_tree import FrozenEntry  # noqa: E402
 
 def _git(root: Path, *arguments: str) -> str:
     result = subprocess.run(
-        ("git", *arguments), cwd=root, text=True, capture_output=True, check=False,
+        ("git", *arguments),
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     if result.returncode != 0:
         raise AssertionError(result.stderr)
@@ -73,9 +80,15 @@ def _check_source_and_composition() -> int:
         assert landing_wave.verify_final_tree(candidate, evidence) == evidence
         assert (candidate.root / "member-a.txt").read_bytes() == b"frozen a\n"
         assert (candidate.root / "new-link").is_symlink()
+        (candidate.root / "member-a.txt").write_bytes(b"drifted bytes\n")
+        try:
+            landing_wave.verify_final_tree(candidate, evidence)
+            raise AssertionError("final tree drift was accepted")
+        except landing_wave.LandingWaveError as error:
+            assert "differs from gated subject" in str(error)
     finally:
         temporary.cleanup()
-    return 6
+    return 7
 
 
 def _check_global_staged_equality() -> int:
@@ -84,14 +97,19 @@ def _check_global_staged_equality() -> int:
         _write(root, "member-a.txt", "changed a\n")
         _git(root, "add", "member-a.txt")
         evidence = landing_wave.verify_staged_member(
-            root, unit_id="unt_a", exact_paths=("member-a.txt",),
+            root,
+            member_label="member a / opaque",
+            exact_paths=("member-a.txt",),
         )
         assert evidence.paths == ("member-a.txt",)
+        assert evidence.member_label == "member a / opaque"
         _write(root, "member-b.txt", "contamination\n")
         _git(root, "add", "member-b.txt")
         try:
             landing_wave.verify_staged_member(
-                root, unit_id="unt_a", exact_paths=("member-a.txt",),
+                root,
+                member_label="member a / opaque",
+                exact_paths=("member-a.txt",),
             )
             raise AssertionError("global staged-index contamination was accepted")
         except landing_wave.LandingWaveError as error:
@@ -99,6 +117,98 @@ def _check_global_staged_equality() -> int:
     finally:
         temporary.cleanup()
     return 3
+
+
+def _check_member_path_contract() -> int:
+    temporary, root = _repository()
+    try:
+        empty = landing_wave.verify_staged_member(
+            root,
+            member_label="empty / opaque",
+            exact_paths=(),
+        )
+        assert empty.paths == () and empty.member_label == "empty / opaque"
+        _write(root, "member-a.txt", "changed a\n")
+        _write(root, "member-b.txt", "changed b\n")
+        _git(root, "add", "member-a.txt", "member-b.txt")
+        for paths, message in (
+            (("member-b.txt", "member-a.txt"), "byte ordered"),
+            (("member-a.txt", "member-a.txt"), "duplicate"),
+            ((), "does not equal"),
+            (("missing.txt",), "does not equal"),
+        ):
+            try:
+                landing_wave.verify_staged_member(
+                    root,
+                    member_label="arbitrary label",
+                    exact_paths=paths,
+                )
+                raise AssertionError(f"invalid member paths accepted: {paths!r}")
+            except landing_wave.LandingWaveError as error:
+                assert message in str(error), str(error)
+        evidence = landing_wave.verify_staged_member(
+            root,
+            member_label="complete coverage",
+            exact_paths=("member-a.txt", "member-b.txt"),
+        )
+        assert len(evidence.paths) == 2
+    finally:
+        temporary.cleanup()
+    return 6
+
+
+def _check_staged_cli() -> int:
+    temporary, root = _repository()
+    try:
+        paths_file = Path(temporary.name) / "paths.txt"
+        paths_file.write_text("", encoding="utf-8")
+        argv = [
+            "verify-staged",
+            "--integration-root",
+            str(root),
+            "--member-label",
+            "opaque / cli",
+            "--paths-file",
+            str(paths_file),
+        ]
+        output = StringIO()
+        with redirect_stdout(output):
+            assert landing_wave.main(argv) == 0
+        evidence = json.loads(output.getvalue())
+        assert evidence["member_label"] == "opaque / cli"
+        assert evidence["paths"] == []
+        assert len(evidence["staged_sha256"]) == 64
+        _write(root, "member-a.txt", "staged\n")
+        _git(root, "add", "member-a.txt")
+        with redirect_stdout(StringIO()):
+            assert landing_wave.main(argv) == 2
+        paths_file.write_text("member-a.txt\n", encoding="utf-8")
+        output = StringIO()
+        with redirect_stdout(output):
+            assert landing_wave.main(argv) == 0
+        assert json.loads(output.getvalue())["paths"] == ["member-a.txt"]
+    finally:
+        temporary.cleanup()
+    return 7
+
+
+def _check_cherry_picked_member() -> int:
+    temporary, _shared, source_a, _source_b, integration = _two_lane_fixture()
+    try:
+        _write(source_a, "member-a.txt", "picked bytes\n")
+        _git(source_a, "add", "member-a.txt")
+        source_commit = _commit(source_a, "source member")
+        _git(integration, "cherry-pick", "--no-commit", source_commit)
+        evidence = landing_wave.verify_staged_member(
+            integration,
+            member_label="picked / opaque",
+            exact_paths=("member-a.txt",),
+        )
+        assert evidence.member_label == "picked / opaque"
+        assert evidence.paths == ("member-a.txt",)
+    finally:
+        temporary.cleanup()
+    return 2
 
 
 def _check_one_physical_sweep() -> int:
@@ -130,42 +240,6 @@ def _check_one_physical_sweep() -> int:
     return 5
 
 
-def _check_completion_receipt() -> int:
-    payload: dict[str, object] = {
-        "repository_id": "rep_7111540c-ac4a-468c-8f84-b67d8756d1d0",
-        "wave_id": "lwv_test",
-        "landing_id": "lnd_common",
-        "final_master_commit_sha": "a" * 40,
-        "final_master_tree_sha": "b" * 40,
-        "wave_tip_commit_sha": "c" * 40,
-        "manifest_sha256": "d" * 64,
-        "accepted_wave_authorization_sha256": "e" * 64,
-        "accepted_authorization_message_id": "arm_message",
-        "accepted_authorization_sender_instance_id": "agi_main",
-        "pre_merge_frontier_timestamp": "2026-09-12T00:00:00+00:00",
-        "pre_merge_newest_message_id": None,
-        "successful_gate_run_id": "lwr_run",
-        "completed_at": "2026-09-12T00:01:00+00:00",
-        "recorded_by_actor_id": "act_controller",
-        "per_unit_landings": [
-            {"unit_id": "unt_a", "unit_commit_sha": "f" * 40, "landing_id": "lnd_common"},
-            {"unit_id": "unt_b", "unit_commit_sha": "1" * 40, "landing_id": "lnd_common"},
-        ],
-    }
-    receipt = landing_wave.build_observation_receipt(payload)
-    assert receipt["schema_version"] == "landing_wave_completion.v1"
-    malformed = dict(payload)
-    malformed["per_unit_landings"] = [
-        {"unit_id": "unt_a", "unit_commit_sha": "f" * 40, "landing_id": "lnd_other"}
-    ]
-    try:
-        landing_wave.build_observation_receipt(malformed)
-        raise AssertionError("different landing mapping was accepted")
-    except landing_wave.LandingWaveError:
-        pass
-    return 3
-
-
 def _commit(root: Path, message: str) -> str:
     _git(
         root,
@@ -192,11 +266,11 @@ def _two_lane_fixture() -> tuple[TemporaryDirectory[str], Path, Path, Path, Path
     return temporary, shared, source_a, source_b, integration
 
 
-def _stage_and_commit_member(root: Path, path: str, unit_id: str) -> str:
+def _stage_and_commit_member(root: Path, path: str, member_label: str) -> str:
     landing_wave.verify_empty_index(root)
     _git(root, "add", path)
-    landing_wave.verify_staged_member(root, unit_id=unit_id, exact_paths=(path,))
-    commit = _commit(root, unit_id)
+    landing_wave.verify_staged_member(root, member_label=member_label, exact_paths=(path,))
+    commit = _commit(root, member_label)
     landing_wave.verify_empty_index(root)
     return commit
 
@@ -210,8 +284,8 @@ def _check_two_lane_commit_and_merge() -> int:
         _write(source_b, "member-b.txt", "lane b final\n")
         _write(integration, "member-a.txt", (source_a / "member-a.txt").read_text())
         _write(integration, "member-b.txt", (source_b / "member-b.txt").read_text())
-        first = _stage_and_commit_member(integration, "member-a.txt", "unt_a")
-        second = _stage_and_commit_member(integration, "member-b.txt", "unt_b")
+        first = _stage_and_commit_member(integration, "member-a.txt", "member a / opaque")
+        second = _stage_and_commit_member(integration, "member-b.txt", "member b / opaque")
         assert _git(shared, "rev-parse", "HEAD").strip() == master_before
         _git(shared, "merge", "--no-ff", "lane/integration", "-m", "merge wave")
         assert _git(shared, "merge-base", "--is-ancestor", first, "HEAD") == ""
@@ -227,7 +301,7 @@ def _check_commit_two_failure_preserves_master() -> int:
     try:
         master_before = _git(shared, "rev-parse", "HEAD").strip()
         _write(integration, "member-a.txt", "first member\n")
-        first = _stage_and_commit_member(integration, "member-a.txt", "unt_a")
+        first = _stage_and_commit_member(integration, "member-a.txt", "member a / opaque")
         hook = integration / "test-hooks" / "pre-commit"
         hook.parent.mkdir(parents=True, exist_ok=True)
         hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
@@ -235,7 +309,9 @@ def _check_commit_two_failure_preserves_master() -> int:
         _write(integration, "member-b.txt", "second member\n")
         _git(integration, "add", "member-b.txt")
         landing_wave.verify_staged_member(
-            integration, unit_id="unt_b", exact_paths=("member-b.txt",),
+            integration,
+            member_label="member b / opaque",
+            exact_paths=("member-b.txt",),
         )
         failed = subprocess.run(
             (
@@ -248,7 +324,7 @@ def _check_commit_two_failure_preserves_master() -> int:
                 f"core.hooksPath={hook.parent}",
                 "commit",
                 "-m",
-                "unt_b",
+                "member b / opaque",
             ),
             cwd=integration,
             text=True,
@@ -273,7 +349,9 @@ def main() -> int:
     checks = _check_source_and_composition()
     checks += _check_global_staged_equality()
     checks += _check_one_physical_sweep()
-    checks += _check_completion_receipt()
+    checks += _check_staged_cli()
+    checks += _check_member_path_contract()
+    checks += _check_cherry_picked_member()
     checks += _check_two_lane_commit_and_merge()
     checks += _check_commit_two_failure_preserves_master()
     print(f"landing_wave_smoke OK: {checks} checks passed")

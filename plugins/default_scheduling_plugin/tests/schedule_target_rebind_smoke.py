@@ -433,10 +433,10 @@ def check_shapes() -> None:
     plugin, repo, state = fixture()
     value = schedule()
     value.actions += [
-        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_id": "fixture", "peer_agent_instance_id": "i"}, result_processor=None, result_processor_kind=None),
-        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_id": "fixture", "peer_agent_session_id": "s"}, result_processor=None, result_processor_kind=None),
+        ActionData(name="plugin::agent_messaging_plugin::peer_send", parameters={"peer_id": "fixture", "peer_agent_instance_id": "i"}, result_processor=None, result_processor_kind=None),
+        ActionData(name="plugin::agent_messaging_plugin::peer_send", parameters={"peer_id": "fixture", "peer_agent_session_id": "s"}, result_processor=None, result_processor_kind=None),
         ActionData(name="plugin::agent_messaging_plugin::drive_session", parameters={"agent_instance_id": "d", "text": TEXT}, result_processor=None, result_processor_kind=None),
-        ActionData(name="plugin::agent_messaging_plugin::send_peer_message", parameters={"peer_agent_instance_id": "i", "peer_agent_session_id": "s"}, result_processor=None, result_processor_kind=None),
+        ActionData(name="plugin::agent_messaging_plugin::peer_send", parameters={"peer_agent_instance_id": "i", "peer_agent_session_id": "s"}, result_processor=None, result_processor_kind=None),
         ActionData(name="service_interface::knowledge_service::search", parameters={"query": "not a destination"}, result_processor=None, result_processor_kind=None),
     ]
     sid = repo.save_schedule(value)

@@ -1,6 +1,6 @@
 """Typed operations that move a local file: Metadata deploy packages and ContentVersion files.
 
-Each is one documented vendor resource over the same pinned-org transport as
+Each is one documented vendor resource over the same per-org transport as
 the other typed operations:
 
 - Metadata API Developer Guide, "Deploy Metadata with Apex Testing Using

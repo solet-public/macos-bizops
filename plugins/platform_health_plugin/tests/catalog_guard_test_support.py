@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -12,27 +15,33 @@ import httpx
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "plugins/agent_messaging_plugin/tests"))
 
-import model_capability_refresh_smoke as refresh_fixtures  # noqa: E402  # pyright: ignore[reportMissingImports]
-from _real_state_fake import RealShapeState  # noqa: E402  # pyright: ignore[reportMissingImports]
+import model_capability_refresh_smoke as refresh_fixtures  # noqa: E402
+from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
+from ananta.llm.agent_messaging.state_results import require_completed  # noqa: E402
 from platform_health_plugin import model_capability_guard as guard  # noqa: E402
+from platform_health_plugin.guard_support import STATE_NAMESPACE  # noqa: E402
 
 __all__ = [
-    "ROLE",
     "_BASE",
+    "_RESULT_KEYS",
     "_CatalogMessagingPlugin",
     "_Clock",
+    "_LogCapture",
     "_detail_outage_handler",
     "_failing_handler",
     "_failure_envelope",
+    "_guard_logs",
     "_healthy_handler",
     "_no_renewal_handler",
+    "_seed_cell",
+    "_status_marker",
     "_success",
 ]
 
+from agent_messaging_plugin import schema as owner_schema  # noqa: E402
 from agent_messaging_plugin.model_capability_store import CatalogError  # noqa: E402
 
-ROLE = "Main-Seat"
 _BASE = datetime(2026, 10, 9, 12, tzinfo=UTC)
 
 
@@ -86,9 +95,9 @@ def _failure_envelope(code: str, message: str) -> dict[str, Any]:
 class _CatalogMessagingPlugin:
     """Stands in for ``agent_messaging_plugin``: the REAL refresh verb body
     over a MockTransport (or a canned renewal for the seeded-age scenarios) and
-    a recording ``peer_send_by_name``."""
+    a recording ``peer_send_by_name`` that the guard must never call."""
 
-    def __init__(self, state: RealShapeState, *, handler: Any = _healthy_handler, delivery: str = "queued_wake") -> None:
+    def __init__(self, state: RealShapeState, *, handler: Any = _healthy_handler) -> None:
         from ananta.interfaces.state_management_interface import StateManagementInterface
 
         from agent_messaging_plugin.model_catalog_policy import read_catalog_policy, set_catalog_configuration
@@ -98,7 +107,6 @@ class _CatalogMessagingPlugin:
             set_catalog_configuration(typed, {"stable_id": "catalog", "action": "set", "expected_revision": None, "reason": "explicit guard fixture", "values": {"staleness_window_hours": 72}}, actor="guard-smoke-operator", source=False)
         self.state = state
         self.handler = handler
-        self.delivery = delivery
         self.touch_models: list[str] | None = None  # canned mode: refresh these seeded cells to "now"
         self.touch_clock: _Clock | None = None
         self.raise_on_refresh: Exception | None = None
@@ -144,9 +152,93 @@ class _CatalogMessagingPlugin:
         return _success(data)
 
     def peer_send_by_name(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        """Records the call so a smoke can assert the guard never sends."""
         self.sends.append(params)
-        return {"action_status": "completed", "data": {"delivery": self.delivery}}
+        return {"action_status": "completed", "data": {}}
 
 
 def _success(data: dict[str, Any]) -> dict[str, Any]:
     return {"action_status": "completed", "data": data, "error": None}
+
+
+def _seed_cell(state: RealShapeState, model: str, *, age: timedelta, window_hours: int = 72) -> None:
+    measured = (_BASE - age).isoformat()
+    record = {
+        "provider": "anthropic",
+        "runtime": "claude_code",
+        "model": model,
+        "effort": "high",
+        "capability_score": 50.0,
+        "cost_per_task_usd": 1.0,
+        "relative_cost_multiplier": 1.0,
+        "currency": "USD",
+        "effort_supported": True,
+        "measured_at": measured,
+        "accepted_at": measured,
+        "acceptance": owner_schema.CELL_ACCEPTANCE_ACCEPTED,
+        "agreeing_observation_ids": [],
+        "disagreement_note": None,
+        "staleness_window_hours": window_hours,
+        "last_refresh_run_id": "run-seed",
+    }
+    state.write_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": guard.TABLE_MODEL_CAPABILITY_CELL, "record": record})
+
+
+_TRANSITION_PREFIX = "MODEL CAPABILITY CATALOG"
+_STATUS_KEY = "model_capability_guard:last_status"
+# The guard's whole result: classification, run counts and whether the severity changed. Nothing about delivery.
+_RESULT_KEYS = {
+    "status",
+    "reasons",
+    "refresh_failure",
+    "readings_gathered",
+    "cells_accepted",
+    "cells_conflicted",
+    "cells_unchanged",
+    "sources_failed",
+    "renewed",
+    "accepted_cell_count",
+    "oldest_cell_age_hours",
+    "staleness_window_hours",
+    "transitioned",
+}
+
+
+class _LogCapture(logging.Handler):
+    """Every record the guard's logger lets through, as ``(levelno, message)``."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.records: list[tuple[int, str]] = []
+
+    @property
+    def messages(self) -> list[str]:
+        return [message for _, message in self.records]
+
+    def transitions(self) -> list[tuple[int, str]]:
+        """The severity-transition lines (``build_transition_text``), not the refresh's own failure logging."""
+        return [(level, message) for level, message in self.records if message.startswith(_TRANSITION_PREFIX)]
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append((record.levelno, record.getMessage()))
+
+
+@contextmanager
+def _guard_logs() -> Generator[_LogCapture]:
+    """Capture the guard's own logger at every level for the duration of the block."""
+    capture = _LogCapture()
+    logger = logging.getLogger("platform_health_plugin.model_capability_guard")
+    previous_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(capture)
+    try:
+        yield capture
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(previous_level)
+
+
+def _status_marker(state: RealShapeState) -> str | None:
+    """The guard's durable status marker, read straight from the key-value store; ``None`` when never written."""
+    data = require_completed(state.get_key_value(STATE_NAMESPACE, _STATUS_KEY), "smoke read of the guard status marker")
+    return str(data["value"]) if data.get("found") else None

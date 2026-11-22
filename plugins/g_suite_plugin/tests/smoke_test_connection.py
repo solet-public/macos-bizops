@@ -12,7 +12,7 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "g_suite_plugin" / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
-from gsuite_fakes import FakeVault, connect_accounts, run_queued  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import FakeVault, connect_accounts, run_queued  # noqa: E402
 
 
 def main() -> int:

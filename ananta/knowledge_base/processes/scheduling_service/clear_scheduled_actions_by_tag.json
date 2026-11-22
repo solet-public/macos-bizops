@@ -1,14 +1,14 @@
 {
   "process_key": "service_interface::scheduling_service::clear_scheduled_actions_by_tag",
   "display_name": "Clear Scheduled Actions By Tag",
-  "description": "Cancel all scheduled jobs matching a specific tag. This is the preferred cleanup mechanism for recurring check-ins/heartbeats and timeout reminders: tag related schedules up front (for example: progress:<session_id> or job:<job_id>) so you can cancel them in one call when work completes or the user no longer needs updates.",
-  "embedding_description": "Bulk cancel schedules by tag. Cleanup progress check-ins, heartbeats, timeouts, reminders, and monitoring schedules. Tag schedules by session_id/flow_id/job_id for reliable cleanup. Prevents stale follow-ups and reduces user-visible spam.",
+  "description": "Cancel all scheduled jobs matching a specific tag. This is the preferred cleanup mechanism for recurring monitoring and timeout schedules: tag related schedules up front by job or flow (for example: job:<job_id> or flow:<flow_id>) so you can cancel them in one call when the work completes.",
+  "embedding_description": "Bulk cancel schedules by tag. Cleanup recurring monitoring and timeout schedules. Tag schedules by job or flow (flow_id/job_id) for reliable cleanup. Prevents stale schedules from continuing to fire after the work completes.",
   "result_processor_customizations": {
     "action_label": "Schedules Cleared by Tag",
     "result_type": "bulk_schedule_cancelled",
     "result_description": "Count of schedules cancelled matching the specified tag",
     "presentation_guidance": "",
-    "output_action_guidance": "Tagged schedules have been cleared. If the tag was used for user-facing check-ins (progress/timeout), consider whether you should send a final status update, or proceed silently if the user has already been informed."
+    "output_action_guidance": "Tagged schedules have been cleared. If the tag covered a timeout or monitoring schedule, confirm the work it watched has reached its terminal state."
   },
   "error_processor_customizations": {
     "action_context": "Bulk cancelling all scheduled jobs matching a specific tag",

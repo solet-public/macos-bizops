@@ -1,0 +1,29 @@
+# Smokes whose pass is never reused: their result depends on something that is neither the tree nor the tool profile.
+# One path per line, the reason after the hash. A smoke listed here runs every time and stores no proof.
+# Rules: network (a connection to an address outside the host); host home (the verdict differs between the host user's home and an empty one); varied (the verdict differed between recorded full batteries on one host); timing; live host (it inspects live tmux or launchd state).
+# Not reasons: the environment the runner passes, a git or python subprocess, the virtual environment, files the smoke made itself.
+# A test caps this list at one registered smoke in ten (10 * entries <= registered); a longer list needs a decision, not a longer file.
+# Measured 2026-11-15 on master 6dcb0e38d: all 1186 registered smokes run once under an audit hook; the 94 that read host state, started a process tool or connected to a socket run again under an empty home (57 finished; the other 37, 35 of them solet_cli sweeps of 2 to 5 minutes, were not differential-tested and are not listed).
+ananta/tests/core/actions/poller_state_io_responsiveness_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+ananta/tests/lifecycle_management_service/set_plugin_enabled_reenable_smoke.py  # network: connects to 151.101.192.223 port 443, outside the host
+plugins/agent_messaging_plugin/tests/codex_managed_session_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+plugins/agent_messaging_plugin/tests/g1_messaging_registered_admission_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+plugins/agent_messaging_plugin/tests/local_cli_smoke.py  # live host: runs tmux display-message -p -t %7590
+plugins/agent_messaging_plugin/tests/loop_executor_routes_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+plugins/agent_messaging_plugin/tests/model_capability_refresh_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+plugins/agent_messaging_plugin/tests/operator_codex_launcher_smoke.py  # live host: runs tmux list-panes -s -t =operator-codex-bbbbbbbbbbbb
+plugins/code_vetting_plugin/tests/python_type_check_smoke.py  # network: connects to 151.101.0.223 port 443, outside the host; host home: exit 0 with the host user's home, 77 with an empty one
+plugins/code_vetting_plugin/tests/subprocess_verbs_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+plugins/default_thinking_plugin/tests/g1_thinking_registered_admission_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+plugins/github_midwife_plugin/tests/recovery_lifecycle_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+plugins/macos_self_deployment_plugin/tests/blue_green_router/io_responsiveness_smoke.py  # timing: measures event-loop responsiveness; ran over 25 minutes under host load
+plugins/macos_self_deployment_plugin/tests/swap_round_trip_smoke.py  # host home: exit 0 with the host user's home, 1 with an empty one
+plugins/platform_dev_surface_plugin/tests/g1_quality_registered_admission_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+plugins/platform_health_plugin/tests/model_capability_guard_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+quality_gates/tests/contention_signal_smoke.py  # host home: exit 1 with the host user's home, 0 with an empty one; varied: its verdict differed between the 30 recorded full batteries on this host
+quality_gates/tests/materialized_battery_artifact_check_smoke.py  # network: connects to 151.101.64.223 port 443, outside the host; varied: its verdict differed between the 30 recorded full batteries on this host
+quality_gates/tests/run_smokes_battery_containment_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+quality_gates/tests/run_smokes_git_environment_smoke.py  # host home: exit 1 with the host user's home, 0 with an empty one
+quality_gates/tests/run_smokes_host_lock_smoke.py  # varied: its verdict differed between the 30 recorded full batteries on this host
+solet_cli/homebrew/tests/stage_release_smoke.py  # live host: runs launchctl print gui/501
+solet_cli/tests/cli_approval_smoke.py  # live host: runs launchctl print gui/501

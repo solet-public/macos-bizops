@@ -1,0 +1,2 @@
+# The lane-facing replay command's offline surface (chg_72c0ab55, A4). The
+# physical proof guest_snapshot_replay_guest.py is opt-in and is NOT a gate smoke.

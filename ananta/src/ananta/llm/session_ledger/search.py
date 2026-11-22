@@ -15,7 +15,6 @@ pure window-filter + projection live as module-level helpers
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -299,11 +298,6 @@ class SessionLedgerSearchMixin(SessionLedgerRepositoryBase):
     def get_event_embed_progress(self) -> dict[str, object] | None:
         """The last drain fire's per-page progress record; ``None`` when absent or unreadable."""
         raw = self._read_embed_value(_EVENT_EMBED_PROGRESS_KV_KEY)
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except ValueError:
-                raw = None
         return cast(dict[str, object], raw) if isinstance(raw, dict) else None
 
     def set_event_embed_progress(self, progress: dict[str, object]) -> None:

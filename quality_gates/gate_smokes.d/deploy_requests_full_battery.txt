@@ -1,0 +1,2 @@
+# A newly recorded deployment asks the solet for one full battery run of master's newest commit (frq_e2cdefed, Change chg_5578d2b4).
+ananta/tests/lifecycle_management_service/deploy_requests_full_battery_smoke.py

@@ -89,10 +89,7 @@ def test_hidden_unicode_flags_zero_width() -> None:
 def test_license_flags_missing_spdx() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         result = deps.scan_licenses(_make_tree(Path(tmp)), "rid")
-    assert any(
-        f.dimension is Dimension.LICENSE and f.constraint_violated == "RB-LICENSE:missing-spdx"
-        for f in result.findings
-    ), "expected a missing-SPDX finding for the license-less plugin manifest"
+    assert any(f.dimension is Dimension.LICENSE and f.constraint_violated == "RB-LICENSE:missing-spdx" for f in result.findings), "expected a missing-SPDX finding for the license-less plugin manifest"
 
 
 def test_license_flags_non_two_bucket_spdx() -> None:
@@ -100,9 +97,7 @@ def test_license_flags_non_two_bucket_spdx() -> None:
     # substring must be flagged — the gate is an allowlist, not a denylist.
     with tempfile.TemporaryDirectory() as tmp:
         result = deps.scan_licenses(_make_tree(Path(tmp)), "rid")
-    assert any(
-        f.constraint_violated == "RB-LICENSE:non-two-bucket-spdx" for f in result.findings
-    ), "expected MPL-2.0 to be flagged as a non-two-bucket SPDX"
+    assert any(f.constraint_violated == "RB-LICENSE:non-two-bucket-spdx" for f in result.findings), "expected MPL-2.0 to be flagged as a non-two-bucket SPDX"
 
 
 def test_duplication_flags_exact_block() -> None:
@@ -133,7 +128,8 @@ def test_absent_tool_records_coverage_gap() -> None:
 
 def _write_hanging_tool(directory: Path, name: str) -> Path:
     tool = directory / name
-    tool.write_text("#!/bin/sh\nsleep 1000\n", encoding="utf-8")
+    # exec: the probe's kill reaches the sleep itself, not only a wrapping shell.
+    tool.write_text("#!/bin/sh\nexec sleep 1000\n", encoding="utf-8")
     tool.chmod(0o755)
     return tool
 
@@ -150,15 +146,51 @@ def test_hung_scanner_tool_records_qualification_gap() -> None:
         original = secrets._TRUFFLEHOG  # noqa: SLF001
         secrets._TRUFFLEHOG = name  # noqa: SLF001
         try:
-            result = secrets.scan_trufflehog(_make_tree(directory / "tree"), "rid")
+            with patch.object(toolrun, "_QUALIFICATION_TIMEOUT_S", 1):
+                result = secrets.scan_trufflehog(_make_tree(directory / "tree"), "rid")
         finally:
             secrets._TRUFFLEHOG = original  # noqa: SLF001
             os.environ["PATH"] = old_path
             toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
     assert not result.coverage.ran
     assert result.coverage.gap_reason is not None
-    assert "hung past 2s" in result.coverage.gap_reason
+    assert "timed out after 1s" in result.coverage.gap_reason
     assert name in result.coverage.gap_reason
+    assert "absent from PATH" not in result.coverage.gap_reason
+
+
+def test_slow_version_probe_is_qualified() -> None:
+    """A tool slower than the old 2s ceiling that does answer is usable: load must not decide."""
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        name = "smoke-slow-version"
+        tool = directory / name
+        tool.write_text("#!/bin/sh\nsleep 3\necho smoke-slow 1.0\n", encoding="utf-8")
+        tool.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{directory}{os.pathsep}{old_path}"
+        toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+        try:
+            verdict = toolrun.qualify_tool(name)
+        finally:
+            os.environ["PATH"] = old_path
+            toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+    assert verdict.usable
+    assert verdict.reason == f"{name} usable"
+
+
+def test_absent_tool_reason_says_absent() -> None:
+    """A name not on PATH is reported as absent, never as a timeout."""
+    name = "smoke-absent-qualification-tool"
+    toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+    try:
+        verdict = toolrun.qualify_tool(name)
+    finally:
+        toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
+    assert not verdict.usable
+    assert verdict.path is None
+    assert verdict.reason == f"{name} absent from PATH"
+    assert "timed out" not in verdict.reason
 
 
 def test_nonzero_version_probe_is_unusable() -> None:
@@ -189,10 +221,12 @@ def test_quarantine_attribute_is_named_on_darwin() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         directory = Path(tmp)
         name = "smoke-quarantined-tool"
-        tool = _write_hanging_tool(directory, name)
-        subprocess.run(
-            ["xattr", "-w", "com.apple.quarantine", "0081;smoke", str(tool)], check=True, timeout=5
-        )
+        tool = directory / name
+        # A failing tool, not a hanging one: the quarantine detail is added to every
+        # unusable verdict of a found tool, so this test does not wait on the ceiling.
+        tool.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+        tool.chmod(0o755)
+        subprocess.run(["xattr", "-w", "com.apple.quarantine", "0081;smoke", str(tool)], check=True, timeout=5)
         old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{directory}{os.pathsep}{old_path}"
         toolrun._TOOL_QUALIFICATIONS.clear()  # noqa: SLF001
@@ -325,6 +359,8 @@ def main() -> int:
         test_absent_tool_records_coverage_gap,
         test_hung_scanner_tool_records_qualification_gap,
         test_nonzero_version_probe_is_unusable,
+        test_slow_version_probe_is_qualified,
+        test_absent_tool_reason_says_absent,
         test_quarantine_attribute_is_named_on_darwin,
         test_operator_pii_is_not_baked_into_the_static_pattern_tuple,
         test_operator_pii_pattern_follows_the_running_git_identity,
@@ -337,10 +373,7 @@ def main() -> int:
         print(f"PASS {test.__name__}")
     print(f"OK: {len(tests)} L1 scanner smoke checks passed.")
     if _rg_dependent_half_skipped:
-        print(
-            "SKIP: rg not on PATH -- the two end-to-end scan()-wiring halves above "
-            "disclosed a gap rather than running; every other check ran and passed."
-        )
+        print("SKIP: rg not on PATH -- the two end-to-end scan()-wiring halves above disclosed a gap rather than running; every other check ran and passed.")
         return _SKIP_EXIT_CODE
     return 0
 

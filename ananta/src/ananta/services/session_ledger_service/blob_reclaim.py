@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ananta.interfaces.blob_storage_service_interface import BlobStorageServiceInterface
 from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -21,6 +22,8 @@ from ananta.llm.session_ledger.blob_adapter import blob_write_guard
 logger = logging.getLogger(__name__)
 RECLAIM_PAGE_SIZE = 100
 RECLAIM_LOCK_TIMEOUT_SECONDS = 5.0
+RECLAIM_DEFAULT_BUDGET_SECONDS = 20.0
+RECLAIM_MAX_BUDGET_SECONDS = 60.0
 MINIMUM_BLOB_AGE = timedelta(hours=1)
 _BLOB_NAMESPACE = "default_blob_storage_plugin"
 _LEDGER_NAMESPACE = "session_ledger"
@@ -58,6 +61,31 @@ def _is_old_event_text(metadata: dict[str, Any], cutoff: datetime) -> bool:
     return _kind(metadata) == "event_content_text" and _created_at(metadata.get("created_at")) < cutoff
 
 
+def _cursor(row: Mapping[str, Any]) -> list[str]:
+    """Keyset position of one metadata row in the form that survives JSON."""
+    created_at = row["created_at"]
+    return [created_at.isoformat() if isinstance(created_at, datetime) else str(created_at), str(row["id"])]
+
+
+def _validated_after(after: object) -> list[str] | None:
+    if after is None:
+        return None
+    if not isinstance(after, list) or len(cast(list[object], after)) != 2:
+        raise ValueError("after must be null or the two-item next_after of an earlier call")
+    position = cast(list[object], after)
+    if not all(isinstance(part, str) for part in position):
+        raise TypeError("after must hold the created_at and id strings of next_after")
+    return [str(part) for part in position]
+
+
+def _validated_budget(budget_seconds: object) -> float:
+    if isinstance(budget_seconds, bool) or not isinstance(budget_seconds, (int, float)):
+        raise TypeError("budget_seconds must be a number")
+    if not 1 <= budget_seconds <= RECLAIM_MAX_BUDGET_SECONDS:
+        raise ValueError(f"budget_seconds must be from 1 to {RECLAIM_MAX_BUDGET_SECONDS:g}")
+    return float(budget_seconds)
+
+
 class EventTextBlobReclaimer:
     """Page metadata and probe references without loading the event corpus.
 
@@ -76,6 +104,7 @@ class EventTextBlobReclaimer:
         page_size: int = RECLAIM_PAGE_SIZE,
         lock_timeout: float = RECLAIM_LOCK_TIMEOUT_SECONDS,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if not 1 <= page_size <= RECLAIM_PAGE_SIZE or lock_timeout < 0:
             raise ValueError("invalid reclaim page size or lock timeout")
@@ -87,12 +116,23 @@ class EventTextBlobReclaimer:
         self._page_size = page_size
         self._lock_timeout = lock_timeout
         self._clock = clock
+        self._monotonic = monotonic
 
-    def run(self, *, confirm: bool = False) -> dict[str, Any]:
-        """Preview by default. Confirmed lock contention is counted and skipped."""
+    def run(self, *, confirm: bool = False, after: list[str] | None = None, budget_seconds: float = RECLAIM_DEFAULT_BUDGET_SECONDS) -> dict[str, Any]:
+        """One batch: preview by default, stop after the row that uses up the budget.
+
+        Pass ``next_after`` back as ``after`` until ``complete`` is true. The
+        budget is checked after every row and a confirmed guard wait never
+        exceeds the time left, so one call lasts at most the budget plus the
+        work on one row. Confirmed lock contention is counted and skipped.
+        """
         if type(confirm) is not bool:
             raise TypeError("confirm must be a boolean")
-        cutoff = self._clock() - MINIMUM_BLOB_AGE
+        cursor = _validated_after(after)
+        budget = _validated_budget(budget_seconds)
+        started_at = self._clock()
+        start = self._monotonic()
+        cutoff = started_at - MINIMUM_BLOB_AGE
         counts: dict[str, Any] = {
             "confirmed": confirm,
             "scanned_count": 0,
@@ -105,21 +145,42 @@ class EventTextBlobReclaimer:
             "ambiguous_count": 0,
             "skipped_locked": 0,
             "excluded_count": 0,
+            "started_at": started_at.isoformat(),
+            "elapsed_seconds": 0.0,
+            "complete": False,
+            # A failed delete reports the last row that finished: resume there.
+            "next_after": cursor,
+            "position_created_at": None if cursor is None else cursor[0],
+            "slowest_row_seconds": 0.0,
         }
-        for row in self._rows():
+        for row in self._rows(cursor):
+            row_start = self._monotonic()
             counts["scanned_count"] += 1
-            if not confirm:
+            if confirm:
+                # Never wait for the guard past the budget; a row is not cut short once it holds it.
+                timeout = max(0.0, min(self._lock_timeout, budget - (row_start - start)))
+                with blob_write_guard(self._root, timeout=timeout) as acquired:
+                    if acquired:
+                        self._consider(row, cutoff, counts, confirm=True)
+                    else:
+                        counts["skipped_locked"] += 1
+            else:
                 self._consider(row, cutoff, counts, confirm=False)
-                continue
-            with blob_write_guard(self._root, timeout=self._lock_timeout) as acquired:
-                if not acquired:
-                    counts["skipped_locked"] += 1
-                    continue
-                self._consider(row, cutoff, counts, confirm=True)
+            finished = self._monotonic()
+            position = _cursor(row)
+            counts["next_after"] = position
+            counts["position_created_at"] = position[0]
+            counts["elapsed_seconds"] = round(finished - start, 3)
+            counts["slowest_row_seconds"] = max(counts["slowest_row_seconds"], round(finished - row_start, 3))
+            if finished - start >= budget:
+                return counts
+        counts["complete"] = True
+        counts["next_after"] = None
+        counts["position_created_at"] = None
+        counts["elapsed_seconds"] = round(self._monotonic() - start, 3)
         return counts
 
-    def _rows(self) -> Iterator[dict[str, Any]]:
-        after: list[object] | None = None
+    def _rows(self, after: list[str] | None) -> Iterator[dict[str, Any]]:
         while True:
             query: dict[str, object] = {
                 "table": "metadata",
@@ -134,8 +195,7 @@ class EventTextBlobReclaimer:
             if not rows:
                 return
             # Capture before deletion: keyset traversal is stable under unlink.
-            last = rows[-1]
-            cursor = [last["created_at"], last["id"]]
+            cursor = _cursor(rows[-1])
             if cursor == after:
                 raise RuntimeError("reclaim metadata cursor did not advance")
             yield from rows

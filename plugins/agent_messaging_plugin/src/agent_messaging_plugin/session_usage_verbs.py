@@ -31,7 +31,6 @@ from .session_usage_unit import (
     _managed_for_usage,
     _new_usage_stats,
     _prepare_unit_context,
-    _receipt_for_managed,
     _record_all_runtime_totals,
     _runtime_for_total,
     _unit_coverage,
@@ -196,7 +195,6 @@ def _empty_unit_answer(advisories: Sequence[str]) -> dict[str, Any]:
         "coverage": "none",
         "sessions": [],
         "estimate": {"usd": None, "basis": "none", "cell": None},
-        "difficulty_score": None,
         "as_of": None,
         "lag_seconds": None,
         "notes": {"advisories": list(advisories)},
@@ -204,14 +202,17 @@ def _empty_unit_answer(advisories: Sequence[str]) -> dict[str, Any]:
 
 
 def _valid_input(params: Mapping[str, Any]) -> tuple[str, str]:
-    unit_id = _text(params.get("unit_id"))
+    # A label is opaque caller text stored verbatim at spawn, so it is matched
+    # exactly as given: only the empty string counts as "not supplied".
+    raw_label = params.get("label")
+    label = raw_label if isinstance(raw_label, str) and raw_label else None
     agent_instance_id = _text(params.get("agent_instance_id"))
-    if (unit_id is None) == (agent_instance_id is None):
+    if (label is None) == (agent_instance_id is None):
         raise UsageVerbError(
             "parameter_invalid",
-            "provide exactly one of unit_id or agent_instance_id",
+            "provide exactly one of label or agent_instance_id",
         )
-    return ("unit_id", unit_id) if unit_id is not None else ("agent_instance_id", agent_instance_id or "")
+    return ("label", label) if label is not None else ("agent_instance_id", agent_instance_id or "")
 
 
 def _assemble_unit_answer(
@@ -247,8 +248,7 @@ def _assemble_unit_answer(
         workers_without_ids,
         context_data["mapping_read_failures"],
     )
-    receipt = _receipt_for_managed(managed)
-    estimate, difficulty, estimate_warning = _estimate(state, receipt, stats["estimate_observed"], now)
+    estimate, estimate_warning = _estimate(state, stats["estimate_observed"], now)
     if estimate_warning:
         advisories.append(estimate_warning)
     as_of, lag = _unit_as_of(tuple(totals.values()), now)
@@ -267,21 +267,21 @@ def _assemble_unit_answer(
         "coverage": coverage,
         "sessions": sessions,
         "estimate": estimate,
-        "difficulty_score": difficulty,
         "as_of": as_of.isoformat() if as_of else None,
         "lag_seconds": lag,
         "notes": notes,
     }
 
 
-def read_unit_usage(
+def read_label_usage(
     state: StateManagementInterface | None,
     params: Mapping[str, Any],
     *,
     totals_reader: Callable[..., Any] | None,
     now: datetime,
 ) -> dict[str, Any]:
-    """Join each managed session to the existing ledger totals and pricing."""
+    """Join each managed session of one label (or one worker) to the existing
+    ledger totals and pricing."""
     key, identity = _valid_input(params)
     if state is None:
         return _empty_unit_answer(["state_service_unavailable"])
@@ -301,6 +301,6 @@ __all__ = [
     "USAGE_ECONOMICS_PROFILE_PATH",
     "UsageVerbError",
     "provider_for_runtime",
+    "read_label_usage",
     "read_session_usage_window",
-    "read_unit_usage",
 ]

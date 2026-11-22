@@ -18,7 +18,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "quality_gates"))
@@ -37,15 +39,53 @@ _HOST_LOCK_WAIT_SECONDS = 0.5
 # asserted from the recorded intervals. Each runner sleeps at most 1.5 s, yet a
 # 10 s guard expired at host load1 ~19 during a full born-clone run (unit
 # unt_587279e4 event 17). 60 s bounds a genuine hang while tolerating load.
+# It is the one guard for every wait in this smoke, so a result never depends
+# on how fast a busy host starts a process.
 _RUNNER_PAIR_TIMEOUT_SECONDS = 60
+# The nested runner hands its stub only the exact RUN_SMOKES_* control variables
+# it allowlists, so a pooled stub finds its peer by label instead of by a new
+# variable. Each pooled stub holds until the other has also started.
+_POOLED_PEER = {"pooled-first": "pooled-second", "pooled-second": "pooled-first"}
 _SKIP_EXIT_CODE = 77
 # Fixture pacing only: serial runners report attention while the stub holds
 # the host lock, so non-overlap proves attention never releases it.
 _ATTENTION_FIXTURE_ENVIRONMENT = {"SMOKE_PROCESS_ATTENTION_SECONDS": "0.2"}
 
 
+def _has_start_row(events: Path, label: str) -> bool:
+    """True once ``label`` has recorded its start row in ``events``."""
+    if not events.exists():
+        return False
+    rows = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
+    return any(row[1] == label and row[2] == "start" for row in rows)
+
+
+def _wait_for(condition: Callable[[], bool], process: subprocess.Popen[str] | None = None) -> bool:
+    """Poll ``condition`` until it holds: False at the hang guard, or at once if ``process`` has exited."""
+    deadline = time.monotonic() + _RUNNER_PAIR_TIMEOUT_SECONDS
+    while not condition():
+        if time.monotonic() >= deadline or (process is not None and process.poll() is not None):
+            return condition()
+        time.sleep(0.02)
+    return True
+
+
+def _fail_with_output(process: subprocess.Popen[str], what: str) -> NoReturn:
+    """Stop ``process`` if it still runs, then fail with its return code and output."""
+    hung = process.poll() is None
+    if hung:
+        process.terminate()
+    stdout, stderr = process.communicate(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
+    state = f"still running after {_RUNNER_PAIR_TIMEOUT_SECONDS}s" if hung else "exited"
+    raise AssertionError(f"{what}: process {state}, return code {process.returncode}: {stdout}{stderr}")
+
+
 def _record_stub() -> int:
-    """Act as the subprocess fixture when invoked by the runner under test."""
+    """Act as the subprocess fixture when invoked by the runner under test.
+
+    A serial stub holds for its sleep. A pooled stub holds until its peer has
+    also started, which proves the two overlap without sleeping.
+    """
     mode = os.environ.get(_STUB_MODE)
     if not mode:
         return -1
@@ -54,7 +94,12 @@ def _record_stub() -> int:
     started = time.monotonic()
     with events_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps([mode, label, "start", started]) + "\n")
-    time.sleep(float(os.environ[_STUB_SLEEP]))
+    if mode == "pooled":
+        peer = _POOLED_PEER[label]
+        if not _wait_for(lambda: _has_start_row(events_path, peer)):
+            return 1
+    else:
+        time.sleep(float(os.environ[_STUB_SLEEP]))
     ended = time.monotonic()
     with events_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps([mode, label, "end", ended]) + "\n")
@@ -66,8 +111,8 @@ def _run_runner(
     events: Path,
     *,
     label: str,
-    sleep_seconds: float,
     serial: bool,
+    sleep_seconds: float = 0.0,
     lock_path: Path | None = None,
 ) -> subprocess.Popen[str]:
     env = os.environ.copy()
@@ -164,21 +209,30 @@ def _host_lock_contention_outcome(lock_path: Path = _HOST_LOCK_PATH, *, skip_log
                 time.sleep(0.05)
 
 
-def _wait_until_locked(lock_path: Path, timeout: float = 3.0) -> None:
-    """Block until some OTHER process holds ``lock_path``'s exclusive flock."""
-    deadline = time.monotonic() + timeout
+def _lock_is_held(lock_path: Path) -> bool:
+    """True when some OTHER process holds ``lock_path``'s exclusive flock."""
     with lock_path.open("a+", encoding="utf-8") as probe:
-        while time.monotonic() < deadline:
-            try:
-                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(probe, fcntl.LOCK_UN)
-            except BlockingIOError:
-                return
-            time.sleep(0.01)
-    raise AssertionError(f"lock never became held: {lock_path}")
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(probe, fcntl.LOCK_UN)
+        except BlockingIOError:
+            return True
+    return False
+
+
+def _wait_until_locked(lock_path: Path, holder: subprocess.Popen[str]) -> None:
+    """Block until ``holder`` holds ``lock_path``'s exclusive flock; fail with its output if it dies first."""
+    if not _wait_for(lambda: _lock_is_held(lock_path), holder):
+        _fail_with_output(holder, f"lock never became held: {lock_path}")
 
 
 _HOLD_LOCK_SCRIPT = "import fcntl, time\nhandle = open({path!r}, 'a+')\nfcntl.flock(handle, fcntl.LOCK_EX)\ntime.sleep(5)\n"
+
+
+def _start_lock_holder(lock_path: Path) -> subprocess.Popen[str]:
+    """Start a process that takes ``lock_path``'s exclusive flock and holds it."""
+    command = [sys.executable, "-c", _HOLD_LOCK_SCRIPT.format(path=str(lock_path))]
+    return subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def _dead_pid() -> int:
@@ -194,9 +248,9 @@ def _assert_dead_holder_pid_fails_not_skips() -> None:
         lock_path = Path(temp_dir) / "serial-only.lock"
         dead_pid = _dead_pid()
         lock_path.write_text(f"pid={dead_pid} cwd=/dead\n", encoding="utf-8")
-        holder = subprocess.Popen([sys.executable, "-c", _HOLD_LOCK_SCRIPT.format(path=str(lock_path))])
+        holder = _start_lock_holder(lock_path)
         try:
-            _wait_until_locked(lock_path)
+            _wait_until_locked(lock_path, holder)
             outcome = _host_lock_contention_outcome(lock_path=lock_path)
             _require(
                 outcome is not None and outcome[0] == "fail",
@@ -206,7 +260,7 @@ def _assert_dead_holder_pid_fails_not_skips() -> None:
             _require(str(dead_pid) in outcome[1], outcome[1])
         finally:
             holder.terminate()
-            holder.wait(timeout=5)
+            holder.wait(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
 
 
 def _assert_live_holder_pid_skips_and_logs() -> None:
@@ -215,9 +269,9 @@ def _assert_live_holder_pid_skips_and_logs() -> None:
         lock_path = Path(temp_dir) / "serial-only.lock"
         skip_log = Path(temp_dir) / "skips.jsonl"
         lock_path.touch()
-        holder = subprocess.Popen([sys.executable, "-c", _HOLD_LOCK_SCRIPT.format(path=str(lock_path))])
+        holder = _start_lock_holder(lock_path)
         try:
-            _wait_until_locked(lock_path)
+            _wait_until_locked(lock_path, holder)
             lock_path.write_text(f"pid={holder.pid} cwd=/live\n", encoding="utf-8")
             outcome = _host_lock_contention_outcome(lock_path=lock_path, skip_log_path=skip_log)
             _require(outcome is not None and outcome[0] == "skip", f"expected skip, got {outcome!r}")
@@ -228,7 +282,7 @@ def _assert_live_holder_pid_skips_and_logs() -> None:
             _require(events[0]["holder_alive"] is True, events)  # pyright: ignore[reportArgumentType]
         finally:
             holder.terminate()
-            holder.wait(timeout=5)
+            holder.wait(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
 
 
 def _assert_runner_interrupt_cleanup(signum: int | None = signal.SIGINT, serial: bool | None = True) -> None:
@@ -281,7 +335,8 @@ def main() -> None:
             serial=True,
             lock_path=lock_path,
         )
-        time.sleep(0.2)
+        if not _wait_for(lambda: _has_start_row(events, "serial-first"), first):
+            _fail_with_output(first, "first serial runner never recorded its start")
         second = _run_runner(
             register,
             events,
@@ -303,9 +358,11 @@ def main() -> None:
             f"serial intervals overlap: {first_interval!r}, {second_interval!r}",
         )
         events.unlink()
-        pooled_first = _run_runner(register, events, label="pooled-first", sleep_seconds=1.5, serial=False)
-        time.sleep(0.2)
-        pooled_second = _run_runner(register, events, label="pooled-second", sleep_seconds=1.5, serial=False)
+        # Each pooled stub holds until the other has started, so overlap is proven
+        # by rendezvous and a slow start only delays it; if the pool were
+        # serialized the stubs would wait out the guard and fail below.
+        pooled_first = _run_runner(register, events, label="pooled-first", serial=False)
+        pooled_second = _run_runner(register, events, label="pooled-second", serial=False)
         pooled_first_stdout, pooled_first_stderr = pooled_first.communicate(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
         pooled_second_stdout, pooled_second_stderr = pooled_second.communicate(timeout=_RUNNER_PAIR_TIMEOUT_SECONDS)
         _require(

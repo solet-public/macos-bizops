@@ -20,7 +20,12 @@ import subprocess
 from dataclasses import dataclass
 
 _DEFAULT_TIMEOUT_S = 900
-_QUALIFICATION_TIMEOUT_S = 2
+# A ceiling, not a wait: a tool that answers returns the moment it does, so this costs
+# nothing when the tool is healthy. It sits far above a loaded host's --version time
+# (aev_6cb6d84e: 2s failed at load 25 to 50), far below the 900s scan bound the probe
+# protects (ad5576dfd), and equal to the bound tool_version already uses. Load decides
+# nothing here; a real hang is still bounded and named.
+_QUALIFICATION_TIMEOUT_S = 30
 _logger = logging.getLogger(__name__)
 
 
@@ -64,10 +69,7 @@ def _quarantine_detail(path: str) -> str | None:
         return None
     if checked.returncode != 0:
         return None
-    return (
-        f"com.apple.quarantine is present on {path}; remedy: xattr -d "
-        f"com.apple.quarantine {shlex.quote(path)}"
-    )
+    return f"com.apple.quarantine is present on {path}; remedy: xattr -d com.apple.quarantine {shlex.quote(path)}"
 
 
 def _unusable(name: str, path: str, reason: str) -> ToolQualification:
@@ -86,7 +88,11 @@ def _qualify_path(name: str, path: str) -> ToolQualification:
             stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
-        return _unusable(name, path, f"{name} unusable: hung past {_QUALIFICATION_TIMEOUT_S}s during qualification")
+        return _unusable(
+            name,
+            path,
+            f"{name} unusable: --version timed out after {_QUALIFICATION_TIMEOUT_S}s during qualification (a timeout is not proof that {name} is absent)",
+        )
     except OSError as exc:
         return _unusable(name, path, f"{name} unusable: failed to start ({exc})")
     if completed.returncode != 0:

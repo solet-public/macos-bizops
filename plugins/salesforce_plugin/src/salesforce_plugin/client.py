@@ -1,4 +1,4 @@
-"""Salesforce CLI executor — full delegation, no token ever enters this process.
+"""Salesforce CLI executor — full delegation; the CLI keeps every org's session.
 
 Operator-ratified 2026-07-14 (replacing the sf-CLI session-borrow client
 factory — dead on current CLI releases: verified live against CLI 2.142.7
@@ -8,19 +8,27 @@ even without `--verbose`). Every verb shells out to the `sf` CLI itself —
 `data query/get/delete`, `sobject describe`, `org display` via the standard
 `--json` envelope, and `api request rest` (beta — see the create/update/
 list_sobjects note in `record_actions.py`) for the calls that need an
-arbitrary JSON body. The CLI's own keychain-backed refresh token is the
-durable credential and stays inside the CLI process; this plugin never reads,
-holds, or forwards an access token. There is therefore no session to expire
+arbitrary JSON body. The CLI's own session for each org is the durable
+credential and stays inside the CLI process; this plugin never reads or
+holds a session. A login secret the operator stored in the vault passes
+through this process only inside the login call that hands it to the CLI
+(``org_secrets.py``). There is therefore no session to expire
 from OUR point of view — a CLI invocation either succeeds (the CLI refreshed
 whatever it needed to, transparently) or fails with a classified fault, never
 a mid-flight "expired session" this process must detect and retry.
 
-Foreign-target invariant: the org binding is verified exactly once per
+Foreign-target invariant: each bound org is verified exactly once per
 process lifetime, lazily, on first use — `org display --json`'s resolved
-`instanceUrl` host must equal the registered `instance_host` pin, or the
+`instanceUrl` host must equal that binding's `instance_host` pin, or the
 verification fails loudly. The CLI's local alias cache can hold many org
-sessions; the pin guarantees this plugin only ever talks to the one the
-operator registered.
+sessions; the pin guarantees each executor only ever talks to the org it was
+bound to. One executor serves one org (``orgs.py`` keeps one per binding).
+
+Every child process gets an explicit environment with ``SF_TEMP_SHOW_SECRETS``
+false, so the CLI masks access tokens, passwords and SFDX auth URLs in its own
+output whatever the solet's environment says. An org that logged in with a
+JWT key held in the vault carries a ``CallCredential``: the key file exists on
+disk only while one CLI call for that org runs (``org_secrets.py``).
 """
 
 from __future__ import annotations
@@ -33,11 +41,11 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Generator, Mapping
-from contextlib import contextmanager
-from typing import Any
+from contextlib import AbstractContextManager, ExitStack, contextmanager
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from .app_config import AppConfigLoader, SalesforceOrgConfig
+from .app_config import SalesforceOrgConfig
 from .constants import (
     CLI_RESPONSE_HEADER_NAMES,
     DEFAULT_API_VERSION,
@@ -47,6 +55,7 @@ from .constants import (
     ERROR_NOT_CONFIGURED,
     ERROR_PROVISION_CONSENT_REQUIRED,
     SF_CLI_TIMEOUT_SECONDS,
+    SF_SHOW_SECRETS_ENV,
 )
 from .errors import SalesforceCliCallError, SalesforceServiceError
 
@@ -57,8 +66,25 @@ _HOMEBREW_GUARD_ENV = {
 }
 
 
+class OrgConfigSource(Protocol):
+    """Supplies the one org an executor talks to: its CLI target and pinned host."""
+
+    def load(self) -> SalesforceOrgConfig: ...
+
+
+class CallCredential(Protocol):
+    """A credential the CLI reads from disk during a call (a JWT key file)."""
+
+    def present(self) -> AbstractContextManager[object]: ...
+
+
+def cli_environment(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The child environment for every sf call: inherited, secrets display forced off."""
+    return {**os.environ, SF_SHOW_SECRETS_ENV: "false", **(overrides or {})}
+
+
 class SalesforceCliExecutor:
-    """Runs `sf` CLI verbs against the address-book-bound org; parses JSON results.
+    """Runs `sf` CLI verbs against one bound org; parses JSON results.
 
     Lazily verifies the org binding (host pin) on first use and caches it for
     the process lifetime — there is nothing to rebuild afterward, since the
@@ -67,14 +93,16 @@ class SalesforceCliExecutor:
 
     def __init__(
         self,
-        app_config_loader: AppConfigLoader,
+        app_config_loader: OrgConfigSource,
         *,
         api_version: str = DEFAULT_API_VERSION,
         sf_cli_path: str = DEFAULT_SF_CLI_PATH,
+        credential: CallCredential | None = None,
     ) -> None:
         self._loader = app_config_loader
         self._api_version = api_version
         self._sf_cli_path = sf_cli_path
+        self._credential = credential
         self._target_org: str | None = None
         self._username: str = ""
 
@@ -164,17 +192,79 @@ class SalesforceCliExecutor:
             "version": verified["version"],
         }
 
+    @property
+    def target_org(self) -> str:
+        """The verified CLI target (alias or username) of this executor's org."""
+        return self._ensure_verified()
+
+    @property
+    def credential(self) -> CallCredential | None:
+        """This org's on-disk credential for a call, if its login used a vault-held JWT key."""
+        return self._credential
+
     def run_json(
         self,
         argv_tail: list[str],
         *,
         env_overrides: Mapping[str, str] | None = None,
+        target_flag: str = "--target-org",
+        timeout: float = SF_CLI_TIMEOUT_SECONDS,
+        stdin_text: str | None = None,
+        allow_partial: bool = False,
     ) -> Any:
-        """Run `sf <argv_tail...> --target-org <org> --json`; return the `result` payload."""
+        """Run `sf <argv_tail...> <target_flag> <org> --json`; return the `result` payload.
+
+        ``target_flag`` is ``--target-dev-hub`` when this org is the Dev Hub a
+        scratch org is created from. ``allow_partial`` accepts a `result`
+        printed with a non-zero exit (the CLI's exit 68: work still running).
+        """
         target_org = self._ensure_verified()
-        argv = [self._sf_cli_path, *argv_tail, "--target-org", target_org, "--json"]
-        completed = self._invoke(argv, env_overrides, target_org)
-        return _parse_envelope(completed, target_org)
+        argv = [self._sf_cli_path, *argv_tail, target_flag, target_org, "--json"]
+        completed = self._invoke(argv, env_overrides, target_org, timeout=timeout, stdin_text=stdin_text)
+        return parse_envelope(completed, target_org, allow_partial=allow_partial)
+
+    def run_unverified_json(
+        self,
+        argv_tail: list[str],
+        *,
+        env_overrides: Mapping[str, str] | None = None,
+        timeout: float = SF_CLI_TIMEOUT_SECONDS,
+        stdin_text: str | None = None,
+        allow_partial: bool = False,
+    ) -> Any:
+        """Run `sf <argv_tail...> --json` with this org's credential but no session check.
+
+        For calls that must work when the session is gone (logout) or that
+        name their org themselves (resuming a scratch org from the CLI's
+        cache). The caller supplies every flag; no target is appended.
+        """
+        argv = [self._sf_cli_path, *argv_tail, "--json"]
+        label = self._loader.load().target_org
+        completed = self._invoke(argv, env_overrides, label, timeout=timeout, stdin_text=stdin_text)
+        return parse_envelope(completed, label, allow_partial=allow_partial)
+
+    def display(self) -> dict[str, Any]:
+        """`org display` for this org after the pin check (the auth envelope is the caller's to trim).
+
+        On first use the verifying call is this call, so the org is read once.
+        """
+        result = self._verify_org_binding(self._loader.load()) if self._target_org is None else self.run_json(["org", "display"])
+        if not isinstance(result, dict):
+            raise SalesforceCliCallError("", "sf CLI org display returned an unexpected result shape")
+        return result
+
+    def prime_verification(self, display_result: Any) -> None:
+        """Apply the first-use check to an `org display` result the caller already holds.
+
+        The same field and pin checks as the lazy verification, without a
+        second `org display` call.
+        """
+        config = self._loader.load()
+        login_hint = f"run: sf org login web --alias {config.target_org}"
+        _instance_url, username = _extract_org_display_fields(display_result, config.target_org, login_hint)
+        _require_pinned_host(_instance_url, config.instance_host)
+        self._username = username
+        self._target_org = config.target_org
 
     def run_rest(
         self,
@@ -248,26 +338,26 @@ class SalesforceCliExecutor:
             raise SalesforceServiceError(ERROR_API_ERROR, "The sf CLI did not complete the download; no file was kept.")
 
     def _ensure_verified(self) -> str:
-        if self._target_org is None:
+        target = self._target_org
+        if target is None:
             config = self._loader.load()
             self._verify_org_binding(config)
-            self._target_org = config.target_org
-        return self._target_org
+            target = config.target_org
+        return target
 
-    def _verify_org_binding(self, config: SalesforceOrgConfig) -> None:
+    def _verify_org_binding(self, config: SalesforceOrgConfig) -> Any:
         argv = [self._sf_cli_path, "org", "display", "--target-org", config.target_org, "--json"]
         completed = self._invoke(argv, None, config.target_org)
         login_hint = f"run: sf org login web --alias {config.target_org}"
         try:
-            result = _parse_envelope(completed, config.target_org)
+            result = parse_envelope(completed, config.target_org)
         except (SalesforceServiceError, SalesforceCliCallError) as exc:
             raise SalesforceServiceError(
                 ERROR_AUTH_FAILED,
                 f"no live sf CLI session for org {config.target_org!r} — {login_hint}",
             ) from exc
-        instance_url, username = _extract_org_display_fields(result, config.target_org, login_hint)
-        _require_pinned_host(instance_url, config.instance_host)
-        self._username = username
+        self.prime_verification(result)
+        return result
 
     def _invoke(
         self,
@@ -276,31 +366,72 @@ class SalesforceCliExecutor:
         target_org: str,
         *,
         decode_errors: str = "strict",
+        timeout: float = SF_CLI_TIMEOUT_SECONDS,
+        stdin_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Fixed argv, no shell — the only interpolated values are operator config
-        (binary path, org alias, API path) and query/body content passed via
-        argv elements or tempfiles, never shell-joined text."""
-        env = {**os.environ, **env_overrides} if env_overrides else None
-        try:
+        """One CLI call for this org, with its credential on disk for the call's length."""
+        credentials = (self._credential,) if self._credential is not None else ()
+        return invoke_cli(argv, label=target_org, env_overrides=env_overrides, decode_errors=decode_errors, timeout=timeout, stdin_text=stdin_text, credentials=credentials)
+
+
+def invoke_cli(
+    argv: list[str],
+    *,
+    label: str,
+    env_overrides: Mapping[str, str] | None = None,
+    decode_errors: str = "strict",
+    timeout: float = SF_CLI_TIMEOUT_SECONDS,
+    stdin_text: str | None = None,
+    credentials: tuple[CallCredential, ...] = (),
+) -> subprocess.CompletedProcess[str]:
+    """Run one sf command: fixed argv, no shell, the secrets display forced off.
+
+    The only interpolated values are operator config (binary path, org target,
+    API path) and caller content passed as argv elements or tempfiles, never
+    shell-joined text. A secret reaches the CLI only through ``stdin_text``,
+    ``env_overrides`` or a credential file that exists while the call runs,
+    never argv. ``label`` names the org in a timeout message.
+    """
+    try:
+        with ExitStack() as stack:
+            for credential in credentials:
+                stack.enter_context(credential.present())
             return subprocess.run(  # noqa: S603 — fixed argv, operator-config binary
                 argv,
                 capture_output=True,
                 text=True,
                 errors=decode_errors,
-                timeout=SF_CLI_TIMEOUT_SECONDS,
+                timeout=timeout,
                 check=False,
-                env=env,
+                env=cli_environment(env_overrides),
+                input=stdin_text,
             )
-        except FileNotFoundError as exc:
-            raise SalesforceServiceError(
-                ERROR_NOT_CONFIGURED,
-                (f"sf CLI not found at {self._sf_cli_path!r}. Install the standalone bundle and pin its absolute path via the plugin config key 'sf_cli_path'."),
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise SalesforceServiceError(
-                ERROR_AUTH_FAILED,
-                (f"sf CLI did not answer within {SF_CLI_TIMEOUT_SECONDS:.0f}s for org {target_org!r}."),
-            ) from exc
+    except FileNotFoundError as exc:
+        raise SalesforceServiceError(
+            ERROR_NOT_CONFIGURED,
+            (f"sf CLI not found at {argv[0]!r}. Install the standalone bundle and pin its absolute path via the plugin config key 'sf_cli_path'."),
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SalesforceServiceError(
+            ERROR_AUTH_FAILED,
+            (f"sf CLI did not answer within {timeout:.0f}s for org {label!r}."),
+        ) from exc
+
+
+def run_cli_json(
+    sf_cli_path: str,
+    argv_tail: list[str],
+    *,
+    label: str,
+    env_overrides: Mapping[str, str] | None = None,
+    timeout: float = SF_CLI_TIMEOUT_SECONDS,
+    stdin_text: str | None = None,
+    credentials: tuple[CallCredential, ...] = (),
+    allow_partial: bool = False,
+) -> Any:
+    """`sf <argv_tail...> --json` for a call that names its own org, or none (login, org list)."""
+    completed = invoke_cli([sf_cli_path, *argv_tail, "--json"], label=label, env_overrides=env_overrides, timeout=timeout, stdin_text=stdin_text, credentials=credentials)
+    return parse_envelope(completed, label, allow_partial=allow_partial)
 
 
 def _cli_observation_has_executable(observed: dict[str, object]) -> bool:
@@ -425,20 +556,28 @@ def _sf_install_items(lines: list[str]) -> set[str] | None:
     return item_set if len(items) == len(item_set) == 2 else None
 
 
-def _parse_envelope(completed: subprocess.CompletedProcess[str], target_org: str) -> Any:
-    """Parse the standard `--json` envelope (`data`/`sobject`/`org` commands)."""
+def parse_envelope(completed: subprocess.CompletedProcess[str], target_org: str, *, allow_partial: bool = False) -> Any:
+    """Parse the standard `--json` envelope (`data`/`sobject`/`org` commands).
+
+    With ``allow_partial`` a `result` printed with a non-zero exit is still the
+    answer: `org resume sandbox` prints the SandboxProcess and exits 68 while
+    the copy is running.
+    """
+    payload = _decode_json(completed.stdout)
     if completed.returncode == 0:
-        payload = _decode_json(completed.stdout)
         if isinstance(payload, dict) and "result" in payload:
             return payload["result"]
         raise SalesforceCliCallError("", "sf CLI returned an unexpected --json envelope shape")
-    payload = _decode_json(completed.stdout)
     if not isinstance(payload, dict):
         raise SalesforceServiceError(
             ERROR_AUTH_FAILED,
             f"sf CLI command failed for org {target_org!r} with no parseable output.",
         )
-    raise SalesforceCliCallError(*_error_fields_from_envelope(payload))
+    if allow_partial and "result" in payload:
+        return payload["result"]
+    code, message = _error_fields_from_envelope(payload)
+    actions = payload.get("actions")
+    raise SalesforceCliCallError(code, message, tuple(action for action in actions if isinstance(action, str)) if isinstance(actions, list) else ())
 
 
 def _included_body(lines: list[str]) -> tuple[dict[str, str], str, bool]:

@@ -1,0 +1,5 @@
+# Pure-function proof that a bridge declares wake_capable false where Claude
+# Code ignores development channels (third-party provider), and true only for
+# Claude Code elsewhere. Registered in its own fragment per
+# quality_gates/gate_smokes.txt's header.
+plugins/agent_messaging_plugin/tests/channel_support_smoke.py

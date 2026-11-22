@@ -63,7 +63,6 @@ VERBS: dict[str, frozenset[str]] = {
     "salesforce_plugin": frozenset({"bulk_jobs", "composite", "content_files", "metadata", "tooling"}),
     "seed_factory_plugin": frozenset({"assemble_seed", "publish_seed", "publish_release", "release_run_status", "reproduce_release", "validate_and_seal_seed_bundle"}),
     "aws_self_deployment_plugin": frozenset({"complete_deploy", "deploy_rollback", "deploy_self", "deploy_status", "restart_with_manifest", "stop_self"}),
-    "external_app_client_plugin": frozenset({"issue_list", "issue_show", "repository_list", "unit_who_has_work"}),
     "fleet_maintenance_plugin": frozenset({"maintenance_duty_run", "maintenance_duty_status", "session_cron_observation"}),
     "jira_plugin": frozenset(
         {"add_attachment", "download_attachment", "oauth", "sites", "add_comment", "agile_issues", "backlog", "boards", "create_issue", "delete_issue", "get_issue", "jql_search", "list_comments", "list_transitions", "projects", "sprints", "test_connection", "transition_issue", "update_issue", "versions", "worklogs"}
@@ -158,8 +157,6 @@ def _configuration_details(plugin: str, home: Path) -> dict[str, object]:
         config.update(region="us-east-1", endpoint_url=_ENDPOINT)
     elif plugin in {"jira_plugin", "salesforce_plugin", "schwab_market_data_plugin", "soundcloud_artist_studio_plugin"}:
         config.update(api_url=_ENDPOINT, client_id=_SYNTHETIC, client_secret=_SYNTHETIC)
-    elif plugin == "external_app_client_plugin":
-        config["instances"] = {"census": {"executable_root": str(home / "external-app"), "keychain_service": "census-synthetic", "keychain_account": "census-synthetic", "deployment_name": "census", "enabled_commands": sorted(VERBS[plugin])}}
     return config
 
 
@@ -212,14 +209,6 @@ def _seed_connector_files(plugin: str, context: CensusContextView, seeded: dict[
         path.write_bytes(b"census synthetic fixture\n")
         seeded["file_path"] = str(path)
         _seed_s3_metadata(context, seeded)
-    if plugin == "external_app_client_plugin":
-        # Existence is a dispatch prerequisite. The guarded keychain subprocess
-        # is reached first; this sentinel is never a substitute CLI result.
-        executable = context.app_home / "external-app" / ".venv" / "bin" / "psolet"
-        executable.parent.mkdir(parents=True)
-        executable.write_bytes(b"#!/bin/sh\nexit 97\n")
-        executable.chmod(0o700)
-        seeded["external_executable"] = str(executable)
 
 
 def _seed_s3_metadata(context: CensusContextView, seeded: dict[str, str]) -> None:
@@ -461,14 +450,6 @@ def _s3_parameters(verb: str, result: dict[str, object], seeded: Mapping[str, st
         result["name"] = result["blob_id"]
 
 
-def _external_parameters(verb: str, result: dict[str, object], seeded: Mapping[str, str], home: Path) -> None:
-    del seeded, home
-    result.clear()
-    result["instance"] = "census"
-    if verb == "issue_show":
-        result["issue"] = "iss_00000000-0000-0000-0000-000000000000"
-
-
 def _fixed_parameters(values: dict[str, object]) -> Callable[[str, dict[str, object], Mapping[str, str], Path], None]:
     def apply(verb: str, result: dict[str, object], seeded: Mapping[str, str], home: Path) -> None:
         del verb, seeded, home
@@ -485,7 +466,6 @@ _PARAMETER_HANDLERS: dict[str, Callable[[str, dict[str, object], Mapping[str, st
     "actr_memory_plugin": _memory_parameters,
     "claude_code_cloud_session_source_plugin": _status_parameters,
     "codex_cloud_session_source_plugin": _status_parameters,
-    "external_app_client_plugin": _external_parameters,
     "s3_blob_storage_plugin": _s3_parameters,
     "default_blob_storage_plugin": _fixed_parameters({"filename": "census-upload.txt", "mime_type": "text/plain"}),
     "fleet_maintenance_plugin": _fixed_parameters({"operation": "read", "duty_name": "census-synthetic"}),

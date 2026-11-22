@@ -24,7 +24,6 @@ Run:
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from pathlib import Path
@@ -93,7 +92,7 @@ def scenario_legacy_unknown_previous_is_corrected_in_place() -> None:
     policy = world.repo.get_event_embed_chunk_policy()
     after = ("2026-10-01T02:00:00", "evt_2")
     legacy = SweepCheckpoint("gen_live", str(policy), UNKNOWN_PREVIOUS, after)
-    world.state.key_values[_CHECKPOINT_KEY] = json.dumps(legacy.payload())
+    world.state.key_values[_CHECKPOINT_KEY] = legacy.payload()
     _restart(world)
     sent = len(world.embedder.sent_token_counts)
     seen = len(_SINK.messages)
@@ -125,7 +124,7 @@ def scenario_new_arrivals_are_embedded_before_the_sweep() -> None:
     world = _embedded_world([_event(f"evt_{hour}", hour, f"message {hour}") for hour in range(1, 4)])
     world.repo.corpus.append(_event("evt_7", 7, "fresh arrival"))
     policy = str(world.repo.get_event_embed_chunk_policy())
-    world.state.key_values[_CHECKPOINT_KEY] = json.dumps(SweepCheckpoint("gen_walk", policy, policy).payload())
+    world.state.key_values[_CHECKPOINT_KEY] = SweepCheckpoint("gen_walk", policy, policy).payload()
     _restart(world)
     outcome = world.writer.drain_missing_events(page_size=2)
     first_sweep_read = world.repo.reads.index(None)

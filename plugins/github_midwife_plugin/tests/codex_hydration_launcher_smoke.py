@@ -62,6 +62,9 @@ def _run_launcher(
     *,
     transport: str,
     watch_mode: str,
+    launcher_args: list[str] | None = None,
+    launch_dir: Path | None = None,
+    stale_role: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     clone_dir = work / "seed clone"
     bin_dir = work / "bin"
@@ -119,9 +122,12 @@ print -r -- "git_controller=${GIT_CONTROLLER_NAME-unset}" >>"$CODEX_MARKER"
             "GIT_CONTROLLER_NAME": "stale-caller-setting",
         }
     )
+    if stale_role is not None:
+        env["AGENT_ROLE"] = stale_role
+    arguments = ["Coordinator-Codex", "--model", "test-model"] if launcher_args is None else launcher_args
     proc = subprocess.run(  # noqa: S603
-        [str(launcher), "Coordinator-Codex", "--model", "test-model"],
-        cwd=work,
+        [str(launcher), *arguments],
+        cwd=launch_dir or work,
         env=env,
         capture_output=True,
         text=True,
@@ -188,6 +194,7 @@ def check_watch_launch(res: Results, work: Path) -> None:
         watch,
     )
     res.check("--exit-with-parent " in watch_argv_line, "watcher is parent-bound", watch)
+    res.check("--no-claim" not in watch_argv_line.split(), "a named launch claims its role", watch_argv_line)
     res.check(
         watch_argv_line.split().count("--no-spool") == 0,
         "watcher does NOT receive --no-spool (CDX-06, 2026-08-24: inbox_consumer.py drains the wake-hook spool as a Stop hook)",
@@ -209,6 +216,34 @@ def check_watch_launch(res: Results, work: Path) -> None:
     )
     logs = list((runtime_dir / "ananta").glob("iris.ases-*.watch.log"))
     res.check(len(logs) == 1, "watch output uses the runtime-dir log convention", repr(logs))
+
+
+def check_unnamed_launch(res: Results, work: Path) -> None:
+    """An unnamed launch is named for its folder and claims no role."""
+
+    folder = work / "Zed Folder"
+    folder.mkdir()
+    proc, watch_marker, codex_marker, _runtime = _run_launcher(
+        work,
+        transport="watch",
+        watch_mode="arm",
+        launcher_args=[],
+        launch_dir=folder,
+        stale_role="stale-caller-role",
+    )
+    res.check(proc.returncode == 0, "unnamed launch exits through stock Codex", proc.stderr)
+    if not watch_marker.is_file() or not codex_marker.is_file():
+        res.check(False, "unnamed launch starts the watcher and stock Codex")
+        return
+    watch = watch_marker.read_text(encoding="utf-8")
+    codex = codex_marker.read_text(encoding="utf-8")
+    watch_argv = watch.splitlines()[0].split()
+    res.check(watch_argv[:3] == ["watch", "--agent-id", "codex"], "unnamed watcher still receives the stock identity", watch)
+    res.check("--no-claim" in watch_argv, "unnamed launch passes --no-claim to the watcher", watch)
+    res.check("--role" not in watch_argv, "unnamed launch passes no --role to the watcher", watch)
+    res.check(_line_value(watch, "role=") == "", "watcher inherits no role from an unnamed launch", watch)
+    res.check(_line_value(codex, "label=") == "Zed-Folder", "unnamed launch is labelled for its folder", codex)
+    res.check(_line_value(codex, "role=") == "", "unnamed launch exports no role", codex)
 
 
 def check_transport_and_failure_controls(res: Results, work: Path) -> None:
@@ -264,6 +299,9 @@ def main() -> int:
         watch_work = work / "watch"
         watch_work.mkdir()
         check_watch_launch(res, watch_work)
+        unnamed_work = work / "unnamed"
+        unnamed_work.mkdir()
+        check_unnamed_launch(res, unnamed_work)
         check_transport_and_failure_controls(res, work)
         check_marketplace(res, work)
     if res.failures:

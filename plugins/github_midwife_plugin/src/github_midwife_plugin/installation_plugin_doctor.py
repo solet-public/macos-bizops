@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -45,10 +47,7 @@ def plugin_visible(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     root = _installed_plugin_root(request, runtime, cli, selector, listed)
     manifest = _hook_manifest(request, cli, root)
     bound = _manifest_absolute(manifest, request.target)
-    receipt_ok = cli != "claude" or (
-        root is not None
-        and _receipt_matches_request(request, root)
-    )
+    receipt_ok = cli != "claude" or (root is not None and _receipt_matches_request(request, root))
     return _boolean_probe(
         request,
         evidence_id=f"{cli}_plugin_visible",
@@ -86,8 +85,12 @@ def hook_behavior(request: AdapterRequest, runtime: Runtime) -> JsonObject:
     vector = _behavior_vector(request, runtime, cli, manifest)
     if vector is None:
         return _boolean_probe(
-            request, evidence_id=f"{cli}_hook_behavior", ok=False, observed=False,
-            source="executable:node unresolved", repair="Resolve Node before proving the Codex hook behavior.",
+            request,
+            evidence_id=f"{cli}_hook_behavior",
+            ok=False,
+            observed=False,
+            source="executable:node unresolved",
+            repair="Resolve Node before proving the Codex hook behavior.",
         )
     outcome = runtime.run(
         vector,
@@ -130,7 +133,10 @@ def _receipt_matches_request(request: AdapterRequest, root: Path) -> bool:
 
 
 def _behavior_vector(
-    request: AdapterRequest, runtime: Runtime, cli: str, manifest: Path,
+    request: AdapterRequest,
+    runtime: Runtime,
+    cli: str,
+    manifest: Path,
 ) -> tuple[str, str] | None:
     hook = manifest.parent / ("step_zero_reminder.py" if cli == "claude" else "step_zero_reminder.js")
     if cli == "claude":
@@ -142,10 +148,7 @@ def _behavior_vector(
 def _hook_manifest(request: AdapterRequest, cli: str, root: Path | None = None) -> Path:
     if root is not None:
         return root / "hooks/hooks.json"
-    return (
-        request.target
-        / f"plugins/github_midwife_plugin/{cli}_plugin/coordination-hooks/hooks/hooks.json"
-    )
+    return request.target / f"plugins/github_midwife_plugin/{cli}_plugin/coordination-hooks/hooks/hooks.json"
 
 
 def _plugin_list_outcome(
@@ -178,12 +181,7 @@ def _claude_plugin_root(home: Path, selector: str) -> Path | None:
     rows = plugins.get(selector) if isinstance(plugins, dict) else None
     if not isinstance(rows, list):
         return None
-    roots = [
-        Path(install_path)
-        for row in cast(list[JsonValue], rows)
-        for install_path in [row.get("installPath") if isinstance(row, dict) else None]
-        if isinstance(install_path, str) and Path(install_path).is_dir()
-    ]
+    roots = [Path(install_path) for row in cast(list[JsonValue], rows) for install_path in [row.get("installPath") if isinstance(row, dict) else None] if isinstance(install_path, str) and Path(install_path).is_dir()]
     return roots[0] if len(roots) == 1 else None
 
 
@@ -204,13 +202,7 @@ def _codex_plugin_row_matches(row: object, selector: str, expected: Path) -> boo
         return False
     source = row.get("source")
     source_path = source.get("path") if isinstance(source, dict) else None
-    return (
-        row.get("pluginId") == selector
-        and row.get("installed") is True
-        and row.get("enabled") is True
-        and source_path == str(expected)
-        and expected.is_dir()
-    )
+    return row.get("pluginId") == selector and row.get("installed") is True and row.get("enabled") is True and source_path == str(expected) and expected.is_dir()
 
 
 def _manifest_absolute(path: Path, target: Path) -> bool:
@@ -250,9 +242,7 @@ def selected_plugins(request: AdapterRequest, runtime: Runtime) -> JsonObject:
         if child_error in {"output_truncated", "codex_cli_missing", "claude_cli_missing"}:
             return blocked(request, child_error, str(child_result["repair"]))
         if child_result["checkpoint_status"] != "verified":
-            return blocked(
-                request, "coding_agent_plugin_missing", "Repair selected coding-agent plugins."
-            )
+            return blocked(request, "coding_agent_plugin_missing", "Repair selected coding-agent plugins.")
     return _boolean_probe(request, "coding_agent_plugins", True, True, str(request.target), "")
 
 
@@ -293,20 +283,72 @@ def selected_hooks(request: AdapterRequest, runtime: Runtime) -> JsonObject:
 
 def _selected_coding_agents(request: AdapterRequest) -> tuple[str, ...] | None:
     value = request.public_inputs.get("selected_coding_agents")
-    if (
-        not isinstance(value, list)
-        or not value
-        or not all(
-            isinstance(item, str) and item in {"codex", "claude_code"}
-            for item in value
-        )
-        or len(value) != len(set(value))
-    ):
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item in {"codex", "claude_code"} for item in value) or len(value) != len(set(value)):
         return None
     return tuple(cast(str, item) for item in value)
 
 
-def plugin_roster(request: AdapterRequest, runtime: Runtime) -> JsonObject:
+# The inference plugin reports this error from router registration until its server answers and the
+# grammar pre-warm finishes, then clears it itself (default_inference_plugin's availability retry).
+# That is the one unready state that heals without anyone acting, so the roster check waits for it
+# and for nothing else (prb_3207f577).  The wait is the probe's own budget less this margin: the
+# Manager sets the budget (adapter_protocol.PROBE_TIMEOUT_OVERRIDES), so the wait can never outlive
+# the adapter's kill.  With the 30 s default budget the wait is 0 and the check is one observation.
+_ROSTER_WAIT_MARGIN_SECONDS = 90
+_ROSTER_POLL_SECONDS = 5.0
+_TRANSIENT_PLUGIN = "default_inference_plugin"
+_TRANSIENT_ERROR = "after router registration"
+_LIST_PLUGINS_KEY = "service_interface::lifecycle_management_service::list_plugins"
+
+
+def _transient_inference_start(unready: set[str]) -> bool:
+    """True only when every unready line is the inference plugin still starting.
+
+    Another plugin, the same plugin with another error, or any mix is a defect to report at once.
+    """
+    return bool(unready) and all(line.startswith(f"{_TRANSIENT_PLUGIN}: ") and _TRANSIENT_ERROR in line for line in unready)
+
+
+def _roster_observation(request: AdapterRequest, runtime: Runtime) -> _RosterObservation | JsonObject:
+    """One ``list_plugins`` call: the parsed roster, or the blocked result that ends the check."""
+    outcome = _solet_call(request, runtime, _LIST_PLUGINS_KEY, {})
+    if command_output_truncated(outcome):
+        return truncated_solet_call_output(request, _LIST_PLUGINS_KEY, outcome)
+    observed = _observed_plugins(_call_payload(outcome).get("plugins"))
+    if observed is None:
+        return blocked(
+            request,
+            "plugin_roster_invalid",
+            "Repair lifecycle plugin inventory until it returns a complete typed roster.",
+        )
+    return observed
+
+
+def _wait_for_roster(
+    request: AdapterRequest,
+    runtime: Runtime,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> _RosterObservation | JsonObject:
+    """Observe the roster; observe again, until the budget is spent, only while the inference plugin is still starting."""
+    deadline = monotonic() + max(0, request.timeout_seconds - _ROSTER_WAIT_MARGIN_SECONDS)
+    while True:
+        observed = _roster_observation(request, runtime)
+        if not isinstance(observed, _RosterObservation):
+            return observed
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not _transient_inference_start(observed.unready):
+            return observed
+        sleep(min(_ROSTER_POLL_SECONDS, remaining))
+
+
+def plugin_roster(
+    request: AdapterRequest,
+    runtime: Runtime,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> JsonObject:
     desired = _desired_plugins(request)
     if desired is None:
         return blocked(
@@ -314,23 +356,9 @@ def plugin_roster(request: AdapterRequest, runtime: Runtime) -> JsonObject:
             "plugin_manifest_invalid",
             "Repair the generated profile/config/manifest.yaml before resuming.",
         )
-    outcome = _solet_call(
-        request, runtime, "service_interface::lifecycle_management_service::list_plugins", {}
-    )
-    if command_output_truncated(outcome):
-        return truncated_solet_call_output(
-            request,
-            "service_interface::lifecycle_management_service::list_plugins",
-            outcome,
-        )
-    payload = _call_payload(outcome)
-    observed = _observed_plugins(payload.get("plugins"))
-    if observed is None:
-        return blocked(
-            request,
-            "plugin_roster_invalid",
-            "Repair lifecycle plugin inventory until it returns a complete typed roster.",
-        )
+    observed = _wait_for_roster(request, runtime, monotonic, sleep)
+    if not isinstance(observed, _RosterObservation):
+        return observed
     exact = observed.actual == desired and not observed.unready
     error_kind = "plugin_roster_unready" if observed.unready else "plugin_roster_mismatch"
     return result(
@@ -354,15 +382,17 @@ def _roster_evidence(observed: _RosterObservation, desired: set[str], exact: boo
         _evidence("plugin_roster_unready", not unready, _ROSTER_SOURCE, unready, []),
     ]
     if observed.warnings:
-        items.append(evidence(
-            evidence_id="plugin_roster_warnings",
-            kind="readiness",
-            status="warning",
-            summary="ready plugins report a degraded capability",
-            observed=sorted(observed.warnings),
-            expected=[],
-            source=_ROSTER_SOURCE,
-        ))
+        items.append(
+            evidence(
+                evidence_id="plugin_roster_warnings",
+                kind="readiness",
+                status="warning",
+                summary="ready plugins report a degraded capability",
+                observed=sorted(observed.warnings),
+                expected=[],
+                source=_ROSTER_SOURCE,
+            )
+        )
     return items
 
 

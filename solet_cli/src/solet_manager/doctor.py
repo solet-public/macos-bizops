@@ -12,6 +12,7 @@ from .contracts import ContractBundle, target_contract_directory
 from .create_applied_edits import accept_applied_edits, accepted_edit_paths
 from .doctor_blue_green_census import collect_blue_green_advisories
 from .doctor_credential_copy_census import collect_credential_copy_advisories
+from .doctor_fleet_launcher_census import collect_fleet_launcher_advisories
 from .doctor_genesis_marker_census import collect_genesis_marker_advisories
 from .doctor_inference_qualification import (
     collect_inference_probe_advisories,
@@ -76,9 +77,7 @@ class InstallationDoctor:
                 adapter_registry,
                 self.paths,
             )
-            transaction = transaction.with_result_kind(
-                "doctor_verified" if transaction.status.value == "verified" else "doctor_incomplete"
-            )
+            transaction = transaction.with_result_kind("doctor_verified" if transaction.status.value == "verified" else "doctor_incomplete")
             write_transaction(self.paths.transaction_path(name), transaction)
         advisories = collect_doctor_advisories(seed_record, transaction)
         advisories.extend(collect_residue_advisories(record))
@@ -95,6 +94,7 @@ class InstallationDoctor:
         advisories.extend(collect_plugin_version_skew_advisories(record))
         advisories.extend(collect_lm_studio_advisories(record))
         advisories.extend(collect_terminal_return_key_advisories(record))
+        advisories.extend(collect_fleet_launcher_advisories(record))
         advisories.extend(
             collect_inference_qualification_advisories(
                 bundle,
@@ -126,14 +126,8 @@ def current_seed_record(paths: ManagerPaths, record: InstanceRecord) -> Instance
     if not is_create_origin_alias(record, row):
         target = row.target
         raise StateConflictError(
-            f"managed instance {record.name!r}: the v2 inventory row (origin {row.management_origin.value}, target "
-            f"{target.canonical_path}, inode {target.filesystem_identity.inode}) is not the create record's alias "
-            f"(target {record.target}); the doctor cannot tell which seed release this checkout should be at",
-            repair=(
-                f"Do not edit Manager state. Restore the original target at {record.target}, or, if the replacement "
-                f"was intentional, first classify it read-only with `solet-manager inspect --target {target.canonical_path}` "
-                "and follow the explicit managed-instance recovery it reports before retrying doctor."
-            ),
+            f"managed instance {record.name!r}: the v2 inventory row (origin {row.management_origin.value}, target {target.canonical_path}, inode {target.filesystem_identity.inode}) is not the create record's alias (target {record.target}); the doctor cannot tell which seed release this checkout should be at",
+            repair=(f"Do not edit Manager state. Restore the original target at {record.target}, or, if the replacement was intentional, first classify it read-only with `solet-manager inspect --target {target.canonical_path}` and follow the explicit managed-instance recovery it reports before retrying doctor."),
         )
     release = row.source_release
     return replace(
@@ -181,11 +175,7 @@ def _doctor_context(
     transaction = load_transaction(paths.transaction_path(name))
     if transaction is None:
         raise StateConflictError(f"managed instance {name!r} lacks its transaction journal")
-    if (
-        transaction.target != record.target
-        or transaction.flow_source_revision != record.flow_source_revision
-        or transaction.flow_contract_digest != record.flow_contract_digest
-    ):
+    if transaction.target != record.target or transaction.flow_source_revision != record.flow_source_revision or transaction.flow_contract_digest != record.flow_contract_digest:
         raise StateConflictError("registry and transaction pinned identities differ")
     bundle = ContractBundle.load(
         source_revision=record.flow_source_revision,
@@ -216,13 +206,9 @@ def _doctor_result(
     distinct diagnostic, so it is reported separately and by name.
     """
 
-    verified_count = sum(
-        1 for item in checks if isinstance(item, dict) and item.get("status") == "verified"
-    )
+    verified_count = sum(1 for item in checks if isinstance(item, dict) and item.get("status") == "verified")
     completion_verified = bool(checks) and verified_count == len(checks)
-    completion_failed = any(
-        isinstance(item, dict) and item.get("status") == "failed" for item in checks
-    )
+    completion_failed = any(isinstance(item, dict) and item.get("status") == "failed" for item in checks)
     blockers = _setup_stage_blockers(transaction)
     return CommandResult(
         kind="installation_doctor",
@@ -240,9 +226,7 @@ def _doctor_result(
             "setup_stage_blockers": [dict(item) for item in blockers],
             "transaction_status": transaction.status.value,
             "flow_contract_digest": transaction.flow_contract_digest,
-            "seed_tree_verification": None
-            if seed_tree_verification is None
-            else seed_tree_verification.to_dict(),
+            "seed_tree_verification": None if seed_tree_verification is None else seed_tree_verification.to_dict(),
             "advisories": [] if advisories is None else advisories,
         },
     )
@@ -255,11 +239,7 @@ def _setup_stage_blockers(transaction: Transaction) -> tuple[dict[str, JsonValue
     work, so they are not blockers.
     """
 
-    return tuple(
-        {"stage_id": stage_id, "status": status.value}
-        for stage_id, status in transaction.stages.items()
-        if status not in _FINAL_STAGE_STATUSES
-    )
+    return tuple({"stage_id": stage_id, "status": status.value} for stage_id, status in transaction.stages.items() if status not in _FINAL_STAGE_STATUSES)
 
 
 def _doctor_message(
@@ -267,11 +247,7 @@ def _doctor_message(
     completion_verified: bool,
     blockers: tuple[dict[str, JsonValue], ...],
 ) -> str:
-    headline = (
-        "verified every required check"
-        if completion_verified
-        else "did not verify every required check"
-    )
+    headline = "verified every required check" if completion_verified else "did not verify every required check"
     message = f"Installation doctor {headline} for {name!r}."
     if blockers:
         named = ", ".join(f"{item['stage_id']} ({item['status']})" for item in blockers)
@@ -288,10 +264,7 @@ def _doctor_repair(
         repairs.append("Repair the listed required checks and rerun doctor.")
     if blockers:
         named = ", ".join(str(item["stage_id"]) for item in blockers)
-        repairs.append(
-            f"Finish the open setup stages ({named}) and rerun doctor; "
-            "these are not completion checks and are not repaired by rerunning them."
-        )
+        repairs.append(f"Finish the open setup stages ({named}) and rerun doctor; these are not completion checks and are not repaired by rerunning them.")
     return " ".join(repairs) if repairs else None
 
 

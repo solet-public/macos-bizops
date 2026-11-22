@@ -34,7 +34,6 @@ __all__ = [
     "_record_all_runtime_totals",
     "_runtime_for_total",
     "_managed_for_usage",
-    "_receipt_for_managed",
     "_unit_coverage",
     "_usage_notes",
 ]
@@ -380,8 +379,7 @@ def _managed_for_usage(
     key: str,
     identity: str,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    column = "unit_id" if key == "unit_id" else "agent_instance_id"
-    rows, error = _try_read(lambda: list_managed_sessions(state, {column: identity}))
+    rows, error = _try_read(lambda: list_managed_sessions(state, {key: identity}))
     return rows or [], f"managed_session_read_unavailable:{type(error).__name__}" if error else None
 
 
@@ -407,10 +405,3 @@ def _has_missing_runtime_totals(
     not_found: set[str],
 ) -> bool:
     return any(runtime_id in not_found or runtime_id not in totals for runtime_id in ids)
-
-
-def _receipt_for_managed(managed: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
-    return next(
-        (row for row in managed if isinstance(row.get("selection_receipt"), Mapping) and row["selection_receipt"]),
-        None,
-    )

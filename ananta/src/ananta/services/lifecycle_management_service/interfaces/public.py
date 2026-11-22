@@ -26,6 +26,7 @@ from ananta.core.actions.action_metadata import (
     ParameterType,
     ReturnValueSchema,
 )
+from ananta.core.services.call_context import CallContext
 from ananta.core.services.service_interface_decorator import service_interface_process
 from ananta.core.state.async_job_manager import registered_job_return_schema
 
@@ -37,6 +38,29 @@ LIST_PLUGINS_FILTER_VALUES: tuple[str, ...] = (
 
 PLATFORM_CONFIG_TAKES_EFFECT_NEXT_RESTART = "next_restart"
 PLATFORM_CONFIG_TAKES_EFFECT_IMMEDIATE = "immediate"
+
+
+def _work_folder_row_properties() -> dict[str, ParameterMetadata]:
+    """The keys of one work-folder row, shared by the verbs that return a row."""
+    return {
+        "folder_id": ParameterMetadata(type=ParameterType.STRING, description="Id of the record (wkf-<hex>).", required=True),
+        "path": ParameterMetadata(type=ParameterType.STRING, description="Canonical real path of the folder.", required=True),
+        "state": ParameterMetadata(type=ParameterType.STRING, description="'open', 'due', 'harvested', 'retired' or 'deleted'.", required=True),
+        "version": ParameterMetadata(type=ParameterType.INTEGER, description="Row version: 1 when opened, raised by one at every change.", required=True),
+        "dev": ParameterMetadata(type=ParameterType.STRING, description="st_dev of the directory when it was opened, as decimal text.", required=True),
+        "ino": ParameterMetadata(type=ParameterType.STRING, description="st_ino of the directory when it was opened, as decimal text.", required=True),
+        "purpose": ParameterMetadata(type=ParameterType.STRING, description="What the folder is for, in the creator's words.", required=True),
+        "bound_kind": ParameterMetadata(type=ParameterType.STRING, description="Kind of the work item the folder belongs to.", required=True),
+        "bound_ref": ParameterMetadata(type=ParameterType.STRING, description="Reference of the work item the folder belongs to.", required=True),
+        "harvest_kind": ParameterMetadata(type=ParameterType.STRING, description="'regenerable', 'evidence_copy' or 'custody_packet': what must be kept before removal.", required=True),
+        "owner": ParameterMetadata(type=ParameterType.STRING, description="Session or role that owns the folder; empty when none was given.", required=True),
+        "harvest_receipt": ParameterMetadata(type=ParameterType.STRING, description="JSON text of the receipt recorded at harvest; empty until then and again after a reopen.", required=True),
+        "advisories": ParameterMetadata(
+            type=ParameterType.LIST,
+            description="What this call has to tell the caller without refusing: each entry has code, message, folder_id and path. Empty unless the call found something to report.",
+            required=True,
+        ),
+    }
 
 
 class LifecycleManagementAPI(ABC):
@@ -919,5 +943,730 @@ class LifecycleManagementAPI(ABC):
             ``"restart_failed_after_manifest_commit"``; ``restart_status``
             carries the deployment plugin's verbatim status on the
             applied/failed paths.
+        """
+        ...
+
+    @service_interface_process(
+        name="record_deployment",
+        is_discoverable=True,
+        provider="lifecycle_management_service",
+        parameters={
+            "solet_name": ParameterMetadata(
+                description="Name of the solet that was deployed.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "release_id": ParameterMetadata(
+                description="Identifier of the release that went live.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "git_sha": ParameterMetadata(
+                description="Full 40-character lowercase hex commit sha of the deployed tree.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "deployed_at": ParameterMetadata(
+                description="ISO-8601 instant the release went live, with a UTC offset (for example 2026-11-13T12:00:00+00:00).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "trigger": ParameterMetadata(
+                description="What caused the deploy: 'landing' or 'tick'.",
+                required=True,
+                type=ParameterType.STRING,
+                validation={"enum": ["landing", "tick"]},
+            ),
+            "manifest_sha256": ParameterMetadata(
+                description="sha256 of the manifest that was deployed.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "agent_instance_id": ParameterMetadata(
+                description="Agent instance recording the deployment. Recorded for history, not an authority.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor_model": ParameterMetadata(
+                description="Model of the recording actor.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor_effort": ParameterMetadata(
+                description="Effort tier of the recording actor.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="The deployment record row and whether this call created it",
+            type=ParameterType.OBJECT,
+            properties={
+                "deployment_id": ParameterMetadata(type=ParameterType.STRING, description="Stable id of the record (dpr-<hex>).", required=True),
+                "solet_name": ParameterMetadata(type=ParameterType.STRING, description="Solet the record belongs to.", required=True),
+                "release_id": ParameterMetadata(type=ParameterType.STRING, description="Release that went live.", required=True),
+                "git_sha": ParameterMetadata(type=ParameterType.STRING, description="Deployed commit sha.", required=True),
+                "deployed_at": ParameterMetadata(type=ParameterType.STRING, description="Deploy instant, ISO-8601 in UTC with +00:00 offset.", required=True),
+                "trigger": ParameterMetadata(type=ParameterType.STRING, description="'landing' or 'tick'.", required=True),
+                "state": ParameterMetadata(type=ParameterType.STRING, description="'recorded' or 'withdrawn'.", required=True),
+                "version": ParameterMetadata(type=ParameterType.INTEGER, description="Row version; the compare-and-set guard for set_deployment_state.", required=True),
+                "created": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when this call wrote the row; False when the same (solet, sha, release) already existed.", required=True),
+            },
+            usage_patterns=[
+                "Record that a landing or tick deploy went live, once per (solet, sha, release)",
+                "Repeat the call after a crash: a second call returns the same row with created False",
+            ],
+        ),
+        is_enabled=True,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=False,
+        ),
+    )
+    @abstractmethod
+    def record_deployment(
+        self,
+        solet_name: str,
+        release_id: str,
+        git_sha: str,
+        deployed_at: str,
+        trigger: str,
+        manifest_sha256: str,
+        agent_instance_id: str,
+        actor_model: str,
+        actor_effort: str,
+    ) -> dict[str, Any]:
+        """Record one deployment in the solet's own database; idempotent per (solet, sha, release).
+
+        Returns:
+            Result dict with ``deployment_id``, ``solet_name``, ``release_id``,
+            ``git_sha``, ``deployed_at``, ``trigger``, ``state``, ``version``
+            and ``created``. A malformed sha, trigger or timestamp is refused
+            with the error code ``invalid_sha``, ``invalid_trigger`` or
+            ``invalid_deployed_at``.
+        """
+        ...
+
+    @service_interface_process(
+        name="read_deployments",
+        is_discoverable=True,
+        provider="lifecycle_management_service",
+        parameters={
+            "solet_name": ParameterMetadata(
+                description="Solet whose deployments to read.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "mode": ParameterMetadata(
+                description="'current' (newest non-withdrawn deployment, zero or one row), 'history' (newest first, withdrawn included, paged) or 'get' (one row by deployment_id).",
+                required=True,
+                type=ParameterType.STRING,
+                validation={"enum": ["current", "history", "get"]},
+            ),
+            "deployment_id": ParameterMetadata(
+                description="Record id to read. Required for mode 'get', ignored otherwise.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "limit": ParameterMetadata(
+                description="Page size for mode 'history'. Default 20, maximum 100.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "after": ParameterMetadata(
+                description="The 'next' value of the previous history page, to continue it.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="Deployment rows and the continuation token",
+            type=ParameterType.OBJECT,
+            properties={
+                "rows": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=("Deployment rows, each with deployment_id, solet_name, release_id, git_sha, deployed_at, trigger, state and version."),
+                    required=True,
+                ),
+                "next": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Token to pass as 'after' for the next history page; null when there is no further page.",
+                    required=False,
+                ),
+            },
+            usage_patterns=[
+                "Ask what is deployed now and since when (mode current)",
+                "List past deployments newest first, including withdrawn ones (mode history)",
+                "Re-read one record before withdrawing it (mode get)",
+            ],
+        ),
+        is_enabled=True,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=False,
+        ),
+    )
+    @abstractmethod
+    def read_deployments(
+        self,
+        solet_name: str,
+        mode: str,
+        deployment_id: str | None = None,
+        limit: int = 20,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """Read the solet's deployment records.
+
+        Returns:
+            Result dict with ``rows`` and ``next``. Mode ``get`` with an id that
+            is unknown (or belongs to another solet) is refused with the error
+            code ``unknown_deployment``; a bad mode, limit or ``after`` is
+            refused with ``invalid_argument``.
+        """
+        ...
+
+    @service_interface_process(
+        name="set_deployment_state",
+        is_discoverable=True,
+        provider="lifecycle_management_service",
+        parameters={
+            "deployment_id": ParameterMetadata(
+                description="Id of the deployment record to move.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "withdrawn": ParameterMetadata(
+                description="True withdraws the record; False reinstates a withdrawn one.",
+                required=True,
+                type=ParameterType.BOOLEAN,
+            ),
+            "expected_version": ParameterMetadata(
+                description="The row version the caller last read; a different current version refuses the write.",
+                required=True,
+                type=ParameterType.INTEGER,
+            ),
+            "reason": ParameterMetadata(
+                description="Why the record is withdrawn or reinstated; kept in the record's history.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "agent_instance_id": ParameterMetadata(
+                description="Agent instance making the change. Recorded for history, not an authority.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor_model": ParameterMetadata(
+                description="Model of the acting actor.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor_effort": ParameterMetadata(
+                description="Effort tier of the acting actor.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="The deployment record after the state change",
+            type=ParameterType.OBJECT,
+            properties={
+                "deployment_id": ParameterMetadata(type=ParameterType.STRING, description="Id of the record.", required=True),
+                "solet_name": ParameterMetadata(type=ParameterType.STRING, description="Solet the record belongs to.", required=True),
+                "release_id": ParameterMetadata(type=ParameterType.STRING, description="Release that went live.", required=True),
+                "git_sha": ParameterMetadata(type=ParameterType.STRING, description="Deployed commit sha.", required=True),
+                "deployed_at": ParameterMetadata(type=ParameterType.STRING, description="Deploy instant, ISO-8601 in UTC with +00:00 offset.", required=True),
+                "trigger": ParameterMetadata(type=ParameterType.STRING, description="'landing' or 'tick'.", required=True),
+                "state": ParameterMetadata(type=ParameterType.STRING, description="'recorded' or 'withdrawn' after the change.", required=True),
+                "version": ParameterMetadata(type=ParameterType.INTEGER, description="New row version (expected_version + 1).", required=True),
+            },
+            usage_patterns=[
+                "Withdraw a deployment that was recorded wrongly, then record the right one",
+                "Reinstate a record that was withdrawn by mistake",
+            ],
+        ),
+        is_enabled=True,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=False,
+        ),
+    )
+    @abstractmethod
+    def set_deployment_state(
+        self,
+        deployment_id: str,
+        withdrawn: bool,
+        expected_version: int,
+        reason: str,
+        agent_instance_id: str,
+        actor_model: str,
+        actor_effort: str,
+    ) -> dict[str, Any]:
+        """Withdraw or reinstate a deployment record by compare-and-set on its version.
+
+        Returns:
+            The row after the change. A version that moved since the caller read
+            it is refused with the error code ``stale_version`` and nothing is
+            written; an unknown id is refused with ``unknown_deployment``.
+        """
+        ...
+
+    @service_interface_process(
+        name="run_deploy_rule",
+        is_discoverable=True,
+        provider="lifecycle_management_service",
+        parameters={
+            "solet_name": ParameterMetadata(
+                description="This solet's name. The verb runs only this solet's own deploy rule; another name is refused with solet_mismatch.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "agent_instance_id": ParameterMetadata(
+                description="Agent instance asking for the deploy. The rule records it on the deployment for history; it is not an authority.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor_model": ParameterMetadata(
+                description="Model of the asking actor, recorded with the deployment.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "actor_effort": ParameterMetadata(
+                description="Effort tier of the asking actor, recorded with the deployment.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "trigger": ParameterMetadata(
+                description="'landing' (default) skips a master move that changed no production path; 'tick' deploys master whatever changed.",
+                required=False,
+                type=ParameterType.STRING,
+                default="landing",
+                validation={"enum": ["landing", "tick"]},
+            ),
+            "attempt_id": ParameterMetadata(
+                description="An attempt id this verb answered earlier. With it the verb only reads that attempt: still running, or its terminal outcome. Without it the verb starts the rule, or attaches to the attempt already running.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="The deploy-rule attempt's typed outcome",
+            type=ParameterType.OBJECT,
+            properties={
+                "outcome": ParameterMetadata(type=ParameterType.STRING, description="'deployed' (the target is the recorded current deployment), 'skipped' (a landing with no production path), 'deferred' (running, or held: ask again) or 'failed' (needs a person).", required=True),
+                "decision": ParameterMetadata(type=ParameterType.STRING, description="The rule's own terminal decision (for example deployed, already_current, deferred_gate, failed), or in_progress, attempt_abandoned or start_failed.", required=True),
+                "attempt_id": ParameterMetadata(type=ParameterType.STRING, description="Id of the attempt (dra-<UTC time>-<hex>) to pass back as attempt_id; null when no attempt was started.", required=False),
+                "target": ParameterMetadata(type=ParameterType.STRING, description="Full master commit sha the attempt deploys; the rule's own receipt wins once it has one. Null when master could not be read.", required=False),
+                "child_pid": ParameterMetadata(type=ParameterType.INTEGER, description="Pid of the detached rule process; null when none was started.", required=False),
+                "receipt": ParameterMetadata(type=ParameterType.OBJECT, description="The rule's terminal receipt once the attempt has finished; null while it runs or when it ended without one.", required=False),
+                "detail": ParameterMetadata(type=ParameterType.STRING, description="Bounded text for a failure: the rule's error, the start error, or the end of an abandoned attempt's stderr; null otherwise.", required=False),
+            },
+            usage_patterns=[
+                "After landing a solet repository, ask that solet to deploy master by its own rule, then read the attempt by id until it is terminal",
+                "A person deploys the solet's master now with the same guarded rule",
+            ],
+        ),
+        is_enabled=True,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=False,
+        ),
+        requires_call_context=True,
+    )
+    @abstractmethod
+    def run_deploy_rule(
+        self,
+        solet_name: str,
+        agent_instance_id: str,
+        actor_model: str,
+        actor_effort: str,
+        trigger: str = "landing",
+        attempt_id: str | None = None,
+        *,
+        call_context: CallContext | None = None,
+    ) -> dict[str, Any]:
+        """Start this solet's guarded deploy rule detached, or read one attempt of it.
+
+        The rule (``_deploy_by_rule.py``, run from the solet's checkout) holds
+        its own lock, admission and blue-green swap, keeps the old release
+        serving on failure and sends its existing needs-a-person notice. Its
+        process outlives a swap of the solet that started it, so the verb
+        never waits on it: a start answers ``deferred`` / ``in_progress``
+        with the attempt id, and a later call with that id answers the
+        rule's terminal decision. ``call_context`` is server-built and is
+        used only to name the caller in the child-start log line.
+
+        Returns:
+            Result dict with ``outcome``, ``decision``, ``attempt_id``,
+            ``target``, ``child_pid``, ``receipt`` and ``detail``. Another
+            solet's name is refused with ``solet_mismatch``, an unknown
+            trigger with ``invalid_trigger``, a malformed attempt id with
+            ``invalid_argument``, an attempt that is not kept with
+            ``unknown_attempt``, and a profile with no checkout above it with
+            ``deploy_rule_unconfigured``.
+        """
+        ...
+
+    @service_interface_process(
+        name="open_work_folder",
+        is_discoverable=True,
+        provider="lifecycle_management_service",
+        parameters={
+            "path": ParameterMetadata(
+                description="Absolute path of an existing real directory to register. A symlink resolves to its target, which is what is recorded; the filesystem root is refused.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "purpose": ParameterMetadata(
+                description="What the folder is for, in the creator's words.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "bound": ParameterMetadata(
+                description="The work item the folder belongs to, as 'kind:ref' split at the first colon, for example 'release_run:run-12'.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "harvest": ParameterMetadata(
+                description="What must be kept before the folder may be removed: 'regenerable' (default, nothing to keep), 'evidence_copy' or 'custody_packet' (a harvest receipt is needed first).",
+                required=False,
+                type=ParameterType.STRING,
+                validation={"enum": ["regenerable", "evidence_copy", "custody_packet"]},
+            ),
+            "owner": ParameterMetadata(
+                description="Session or role that owns the folder. Optional; recorded for history, not an authority.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "agent_instance_id": ParameterMetadata(
+                description="Agent instance making the change. Optional; recorded for history, not an authority.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "agent_session_id": ParameterMetadata(
+                description="Agent session making the change. Optional; recorded for history, not an authority.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "actor_model": ParameterMetadata(
+                description="Model of the acting actor. Optional; recorded for history.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "actor_effort": ParameterMetadata(
+                description="Effort tier of the acting actor. Optional; recorded for history.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="The work-folder record after the call",
+            type=ParameterType.OBJECT,
+            properties=_work_folder_row_properties(),
+            usage_patterns=[
+                "Register a scratch, capture or cache directory right after creating it",
+                "Repeat the call for a path that may already be registered: the same row comes back and nothing is written",
+            ],
+        ),
+        is_enabled=True,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=False,
+        ),
+    )
+    @abstractmethod
+    def open_work_folder(
+        self,
+        path: str,
+        purpose: str,
+        bound: str,
+        harvest: str = "regenerable",
+        owner: str = "",
+        agent_instance_id: str = "",
+        agent_session_id: str = "",
+        actor_model: str = "",
+        actor_effort: str = "",
+    ) -> dict[str, Any]:
+        """Record an existing directory as a work folder in the solet's own database; idempotent for a live path.
+
+        Returns:
+            The row, with the keys in ``return_value_schema``. A path whose
+            record is not deleted returns that same row unchanged and writes
+            nothing; if the directory there is no longer the one recorded, the
+            row carries one ``identity_changed`` advisory. A relative or missing
+            path is refused with the error code ``invalid_path``, a bound that is
+            not ``kind:ref`` with ``invalid_argument``, an unknown harvest kind
+            with ``invalid_field``.
+        """
+        ...
+
+    @service_interface_process(
+        name="read_work_folders",
+        is_discoverable=True,
+        provider="lifecycle_management_service",
+        parameters={
+            "mode": ParameterMetadata(
+                description="'show' (one folder by folder_id), 'list' (folders, filtered, ordered by path, paged) or 'history' (the events of one folder, oldest first, paged).",
+                required=True,
+                type=ParameterType.STRING,
+                validation={"enum": ["show", "list", "history"]},
+            ),
+            "folder_id": ParameterMetadata(
+                description="Record id to read. Required for modes 'show' and 'history', ignored for 'list'.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "parent_dir": ParameterMetadata(
+                description="Mode 'list' only: keep folders whose parent directory is exactly this canonical path.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "bound": ParameterMetadata(
+                description="Mode 'list' only: keep folders bound to this work item, as 'kind:ref'.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            # Not named "state": the platform replaces the value of any declared parameter by that name with its own.
+            "state_filter": ParameterMetadata(
+                description="Mode 'list' only: keep folders in this state.",
+                required=False,
+                type=ParameterType.STRING,
+                validation={"enum": ["open", "due", "harvested", "deleted", "retired"]},
+            ),
+            "limit": ParameterMetadata(
+                description="Page size for modes 'list' and 'history'. Default 50, maximum 100; a larger value is refused, not clamped.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "after": ParameterMetadata(
+                description="The 'next' value of the previous page, to continue it.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="Work-folder rows or event rows, and the continuation token",
+            type=ParameterType.OBJECT,
+            properties={
+                "folders": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=("Work-folder rows for modes 'show' and 'list', each with the row keys. For mode 'history', the event rows oldest first, each with folder_id, ordinal, kind, prior_version, actor_instance, actor_session, actor_model, actor_effort, detail (JSON text) and recorded_at."),
+                    required=True,
+                ),
+                "next": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Token to pass as 'after' for the next page; null when there is no further page and always null for mode 'show'.",
+                    required=False,
+                ),
+            },
+            usage_patterns=[
+                "List the work folders under one directory, or bound to one work item, or in one state",
+                "Re-read one folder to get its current version before changing it (mode show)",
+                "See what happened to a folder and who did it (mode history)",
+            ],
+        ),
+        is_enabled=True,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=False,
+        ),
+    )
+    @abstractmethod
+    def read_work_folders(
+        self,
+        mode: str,
+        folder_id: str | None = None,
+        parent_dir: str | None = None,
+        bound: str | None = None,
+        state_filter: str | None = None,
+        limit: int = 50,
+        after: str | None = None,
+    ) -> dict[str, Any]:
+        """Read the solet's work-folder records.
+
+        Returns:
+            Result dict with ``folders`` and ``next``. An unknown id in mode
+            ``show`` or ``history`` is refused with the error code
+            ``unknown_folder``; a bad mode, a missing id, a bound that is not
+            ``kind:ref`` or a malformed ``after`` with ``invalid_argument``; a
+            limit outside 1..100 or an unknown ``state_filter`` with
+            ``invalid_field``.
+        """
+        ...
+
+    @service_interface_process(
+        name="transition_work_folder",
+        is_discoverable=True,
+        provider="lifecycle_management_service",
+        parameters={
+            "folder_id": ParameterMetadata(
+                description="Id of the work-folder record to change.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "action": ParameterMetadata(
+                description=(
+                    "'close' (open to due: the creator's work is over), 'harvest_record' (due to harvested: records what was kept), 'reopen' (due or harvested to open; clears the current receipt), "
+                    "'retire' (open, due or harvested to retired: the sweep keeps it), 'restore' (retired to open) or 'correct' (changes harvest_kind and/or owner)."
+                ),
+                required=True,
+                type=ParameterType.STRING,
+                validation={"enum": ["close", "reopen", "retire", "restore", "correct", "harvest_record"]},
+            ),
+            "expected_version": ParameterMetadata(
+                description="The row version the caller last read; a different current version refuses the write.",
+                required=True,
+                type=ParameterType.INTEGER,
+            ),
+            "reason": ParameterMetadata(
+                description="Why the change is made; kept in the folder's history.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "harvest_kind": ParameterMetadata(
+                description="Action 'correct' only: the new harvest kind. Ignored for other actions.",
+                required=False,
+                type=ParameterType.STRING,
+                validation={"enum": ["regenerable", "evidence_copy", "custody_packet"]},
+            ),
+            "owner": ParameterMetadata(
+                description="Action 'correct' only: the new owner; an empty string clears it. Ignored for other actions.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "receipt_json": ParameterMetadata(
+                description="Action 'harvest_record' only: the harvest receipt as the text of a non-empty JSON object. Needed unless the folder is regenerable. Ignored for other actions.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "agent_instance_id": ParameterMetadata(
+                description="Agent instance making the change. Optional; recorded for history, not an authority.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "agent_session_id": ParameterMetadata(
+                description="Agent session making the change. Optional; recorded for history, not an authority.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "actor_model": ParameterMetadata(
+                description="Model of the acting actor. Optional; recorded for history.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "actor_effort": ParameterMetadata(
+                description="Effort tier of the acting actor. Optional; recorded for history.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="The work-folder record after the change",
+            type=ParameterType.OBJECT,
+            properties=_work_folder_row_properties(),
+            usage_patterns=[
+                "Close a folder when its creator's work ends, then record what was kept so the sweep may remove it",
+                "Reopen a folder that gets more work, or retire one the sweep must keep and restore it later",
+                "Correct the harvest kind or owner of a folder that was registered wrongly",
+            ],
+        ),
+        is_enabled=True,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=False,
+        ),
+    )
+    @abstractmethod
+    def transition_work_folder(
+        self,
+        folder_id: str,
+        action: str,
+        expected_version: int,
+        reason: str = "",
+        harvest_kind: str | None = None,
+        owner: str | None = None,
+        receipt_json: str | None = None,
+        agent_instance_id: str = "",
+        agent_session_id: str = "",
+        actor_model: str = "",
+        actor_effort: str = "",
+    ) -> dict[str, Any]:
+        """Move one work folder through its life, or correct its record, by compare-and-set on its version.
+
+        Returns:
+            The row after the change, with the version raised by one. A version
+            that moved since the caller read it is refused with the error code
+            ``stale_version`` and nothing is written; an unknown id with
+            ``unknown_folder``; a move the folder's state does not allow, or any
+            move of a deleted folder, with ``invalid_transition``; a bad harvest
+            kind or receipt, or a correction that changes nothing, with
+            ``invalid_field``; an unknown action with ``invalid_argument``.
+        """
+        ...
+
+    @service_interface_process(
+        name="sweep_work_folders",
+        is_discoverable=True,
+        provider="lifecycle_management_service",
+        parameters={
+            "apply": ParameterMetadata(
+                description="True removes the finished folders; False (the default) lists what would be done and removes nothing.",
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+            "limit": ParameterMetadata(
+                description="Most folders acted on in one run, at least 1. Default 200; the rest are listed in 'deferred' and the next run takes them.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
+            "folder_id": ParameterMetadata(
+                description="Limit the run to the one record with this id (wkf-<hex>). Omitted, every finished folder is looked at. An id with no record is refused unknown_folder; the id of a folder that is not finished gives no candidates.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+        },
+        return_value_schema=ReturnValueSchema(
+            description="What one sweep run found and did",
+            type=ParameterType.OBJECT,
+            properties={
+                "candidates": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description=("One entry per folder acted on, or in a dry run that would be: folder_id, path, state, action (remove, record_absent, harvest_and_remove or harvest_and_record_absent) and outcome (would_ plus the action in a dry run; deleted, absent, skipped or failed after an apply)."),
+                    required=True,
+                ),
+                "counts": ParameterMetadata(
+                    type=ParameterType.DICT,
+                    description="Counts for the run: marked_harvested, deleted, absent, skipped and failed.",
+                    required=True,
+                ),
+                "deferred": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Folder ids that were eligible but beyond the limit; the next run takes them.",
+                    required=True,
+                ),
+                "advisories": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="What the sweep kept or could not do, each with code and message and, for one folder, folder_id and path: awaiting_harvest_receipt, no_custody, identity_changed, not_a_real_directory, inspect_failed, removal_failed or row_moved.",
+                    required=True,
+                ),
+                "aborted": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when an integrity check stopped an applying run before anything was removed: this Python's rmtree cannot avoid symlink attacks. The reason is in advisories.",
+                    required=True,
+                ),
+            },
+            usage_patterns=[
+                "Preview what the sweep would remove (the default dry run)",
+                "Remove the work folders that are finished and harvested, on a schedule",
+            ],
+        ),
+        is_enabled=True,
+        error_processor_customizations=MergeErrorProcessorCustomizations(
+            retryable=False,
+        ),
+    )
+    @abstractmethod
+    def sweep_work_folders(self, apply: bool = False, limit: int = 200, folder_id: str | None = None) -> dict[str, Any]:
+        """Sweep the work folders that are finished, or only the one named by ``folder_id``; a dry run (the default) lists and removes nothing.
+
+        Returns:
+            Result dict with ``candidates``, ``counts``, ``deferred``,
+            ``advisories`` and ``aborted``. Only folders whose record says they
+            are finished and harvested are removed; the sweep never looks for
+            folders on disk and never decides by age. A limit below 1 is refused
+            with the error code ``invalid_field``; a ``folder_id`` with no
+            record is refused with the error code ``unknown_folder``.
         """
         ...

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "roots": [
+    {"kind": "required", "path": "ananta/src"},
+    {"kind": "glob", "path": "plugins/*/src"},
+    {"kind": "optional", "path": "solet_setup_contracts/src"},
+    {"kind": "optional", "path": "solet_cli/src"}
+  ]
+}

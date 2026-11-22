@@ -18,8 +18,10 @@ Checks, each named so a mutant names the check that kills it:
   R7  version: retire_role of a second fixture role bumps registry_version 1 -> 2.
   R8  second role: a send to and a claim of the second role are refused, and the
       refusal names its successor.
-  R9  verb: retire_role refuses a caller holding no primary/principal role and
-      accepts a primary-class caller (version 2 -> 3).
+  R9  verb: a registered caller that holds no role retires an unheld role and the
+      appended row names that caller (version 1 -> 2); a caller holding the main
+      role retires another the same way (2 -> 3); a call carrying no caller identity
+      is refused retire_role_caller_unattributed and writes nothing.
   R10 read failure: a failed registry read raises, never an empty registry, and
       list_retired_roles returns a failure with no roles; an empty registry
       raises too.
@@ -32,12 +34,11 @@ Checks, each named so a mutant names the check that kills it:
       (d) deliver_job_completion and (e) peer_claim_role each refuse with
       retired_role_registry_unavailable and persist nothing. Each path has a
       control showing the same harness persists when the registry reads.
-  R13 retire fails closed: (a) a role_binding walk that fails, (b) a malformed
-      binding row whose normalized name matches the target, and (c) an
-      unreadable authority read each make retire_role refuse with its named
-      code (role_binding_unreadable / retire_role_authority_unreadable) and
-      leave registry_version unchanged. Control: a malformed row that does NOT
-      match the target does not block another retirement.
+  R13 retire fails closed: (a) a role_binding walk that fails and (b) a
+      malformed binding row whose normalized name matches the target each make
+      retire_role refuse role_binding_unreadable and leave registry_version
+      unchanged. Control: a malformed row that does NOT match the target does
+      not block another retirement.
 
 Mutants (applied by the lane's mutant runner, each red on the named check):
 
@@ -53,7 +54,6 @@ Mutants (applied by the lane's mutant runner, each red on the named check):
   M10 claim fails open on a registry error                             -> R12e
   M11 live-holder check back to a raw (case-sensitive) name compare    -> R11
   M12 retire_role swallows the role_binding_unreadable error           -> R13a, R13b
-  M13 retire_role swallows the authority-unreadable error              -> R13c
 
 Run:
     SOLET_NAME=<name>-test .venv/bin/python3 \
@@ -174,7 +174,9 @@ def _bridge_manager() -> BridgeSessionManager:
 
 def _peer_registry() -> PeerRegistry:
     store = open_store(
-        get_peer_binding_schema(), namespace=PEER_BINDING_NAMESPACE, backend="in_memory",
+        get_peer_binding_schema(),
+        namespace=PEER_BINDING_NAMESPACE,
+        backend="in_memory",
     )
     return PeerRegistry(bindings_store=store)
 
@@ -196,10 +198,9 @@ def _seed_binding(state: RealShapeState, role: str, instance: str) -> None:
     )
 
 
-def _seed_role_class(state: RealShapeState, role: str, role_class: str) -> None:
+def _seed_role(state: RealShapeState, role: str) -> None:
     state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_ROLE).append(
-        {"id": f"rol-{role}", "external_id": f"role:{role}", "role": role,
-         "role_class": role_class, "is_deleted": 0},
+        {"id": f"rol-{role}", "external_id": f"role:{role}", "role": role, "is_deleted": 0},
     )
 
 
@@ -211,7 +212,7 @@ def _fixture() -> tuple[RealShapeState, Any]:
     _seed_binding(state, _MAIN, _MAIN_INSTANCE)
     _seed_binding(state, _HELD, _HELD_INSTANCE)
     _seed_binding(state, _STALE, "agi-stale")
-    _seed_role_class(state, _MAIN, "primary")
+    _seed_role(state, _MAIN)
     seed_retired_role_registry(cast(StateManagementInterface, state))
     plugin: Any = object.__new__(AgentMessagingPlugin)
     plugin.orchestrator_ref = _Orchestrator(state)
@@ -252,10 +253,7 @@ def _guarded(call: Any) -> tuple[Any, str]:
 
 
 def _persisted(state: RealShapeState, role: str) -> int:
-    return sum(
-        1 for row in state.rows(NAMESPACE, TABLE_AGENT_ROLE_MESSAGE)
-        if row.get("recipient_key") == role
-    )
+    return sum(1 for row in state.rows(NAMESPACE, TABLE_AGENT_ROLE_MESSAGE) if row.get("recipient_key") == role)
 
 
 def _code(result: dict[str, Any]) -> str:
@@ -297,16 +295,15 @@ def test_seed() -> None:
     state, _plugin = _fixture()
     registry = read_retired_role_registry(cast(StateManagementInterface, state))
     _check(
-        registry.registry_version == 1
-        and [role.role for role in registry.roles] == [_RETIRED]
-        and registry.roles[0].successor is None,
+        registry.registry_version == 1 and [role.role for role in registry.roles] == [_RETIRED] and registry.roles[0].successor is None,
         "R1 seed: Register-Lead retired at registry_version 1 with no successor",
     )
     _check(
         seed_retired_role_registry(cast(StateManagementInterface, state)) == "already_seeded"
         and read_retired_role_registry(
             cast(StateManagementInterface, state),
-        ).registry_version == 1,
+        ).registry_version
+        == 1,
         "R1 seed: a second seed run is a no-op",
     )
 
@@ -321,9 +318,8 @@ def test_send_refused_before_persist() -> None:
         f"R2 send: Register-Lead refused with peer_role_retired (got {_code(result)!r})",
     )
     _check(
-        "triage is filed as project-solet register tickets" in message
-        and "no successor" in message,
-        "R2 send: the refusal names the reason and that there is no successor",
+        "): role retired; it has no successor role" in message,
+        "R2 send: the refusal names the seeded reason and that there is no successor",
     )
     _check(
         _persisted(state, _RETIRED) == 0,
@@ -341,10 +337,7 @@ def test_live_role_unchanged() -> None:
     result = _send(plugin, _LIVE)
     data = result.get("data")
     _check(
-        result.get("action_status") == "completed"
-        and isinstance(data, dict)
-        and data.get("delivery") == "queued_for_replay"
-        and _persisted(state, _LIVE) == 1,
+        result.get("action_status") == "completed" and isinstance(data, dict) and data.get("delivery") == "queued_for_replay" and _persisted(state, _LIVE) == 1,
         f"R4 send: a live role still sends and persists one row (got {result.get('action_status')!r})",
     )
 
@@ -354,8 +347,7 @@ def test_claim_refused() -> None:
     refused = _claim(state, _RETIRED)
     _check(
         isinstance(refused, RoleClaimFailure) and refused.code == "peer_role_retired",
-        f"R5 claim: claiming Register-Lead is refused with peer_role_retired "
-        f"(got {getattr(refused, 'code', refused)!r})",
+        f"R5 claim: claiming Register-Lead is refused with peer_role_retired (got {getattr(refused, 'code', refused)!r})",
     )
     _check(
         _binding_holder(state, _RETIRED) == "agi-d04925a7",
@@ -377,7 +369,8 @@ def test_http_and_streamable_refuse() -> None:
         "R6 HTTP: send_by_name route refuses Register-Lead with 410 peer_role_retired",
     )
     sessions = StreamableSessionManager(
-        bridge_manager=_bridge_manager(), peer_registry=_peer_registry(),
+        bridge_manager=_bridge_manager(),
+        peer_registry=_peer_registry(),
     )
     session = sessions.allocate(
         BearerClaim(
@@ -422,17 +415,14 @@ def test_second_role_and_version_bump() -> None:
     )
     registry = read_retired_role_registry(cast(StateManagementInterface, state))
     _check(
-        retired.registry_version == 2 and registry.registry_version == 2
-        and [role.role for role in registry.roles] == [_RETIRED, _SECOND],
-        f"R7 version: retiring a second role bumps registry_version 1 -> "
-        f"{registry.registry_version}",
+        retired.registry_version == 2 and registry.registry_version == 2 and [role.role for role in registry.roles] == [_RETIRED, _SECOND],
+        f"R7 version: retiring a second role bumps registry_version 1 -> {registry.registry_version}",
     )
     result = _send(plugin, _SECOND)
     error = result.get("error")
     message = str(error.get("message")) if isinstance(error, dict) else ""
     _check(
-        _code(result) == "peer_role_retired" and repr(_LIVE) in message
-        and _persisted(state, _SECOND) == 0,
+        _code(result) == "peer_role_retired" and repr(_LIVE) in message and _persisted(state, _SECOND) == 0,
         "R8 second role: a send is refused, names the successor, persists nothing",
     )
     claim = _claim(state, _SECOND)
@@ -442,20 +432,33 @@ def test_second_role_and_version_bump() -> None:
     )
 
 
-def test_retire_verb_authorization() -> None:
+def test_retire_verb_actor_record() -> None:
     state, plugin = _fixture()
     params = {"name": "Spare-Role", "reason": "fixture", "authority": "iss_d9c955a2"}
-    refused = plugin.retire_role(params, {"caller_attribution_instance_id": _LANE_INSTANCE})
+    lane = plugin.retire_role(params, {"caller_attribution_instance_id": _LANE_INSTANCE})
+    lane_data = lane.get("data")
     _check(
-        _code(refused) == "retire_role_not_authorized",
-        f"R9 verb: a caller with no primary/principal role is refused (got {_code(refused)!r})",
+        isinstance(lane_data, dict) and lane_data.get("registry_version") == 2,
+        f"R9 verb: a registered caller holding no role retires an unheld role (got {_code(lane)!r}, {lane_data!r})",
     )
-    accepted = plugin.retire_role(params, {"caller_attribution_instance_id": _MAIN_INSTANCE})
-    data = accepted.get("data")
+    row = read_retired_role_registry(cast(StateManagementInterface, state)).roles[-1]
     _check(
-        isinstance(data, dict) and data.get("registry_version") == 2
-        and str(data.get("retired_by", "")).startswith(_MAIN),
-        f"R9 verb: a primary-class caller retires at the next version (got {data!r})",
+        row.role == "Spare-Role" and row.retired_by == f"{_LANE_INSTANCE}; iss_d9c955a2",
+        f"R9 verb: the appended row names the acting caller and the authority (got {row!r})",
+    )
+    primary = plugin.retire_role(
+        {**params, "name": "Spare-Role-2"},
+        {"caller_attribution_instance_id": _MAIN_INSTANCE},
+    )
+    primary_data = primary.get("data")
+    _check(
+        isinstance(primary_data, dict) and primary_data.get("registry_version") == 3 and str(primary_data.get("retired_by", "")).startswith(_MAIN_INSTANCE),
+        f"R9 verb: a caller holding the main role retires at the next version, stamped with its own identity (got {primary_data!r})",
+    )
+    anonymous = plugin.retire_role({**params, "name": "Spare-Role-3"}, {})
+    _check(
+        _code(anonymous) == "retire_role_caller_unattributed" and _version(state) == 3,
+        f"R9 verb: a call with no caller identity is refused and writes nothing (got {_code(anonymous)!r}, v{_version(state)})",
     )
 
 
@@ -469,15 +472,12 @@ def test_read_failure_raises() -> None:
         raised = exc.message
     _check(
         "read failed" in raised,
-        f"R10 read failure: a failed read raises a read error, never an empty registry "
-        f"(got {raised!r})",
+        f"R10 read failure: a failed read raises a read error, never an empty registry (got {raised!r})",
     )
     state.fail_next("query")
     listed = plugin.list_retired_roles({}, {})
     _check(
-        listed.get("action_status") == "failed"
-        and _code(listed) == "retired_role_registry_unavailable"
-        and "roles" not in (listed.get("data") or {}),
+        listed.get("action_status") == "failed" and _code(listed) == "retired_role_registry_unavailable" and "roles" not in (listed.get("data") or {}),
         "R10 read failure: list_retired_roles fails rather than returning an empty list",
     )
     ok = plugin.list_retired_roles({}, {})
@@ -504,20 +504,34 @@ def test_live_holder_variants_refused() -> None:
     main_caller = {"caller_attribution_instance_id": _MAIN_INSTANCE}
     for variant in (_HELD, "git-controller", "  GIT-CONTROLLER  ", "\uff27\uff49\uff54-Controller"):
         result = plugin.retire_role(
-            {"name": variant, "reason": "fixture", "authority": "iss_d9c955a2"}, main_caller,
+            {"name": variant, "reason": "fixture", "authority": "iss_d9c955a2"},
+            main_caller,
         )
         _check(
             _code(result) == "role_held_live" and _registry_size(state) == 1,
-            f"R11 live holder: retiring {variant!r} while {_HELD!r} is held live is refused "
-            f"role_held_live with nothing written (got {_code(result)!r})",
+            f"R11 live holder: retiring {variant!r} while {_HELD!r} is held live is refused role_held_live with nothing written (got {_code(result)!r})",
         )
+    held_message = str((result.get("error") or {}).get("message", ""))
+    _check(
+        _HELD in held_message and _HELD_INSTANCE in held_message,
+        f"R11 live holder: the refusal names the live holder's label and instance (got {held_message!r})",
+    )
+    lane_refused = plugin.retire_role(
+        {"name": _HELD, "reason": "fixture", "authority": "iss_d9c955a2"},
+        {"caller_attribution_instance_id": _LANE_INSTANCE},
+    )
+    _check(
+        _code(lane_refused) == "role_held_live" and _registry_size(state) == 1,
+        f"R11 live holder: a caller holding no role is refused the same way, so the holder refusal does not depend on which role the caller holds (got {_code(lane_refused)!r})",
+    )
     sent = _send(plugin, _HELD)
     _check(
         sent.get("action_status") == "completed",
         "R11 live holder: the live role still receives sends after the refused retirements",
     )
     stale = plugin.retire_role(
-        {"name": _STALE, "reason": "fixture", "authority": "iss_d9c955a2"}, main_caller,
+        {"name": _STALE, "reason": "fixture", "authority": "iss_d9c955a2"},
+        main_caller,
     )
     _check(
         (stale.get("data") or {}).get("registry_version") == 2,
@@ -545,7 +559,8 @@ def _fault_http(plugin: Any, state: RealShapeState) -> tuple[Any, str]:
 
 def _fault_streamable(plugin: Any, state: RealShapeState) -> tuple[Any, str]:
     session = StreamableSessionManager(
-        bridge_manager=_bridge_manager(), peer_registry=_peer_registry(),
+        bridge_manager=_bridge_manager(),
+        peer_registry=_peer_registry(),
     ).allocate(
         BearerClaim(
             agent_id="claude_phone",
@@ -572,7 +587,8 @@ def _fault_streamable(plugin: Any, state: RealShapeState) -> tuple[Any, str]:
 def _fault_job(plugin: Any, state: RealShapeState) -> tuple[Any, str]:
     return _guarded(
         lambda: plugin.deliver_job_completion(
-            {"name": _LIVE, "job_id": "job-fault", "status": "completed"}, {},
+            {"name": _LIVE, "job_id": "job-fault", "status": "completed"},
+            {},
         ),
     )
 
@@ -601,8 +617,7 @@ def test_registry_fault_fails_closed() -> None:
         code = _outcome_code(result, raised)
         _check(
             code == _UNAVAILABLE and _persisted(state, _LIVE) == 0,
-            f"{label}: a registry read fault refuses {_UNAVAILABLE} and persists nothing "
-            f"(got {code!r}, rows={_persisted(state, _LIVE)})",
+            f"{label}: a registry read fault refuses {_UNAVAILABLE} and persists nothing (got {code!r}, rows={_persisted(state, _LIVE)})",
         )
         control_state, control_plugin = _fixture()
         run(control_plugin, control_state)
@@ -614,15 +629,12 @@ def test_registry_fault_fails_closed() -> None:
     state.fail_next("query")
     refused = _claim(state, "Fresh-Fault-Role")
     _check(
-        isinstance(refused, RoleClaimFailure) and refused.code == _UNAVAILABLE
-        and _binding_holder(state, "Fresh-Fault-Role") == "",
-        f"R12e peer_claim_role: a registry read fault refuses {_UNAVAILABLE} and writes no "
-        f"binding (got {getattr(refused, 'code', refused)!r})",
+        isinstance(refused, RoleClaimFailure) and refused.code == _UNAVAILABLE and _binding_holder(state, "Fresh-Fault-Role") == "",
+        f"R12e peer_claim_role: a registry read fault refuses {_UNAVAILABLE} and writes no binding (got {getattr(refused, 'code', refused)!r})",
     )
     control_state, _control = _fixture()
     _check(
-        not isinstance(_claim(control_state, "Fresh-Fault-Role"), RoleClaimFailure)
-        and _binding_holder(control_state, "Fresh-Fault-Role") == _LANE_INSTANCE,
+        not isinstance(_claim(control_state, "Fresh-Fault-Role"), RoleClaimFailure) and _binding_holder(control_state, "Fresh-Fault-Role") == _LANE_INSTANCE,
         "R12e peer_claim_role: control — the same claim binds when the registry reads",
     )
 
@@ -648,44 +660,29 @@ def test_retire_fails_closed_on_unreadable_state() -> None:
     def failing_binding_walk(namespace: str, query: dict[str, Any]) -> dict[str, Any]:
         if query.get("table") == TABLE_ROLE_BINDING:
             return {"action_status": "failed", "error": {"message": "injected walk failure"}, "data": {}}
-        return cast("dict[str, Any]", ordered(namespace, query))
+        return ordered(namespace, query)
 
     state.query_ordered = failing_binding_walk  # type: ignore[method-assign]
     walk = _retire(plugin, _STALE)
     state.query_ordered = ordered  # type: ignore[method-assign]
     _check(
         _code(walk) == "role_binding_unreadable" and _version(state) == 1,
-        f"R13a retire: a failing role_binding walk refuses role_binding_unreadable, "
-        f"registry_version unchanged (got {_code(walk)!r}, v{_version(state)})",
+        f"R13a retire: a failing role_binding walk refuses role_binding_unreadable, registry_version unchanged (got {_code(walk)!r}, v{_version(state)})",
     )
 
     state, plugin = _fixture()
     state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_ROLE_BINDING).append(
-        {"id": "rbn-broken", "external_id": "role:Broken-Role", "role": "Broken-Role",
-         "holder_kind": "session", "agent_instance_id": "agi-broken",
-         "agent_session_id": "ases-agi-broken", "holder_identity": {},
-         "claim_epoch": 1, "is_deleted": 0},
+        {"id": "rbn-broken", "external_id": "role:Broken-Role", "role": "Broken-Role", "holder_kind": "session", "agent_instance_id": "agi-broken", "agent_session_id": "ases-agi-broken", "holder_identity": {}, "claim_epoch": 1, "is_deleted": 0},
     )
     broken = _retire(plugin, "broken-role")
     _check(
         _code(broken) == "role_binding_unreadable" and _version(state) == 1,
-        f"R13b retire: a malformed binding row matching the target (normalized) refuses "
-        f"role_binding_unreadable, registry_version unchanged (got {_code(broken)!r})",
+        f"R13b retire: a malformed binding row matching the target (normalized) refuses role_binding_unreadable, registry_version unchanged (got {_code(broken)!r})",
     )
     other = _retire(plugin, _STALE)
     _check(
         (other.get("data") or {}).get("registry_version") == 2,
-        f"R13b retire: control — a malformed row that does not match the target does not "
-        f"block another retirement (got {_code(other)!r})",
-    )
-
-    state, plugin = _fixture()
-    state.fail_next("query")
-    authority = _retire(plugin, _STALE)
-    _check(
-        _code(authority) == "retire_role_authority_unreadable" and _version(state) == 1,
-        f"R13c retire: an unreadable authority read refuses retire_role_authority_unreadable, "
-        f"registry_version unchanged (got {_code(authority)!r})",
+        f"R13b retire: control — a malformed row that does not match the target does not block another retirement (got {_code(other)!r})",
     )
 
 
@@ -697,7 +694,7 @@ def main() -> int:
         test_claim_refused,
         test_http_and_streamable_refuse,
         test_second_role_and_version_bump,
-        test_retire_verb_authorization,
+        test_retire_verb_actor_record,
         test_read_failure_raises,
         test_live_holder_variants_refused,
         test_registry_fault_fails_closed,

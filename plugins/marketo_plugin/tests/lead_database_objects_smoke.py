@@ -41,7 +41,7 @@ from marketo_plugin.app_config import MarketoInstanceConfig  # noqa: E402
 from marketo_plugin.errors import MarketoEnvelopeError  # noqa: E402
 from marketo_plugin.http_client import MarketoClient  # noqa: E402
 from marketo_plugin.plugin import MarketoPlugin  # noqa: E402
-from smoke_async_dispatch import _FakeAsyncJobManager  # noqa: E402  # pyright: ignore[reportMissingImports]
+from smoke_async_dispatch import _FakeAsyncJobManager  # noqa: E402
 
 KB_PROCESSES = REPO_ROOT / "plugins" / "marketo_plugin" / "knowledge_base" / "processes"
 SECRET = "tenant secret+/é=?"

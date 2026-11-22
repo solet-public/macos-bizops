@@ -79,10 +79,7 @@ def _strip_derived_fields(table_snapshot: dict[str, Any]) -> dict[str, Any]:
     out = dict(table_snapshot)
     indexes = out.get("indexes")
     if isinstance(indexes, list):
-        out["indexes"] = [
-            {k: v for k, v in idx.items() if k != "physical_name"} if isinstance(idx, dict) else idx
-            for idx in indexes
-        ]
+        out["indexes"] = [{k: v for k, v in idx.items() if k != "physical_name"} if isinstance(idx, dict) else idx for idx in indexes]
     return out
 
 
@@ -100,16 +97,15 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
 
     # --- public verbs ------------------------------------------------------
 
-    def install_plugin_schema(
-        self, plugin_namespace: str, declared_schema_json: dict[str, Any]
-    ) -> dict[str, Any]:
+    def install_plugin_schema(self, plugin_namespace: str, declared_schema_json: dict[str, Any]) -> dict[str, Any]:
         declared = self._hydrate_and_standardize(plugin_namespace, declared_schema_json)
-        existing = self._read_ownership(plugin_namespace)
+        existing, retired = self._retire_tables(plugin_namespace, declared, self._read_ownership(plugin_namespace))
 
         if not existing:
-            return self._install_fresh(plugin_namespace, declared)
-
-        return self._install_against_existing(plugin_namespace, declared, existing)
+            result = self._install_fresh(plugin_namespace, declared)
+        else:
+            result = self._install_against_existing(plugin_namespace, declared, existing)
+        return self._with_retired(result, retired)
 
     def _install_against_existing(
         self,
@@ -148,23 +144,16 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
             return False
         return self._snapshot_matches(declared, relevant_active)
 
-    def update_plugin_schema(
-        self, plugin_namespace: str, declared_schema_json: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_plugin_schema(self, plugin_namespace: str, declared_schema_json: dict[str, Any]) -> dict[str, Any]:
         declared = self._hydrate_and_standardize(plugin_namespace, declared_schema_json)
         existing = self._read_ownership(plugin_namespace)
         if not existing:
-            raise ValueError(
-                f"update_plugin_schema for {plugin_namespace}: namespace is not installed. "
-                "Call install_plugin_schema first."
-            )
+            raise ValueError(f"update_plugin_schema for {plugin_namespace}: namespace is not installed. Call install_plugin_schema first.")
+        existing, retired = self._retire_tables(plugin_namespace, declared, existing)
         active = {t: row for t, row in existing.items() if row["status"] == "active"}
         if not active:
-            raise ValueError(
-                f"update_plugin_schema for {plugin_namespace}: namespace is uninstalled "
-                "(all ownership rows inactive). Call install_plugin_schema to reactivate first."
-            )
-        return self._apply_update(plugin_namespace, declared, active)
+            raise ValueError(f"update_plugin_schema for {plugin_namespace}: namespace is uninstalled (all ownership rows inactive). Call install_plugin_schema to reactivate first.")
+        return self._with_retired(self._apply_update(plugin_namespace, declared, active), retired)
 
     def uninstall_plugin_schema(self, plugin_namespace: str) -> dict[str, Any]:
         existing = self._read_ownership(plugin_namespace)
@@ -173,10 +162,7 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
 
         with self._provider.get_transactional_connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE platform__plugin_schema_ownership "
-                "SET status = 'inactive', uninstalled_at = (NOW() AT TIME ZONE 'UTC'), "
-                "updated_at = (NOW() AT TIME ZONE 'UTC') "
-                "WHERE plugin_namespace = %s AND status = 'active'",
+                "UPDATE platform__plugin_schema_ownership SET status = 'inactive', uninstalled_at = (NOW() AT TIME ZONE 'UTC'), updated_at = (NOW() AT TIME ZONE 'UTC') WHERE plugin_namespace = %s AND status = 'active'",
                 (plugin_namespace,),
             )
 
@@ -187,32 +173,26 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
             "data_preserved": True,
         }
 
-    def purge_plugin_schema(
-        self, plugin_namespace: str, force: bool = False
-    ) -> dict[str, Any]:
+    def purge_plugin_schema(self, plugin_namespace: str, force: bool = False) -> dict[str, Any]:
         existing = self._read_ownership(plugin_namespace)
         if not existing:
             return {"status": "not_installed", "namespace": plugin_namespace, "tables": []}
 
         any_active = any(row["status"] == "active" for row in existing.values())
         if any_active and not force:
-            raise ValueError(
-                f"purge_plugin_schema refused for {plugin_namespace}: namespace is "
-                "active. Call uninstall_plugin_schema first, or pass force=True to "
-                "override (destructive)."
-            )
+            raise ValueError(f"purge_plugin_schema refused for {plugin_namespace}: namespace is active. Call uninstall_plugin_schema first, or pass force=True to override (destructive).")
 
         schema_name = self._provider.config.schema_name
-        ops: list[sql.Composed] = [
-            emit_drop_table_op(plugin_namespace, table_name, schema_name)
-            for table_name in existing
-        ]
+        ops: list[sql.Composed] = [emit_drop_table_op(plugin_namespace, table_name, schema_name) for table_name in existing]
 
         with self._provider.get_transactional_connection() as conn, conn.cursor() as cur:
             # Provider owns DDL execution + id_prefix-cache scrubbing
             # atomically; lifecycle keeps ownership-row management.
             self._provider.apply_schema_purge_ops(
-                cur, plugin_namespace, list(existing.keys()), ops,
+                cur,
+                plugin_namespace,
+                list(existing.keys()),
+                ops,
             )
             cur.execute(
                 "DELETE FROM platform__plugin_schema_ownership WHERE plugin_namespace = %s",
@@ -241,11 +221,7 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
                     "schema_snapshot": row["schema_snapshot_json"],
                     "installed_at": row["installed_at"].isoformat() if row.get("installed_at") else None,
                     "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
-                    "uninstalled_at": (
-                        row["uninstalled_at"].isoformat()
-                        if row.get("uninstalled_at")
-                        else None
-                    ),
+                    "uninstalled_at": (row["uninstalled_at"].isoformat() if row.get("uninstalled_at") else None),
                 }
                 for t, row in existing.items()
             },
@@ -253,15 +229,58 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
 
     # --- internal helpers --------------------------------------------------
 
-    def _hydrate_and_standardize(
-        self, plugin_namespace: str, declared_json: dict[str, Any]
-    ) -> SchemaDefinition:
+    def _retire_tables(
+        self,
+        plugin_namespace: str,
+        declared: SchemaDefinition,
+        existing: dict[str, dict[str, Any]],
+    ) -> tuple[dict[str, dict[str, Any]], list[str]]:
+        """Drop each table ``declared.retired_tables`` names that ownership records as active.
+
+        The DROP goes through the provider's drop chokepoint (the one purge
+        uses) and the ownership row is deleted in the same transaction. A name
+        with no active ownership row is a no-op: the declaration stays in the
+        plugin after the table is gone, so every later start lands here.
+        Returns the ownership rows left and the names dropped.
+        """
+        retiring = [name for name in declared.retired_tables if existing.get(name, {}).get("status") == "active"]
+        for name in declared.retired_tables:
+            if name not in retiring:
+                logger.debug(
+                    "retired table %s.%s has no active ownership row; nothing to drop",
+                    plugin_namespace,
+                    name,
+                )
+        if not retiring:
+            return existing, []
+
+        schema_name = self._provider.config.schema_name
+        ops: list[sql.Composed] = [emit_drop_table_op(plugin_namespace, name, schema_name) for name in retiring]
+        with self._provider.get_transactional_connection() as conn, conn.cursor() as cur:
+            self._provider.apply_schema_purge_ops(cur, plugin_namespace, retiring, ops)
+            cur.execute(
+                "DELETE FROM platform__plugin_schema_ownership WHERE plugin_namespace = %s AND table_name = ANY(%s)",
+                (plugin_namespace, retiring),
+            )
+        logger.info(
+            "retired %d table(s) of %s: %s",
+            len(retiring),
+            plugin_namespace,
+            ", ".join(retiring),
+        )
+        return {t: row for t, row in existing.items() if t not in retiring}, retiring
+
+    @staticmethod
+    def _with_retired(result: dict[str, Any], retired: list[str]) -> dict[str, Any]:
+        """Name the dropped tables in a lifecycle result; status alone can read ``no_op``."""
+        if retired:
+            result["retired_tables"] = retired
+        return result
+
+    def _hydrate_and_standardize(self, plugin_namespace: str, declared_json: dict[str, Any]) -> SchemaDefinition:
         declared = from_json(declared_json)
         if declared.namespace != plugin_namespace:
-            raise ValueError(
-                f"Namespace mismatch: caller passed {plugin_namespace!r} but declared "
-                f"schema namespace is {declared.namespace!r}"
-            )
+            raise ValueError(f"Namespace mismatch: caller passed {plugin_namespace!r} but declared schema namespace is {declared.namespace!r}")
         # Idempotent standardization: if the schema already has the platform
         # standard fields (caller pre-standardized — e.g., SchemaManager), skip
         # the standardizer call. Re-standardizing would trigger
@@ -282,13 +301,9 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
         if not schema.tables:
             return False
         marker_fields = {"id", "namespace", "created_at", "updated_at", "is_deleted"}
-        return all(
-            marker_fields.issubset(table.columns.keys()) for table in schema.tables.values()
-        )
+        return all(marker_fields.issubset(table.columns.keys()) for table in schema.tables.values())
 
-    def _install_fresh(
-        self, plugin_namespace: str, declared: SchemaDefinition
-    ) -> dict[str, Any]:
+    def _install_fresh(self, plugin_namespace: str, declared: SchemaDefinition) -> dict[str, Any]:
         """Install on a namespace with no ownership rows.
 
         Per-table dispatch: tables not on disk → CREATE; tables already on
@@ -298,16 +313,17 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
         """
         schema_name = self._provider.config.schema_name
         snapshot = to_json(declared)["tables"]
-        plan, adoption_results = self._plan_install_per_table(
-            plugin_namespace, declared, schema_name
-        )
+        plan, adoption_results = self._plan_install_per_table(plugin_namespace, declared, schema_name)
         self._apply_install_plan(plugin_namespace, declared, plan, snapshot)
 
         created = [t for t, s in adoption_results.items() if s == "created"]
         adopted = [t for t, s in adoption_results.items() if s == "adopted"]
         logger.info(
             "install_plugin_schema: %s — %d created, %d adopted (%d total)",
-            plugin_namespace, len(created), len(adopted), len(declared.tables),
+            plugin_namespace,
+            len(created),
+            len(adopted),
+            len(declared.tables),
         )
         return {
             "status": _install_outcome_status(created, adopted),
@@ -349,10 +365,7 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
         """Plan structure for a brand-new table: full CREATE ops, no preflights."""
         return {
             "ops": list(emit_create_table_ops(plugin_namespace, table, schema_name)),
-            "physical_index_names": {
-                idx.name: f"{plugin_namespace}__{table.table_name}__{idx.name}"
-                for idx in table.indexes
-            },
+            "physical_index_names": {idx.name: f"{plugin_namespace}__{table.table_name}__{idx.name}" for idx in table.indexes},
             "preflight_specs": [],
             "table_name": table.table_name,
         }
@@ -387,8 +400,13 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
         """Run all preflight specs for one table inside the transaction."""
         for col_name, declared_type, live_type in table_plan["preflight_specs"]:
             preflight_normalization(
-                conn, plugin_namespace, table_plan["table_name"],
-                col_name, declared_type, live_type, schema_name,
+                conn,
+                plugin_namespace,
+                table_plan["table_name"],
+                col_name,
+                declared_type,
+                live_type,
+                schema_name,
             )
 
     def _insert_ownership_rows(
@@ -400,13 +418,9 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
     ) -> None:
         """INSERT one ownership row per declared table, with resolved index names."""
         for table_name, table_snapshot in snapshot.items():
-            enriched = self._enrich_snapshot_with_physical_names(
-                table_snapshot, plan[table_name]["physical_index_names"]
-            )
+            enriched = self._enrich_snapshot_with_physical_names(table_snapshot, plan[table_name]["physical_index_names"])
             cur.execute(
-                "INSERT INTO platform__plugin_schema_ownership "
-                "(plugin_namespace, table_name, schema_snapshot_json, status) "
-                "VALUES (%s, %s, %s, 'active')",
+                "INSERT INTO platform__plugin_schema_ownership (plugin_namespace, table_name, schema_snapshot_json, status) VALUES (%s, %s, %s, 'active')",
                 (plugin_namespace, table_name, json.dumps(enriched)),
             )
 
@@ -428,12 +442,8 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
             live_columns = introspect_table_columns(conn, schema_name, full_table_name)
             live_indexes = introspect_table_indexes(conn, schema_name, full_table_name)
 
-        column_ops, preflight_specs = plan_column_normalizations(
-            plugin_namespace, table, live_columns, schema_name
-        )
-        index_ops, physical_names = plan_index_reconciliation(
-            plugin_namespace, table, live_indexes, schema_name
-        )
+        column_ops, preflight_specs = plan_column_normalizations(plugin_namespace, table, live_columns, schema_name)
+        index_ops, physical_names = plan_index_reconciliation(plugin_namespace, table, live_indexes, schema_name)
 
         return {
             "ops": [*column_ops, *index_ops],
@@ -442,9 +452,7 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
             "table_name": table.table_name,
         }
 
-    def _enrich_snapshot_with_physical_names(
-        self, table_snapshot: dict[str, Any], physical_names: dict[str, str]
-    ) -> dict[str, Any]:
+    def _enrich_snapshot_with_physical_names(self, table_snapshot: dict[str, Any], physical_names: dict[str, str]) -> dict[str, Any]:
         """Embed resolved physical index names into the per-index snapshot entries.
 
         The diff path uses these on subsequent updates so DROP INDEX targets
@@ -477,27 +485,16 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
 
         for table_name in declared.tables:
             if table_name not in inactive_rows:
-                raise NotImplementedError(
-                    f"install_plugin_schema for {plugin_namespace}: declared table "
-                    f"{table_name!r} is not in the inactive ownership snapshot. "
-                    "Cross-shape reactivation requires the diff path (v8 step 8)."
-                )
+                raise NotImplementedError(f"install_plugin_schema for {plugin_namespace}: declared table {table_name!r} is not in the inactive ownership snapshot. Cross-shape reactivation requires the diff path (v8 step 8).")
 
         for table_name, table_snapshot in snapshot.items():
             recorded = inactive_rows[table_name]["schema_snapshot_json"]
             if _strip_derived_fields(recorded) != _strip_derived_fields(table_snapshot):
-                raise NotImplementedError(
-                    f"install_plugin_schema for {plugin_namespace}.{table_name}: "
-                    "declared shape differs from inactive snapshot. The diff path "
-                    "is not yet implemented (v8 step 8)."
-                )
+                raise NotImplementedError(f"install_plugin_schema for {plugin_namespace}.{table_name}: declared shape differs from inactive snapshot. The diff path is not yet implemented (v8 step 8).")
 
         with self._provider.get_transactional_connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE platform__plugin_schema_ownership "
-                "SET status = 'active', uninstalled_at = NULL, "
-                "updated_at = (NOW() AT TIME ZONE 'UTC') "
-                "WHERE plugin_namespace = %s",
+                "UPDATE platform__plugin_schema_ownership SET status = 'active', uninstalled_at = NULL, updated_at = (NOW() AT TIME ZONE 'UTC') WHERE plugin_namespace = %s",
                 (plugin_namespace,),
             )
 
@@ -530,17 +527,17 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
         be declared piecewise across multiple ``SchemaProvider`` calls (the
         platform does this at startup — ``core`` namespace gets installed
         once per table group), and we don't want a partial declaration to
-        look like a table-removal request. To actually remove a table,
-        ``uninstall_plugin_schema`` (logical, namespace-wide, data preserved)
-        or ``purge_plugin_schema`` (destructive, namespace-wide).
+        look like a table-removal request. To actually remove a table, list
+        its name in the declaration's ``retired_tables`` (dropped before this
+        diff runs, see ``_retire_tables``), or use ``uninstall_plugin_schema``
+        (logical, namespace-wide, data preserved) or ``purge_plugin_schema``
+        (destructive, namespace-wide).
         """
         # Reconstruct the recorded SchemaDefinition for ONLY the tables this
         # declaration knows about. Ownership rows for other tables in the
         # namespace are intentionally invisible to this diff so they don't
         # appear as removals.
-        relevant_existing = {
-            t: row for t, row in existing_active.items() if t in declared.tables
-        }
+        relevant_existing = {t: row for t, row in existing_active.items() if t in declared.tables}
         current_namespace_payload: dict[str, Any] = {
             "namespace": plugin_namespace,
             "tables": {t: row["schema_snapshot_json"] for t, row in relevant_existing.items()},
@@ -571,17 +568,12 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
             for table_name, snap in new_snapshot.items():
                 if table_name in existing_active:
                     cur.execute(
-                        "UPDATE platform__plugin_schema_ownership "
-                        "SET schema_snapshot_json = %s, "
-                        "    updated_at = (NOW() AT TIME ZONE 'UTC') "
-                        "WHERE plugin_namespace = %s AND table_name = %s",
+                        "UPDATE platform__plugin_schema_ownership SET schema_snapshot_json = %s,     updated_at = (NOW() AT TIME ZONE 'UTC') WHERE plugin_namespace = %s AND table_name = %s",
                         (json.dumps(snap), plugin_namespace, table_name),
                     )
                 else:
                     cur.execute(
-                        "INSERT INTO platform__plugin_schema_ownership "
-                        "(plugin_namespace, table_name, schema_snapshot_json, status) "
-                        "VALUES (%s, %s, %s, 'active')",
+                        "INSERT INTO platform__plugin_schema_ownership (plugin_namespace, table_name, schema_snapshot_json, status) VALUES (%s, %s, %s, 'active')",
                         (plugin_namespace, table_name, json.dumps(snap)),
                     )
 
@@ -597,26 +589,16 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
             "ops_applied": len(ops),
         }
 
-    def _snapshot_matches(
-        self, declared: SchemaDefinition, recorded: dict[str, dict[str, Any]]
-    ) -> bool:
+    def _snapshot_matches(self, declared: SchemaDefinition, recorded: dict[str, dict[str, Any]]) -> bool:
         if set(declared.tables) != set(recorded):
             return False
         snapshot = to_json(declared)["tables"]
-        return all(
-            _strip_derived_fields(recorded[t]["schema_snapshot_json"])
-            == _strip_derived_fields(snapshot[t])
-            for t in declared.tables
-        )
+        return all(_strip_derived_fields(recorded[t]["schema_snapshot_json"]) == _strip_derived_fields(snapshot[t]) for t in declared.tables)
 
-    def _touch_updated_at(
-        self, plugin_namespace: str, recorded: dict[str, dict[str, Any]]
-    ) -> dict[str, Any]:
+    def _touch_updated_at(self, plugin_namespace: str, recorded: dict[str, dict[str, Any]]) -> dict[str, Any]:
         with self._provider.get_transactional_connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE platform__plugin_schema_ownership "
-                "SET updated_at = (NOW() AT TIME ZONE 'UTC') "
-                "WHERE plugin_namespace = %s",
+                "UPDATE platform__plugin_schema_ownership SET updated_at = (NOW() AT TIME ZONE 'UTC') WHERE plugin_namespace = %s",
                 (plugin_namespace,),
             )
         return {
@@ -629,10 +611,7 @@ class PluginSchemaLifecycle(PluginSchemaServiceInterface):
     def _read_ownership(self, plugin_namespace: str) -> dict[str, dict[str, Any]]:
         with self._provider.get_connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT table_name, schema_snapshot_json, status, "
-                "installed_at, updated_at, uninstalled_at "
-                "FROM platform__plugin_schema_ownership "
-                "WHERE plugin_namespace = %s",
+                "SELECT table_name, schema_snapshot_json, status, installed_at, updated_at, uninstalled_at FROM platform__plugin_schema_ownership WHERE plugin_namespace = %s",
                 (plugin_namespace,),
             )
             return {row["table_name"]: dict(row) for row in cur.fetchall()}

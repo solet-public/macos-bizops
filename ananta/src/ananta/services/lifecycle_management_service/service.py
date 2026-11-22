@@ -29,6 +29,9 @@ from ananta.services.lifecycle_management_service.binding_validator import (
     ValidationResult,
     validate_bindings_satisfied,
 )
+from ananta.services.lifecycle_management_service.deployment_record_verbs import (
+    DeploymentRecordVerbs,
+)
 from ananta.services.lifecycle_management_service.interfaces.public import (
     LIST_PLUGINS_FILTER_VALUES,
     PLATFORM_CONFIG_TAKES_EFFECT_NEXT_RESTART,
@@ -64,6 +67,9 @@ from ananta.services.lifecycle_management_service.plugin_config_io import (
 from ananta.services.lifecycle_management_service.plugin_inventory import (
     as_response_rows,
     enumerate_available_plugins,
+)
+from ananta.services.lifecycle_management_service.work_folder_verbs import (
+    WorkFolderVerbs,
 )
 
 _RELOAD_SAFE_ATTR = "RELOAD_SAFE"
@@ -166,7 +172,7 @@ def _format_binding_reasons(result: ValidationResult) -> list[str]:
     return reasons
 
 
-class LifecycleManagementService(LifecycleManagementAPI):
+class LifecycleManagementService(DeploymentRecordVerbs, WorkFolderVerbs, LifecycleManagementAPI):
     """Service for managing lifecycle of plugins and services at runtime.
 
     Implements dynamic service start/stop operations for managing
@@ -1348,6 +1354,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "service_bindings_written_to": str(outcome.bindings_path),
                     "restart_action_id": restart["restart_action_id"],
                     "restart_status": restart["status"],
+                    "restart_reason_code": restart.get("reason_code"),
                     "rejection_reasons": [
                         f"restart_failed_after_manifest_commit: deployment plugin returned status={restart['status']!r}: {restart['message']}",
                         "manifest_rollback_skipped: on-disk manifest changed after this flow wrote it; refusing to overwrite a concurrent commit",
@@ -1375,6 +1382,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                     "service_bindings_written_to": str(outcome.bindings_path),
                     "restart_action_id": restart["restart_action_id"],
                     "restart_status": restart["status"],
+                    "restart_reason_code": restart.get("reason_code"),
                     "rejection_reasons": [
                         f"restart_failed_after_manifest_commit: deployment plugin returned status={restart['status']!r}: {restart['message']}",
                         f"manifest_rollback_failed: {type(restore_exc).__name__}: {restore_exc}",
@@ -1396,6 +1404,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "service_bindings_restored_to": str(bindings_path),
                 "restart_action_id": restart["restart_action_id"],
                 "restart_status": restart["status"],
+                "restart_reason_code": restart.get("reason_code"),
                 "rejection_reasons": [
                     f"restart_failed_after_manifest_commit: deployment plugin returned status={restart['status']!r}: {restart['message']}",
                     "manifest_rolled_back: restored the CAS-time pre-write snapshot",
@@ -1525,7 +1534,11 @@ class LifecycleManagementService(LifecycleManagementAPI):
 
         Returns a dict with ``status``, ``restart_action_id``, and
         ``message`` keys (plus optional ``probe`` payload on
-        ``probe_failed`` from the bound plugin's L2 probe).
+        ``probe_failed`` from the bound plugin's L2 probe). A result
+        from the bound plugin also carries ``reason_code``: the plugin's
+        typed cause, or ``None`` when it gave none, so a caller branches
+        on it and never on ``message`` prose. The delegation-layer
+        sentinels below carry no ``reason_code``.
         ``status`` is the plugin's own status — one of
         ``"queued"`` (async cutover scheduled — happy path), ``"completed"``
         (synchronous restart finished), or ``"failed"`` (restart could not
@@ -1588,6 +1601,7 @@ class LifecycleManagementService(LifecycleManagementAPI):
                 "status": result.status.value,
                 "restart_action_id": result.restart_action_id,
                 "message": (result.message or f"self-deployment plugin scheduled restart (reason: {reason})"),
+                "reason_code": result.reason_code or None,
             }
             if result.probe is not None:
                 # GTE-06: carry the L2 probe payload — the PROBE_FAILED

@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Bounded, read-only register and inbox observations for SessionStart.
+"""Bounded, read-only peer-inbox and principle-statement observation for SessionStart.
 
 Python 3.13. No session claims, display acknowledgements, files or register
-writes. Failures are context, never an empty-state assertion or startup veto.
+writes. The principle statement is read from the solet's own knowledge-base file, and through its bridge only when no
+file is found; the inbox is read through the bridge. Failures are context,
+never an empty-state assertion or startup veto. It answers startup, resume, clear and compact.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -16,11 +20,28 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-READ_SECONDS = 3.0
-DIGEST_BYTES = 5800
+# The inbox read and the bridge read of the principles (used only when no statement file is found) are each capped here.
+# The principles are read first, from the solet's own file when there is one, which no host load slows, so with a file the
+# worst case is this one cap, 3.5 s, and with no file 2 x READ_SECONDS = 7.0 s, both under the 30 s hooks.json timeout. A bridge
+# read measured 1.8 to 3.0 s at host load 5 and 7.5 to 61.6 s at load above 30, so no cap on it is both short and safe; a
+# timeout drops the principles from the session start, which is why the file comes first.
+READ_SECONDS = 3.5
 INBOX_BYTES = 1000
+# The host limits one additionalContext string to 10,000 characters; the principle text, the inbox line and the
+# label together stay under it with this cap.
+PRINCIPLE_BYTES = 8000
+# After a compaction the host runs SessionStart again with source "compact"; the hook answers it as it answers a start, so the
+# principle statement is in the session's context again. Any other source gets no output.
+ACTIVATION_SOURCES = frozenset({"startup", "resume", "clear", "compact"})
 HORIZON = "1970-01-01T00:00:00Z"
 INBOX_PROCESS = "plugin::agent_messaging_plugin::peer_inbox"
+PRINCIPLE_PROCESS = "service_interface::knowledge_service::read_file"
+PRINCIPLE_ARGUMENTS = {"name": "ananta_platform", "path": "24_operator_communication/principles_statement.md"}
+STATEMENT_FILE = Path("ananta/knowledge_bases", PRINCIPLE_ARGUMENTS["name"], PRINCIPLE_ARGUMENTS["path"])  # where a solet keeps the article, under its root
+PRINCIPLE_HEADING = "## Approved statement"
+PRINCIPLE_LABEL = "Principles (this solet's knowledge base, ananta_platform/24_operator_communication/principles_statement.md):"
+PRINCIPLE_CLIPPED = f"Principles clipped at {PRINCIPLE_BYTES} bytes: the article is longer."
+_MARKDOWN_HEADING = re.compile(r"#{1,6}\s")
 
 
 class ContextReadError(Exception):
@@ -70,26 +91,95 @@ def _run(argv: list[str], timeout: float) -> dict[str, Any]:
     return _json_object(json.loads(result.stdout))
 
 
-def register_context() -> str:
-    """Read the landed global digest with its smallest supported row limit."""
-    default = Path.home() / "Workspace/project-solet/.venv/bin/psolet"
-    executable = os.environ.get("PROJECT_SOLET_CLI", str(default))
-    value = _run([executable, "resume-digest", "--limit", "1"], READ_SECONDS)
-    if value.get("schema") != "project-solet/resume-digest/v1":
-        raise ContextReadError("InvalidResponse")
-    if value.get("status") != "ok":
-        raise ContextReadError("source_unavailable")
-    return _bounded(
-        "Register-wide resume-digest (bounded data; full reads retain authority):\n" + _encode(value),
-        DIGEST_BYTES,
-    )
+def _approved_statement(article: str) -> str:
+    """The text under the approved-statement heading, up to the next heading or the end of the article."""
+    section: list[str] | None = None
+    for line in article.splitlines():
+        if section is None:
+            if line.rstrip() == PRINCIPLE_HEADING:
+                section = []
+        elif _MARKDOWN_HEADING.match(line):
+            break
+        else:
+            section.append(line)
+    text = "\n".join(section or []).strip()
+    if not text:
+        raise ContextReadError("StatementMissing")
+    return text
+
+
+def _clipped(text: str) -> tuple[str, bool]:
+    """``text`` within PRINCIPLE_BYTES at a whole-line boundary; one line longer than the cap is cut by bytes."""
+    if len(text.encode("utf-8")) <= PRINCIPLE_BYTES:
+        return text, False
+    kept: list[str] = []
+    size = 0
+    for line in text.split("\n"):
+        added = len(line.encode("utf-8")) + (1 if kept else 0)
+        if size + added > PRINCIPLE_BYTES:
+            break
+        kept.append(line)
+        size += added
+    if kept:
+        return "\n".join(kept), True
+    return text.encode("utf-8")[:PRINCIPLE_BYTES].decode("utf-8", errors="ignore"), True
+
+
+def _bridge_root() -> Path | None:
+    """The tree the bridge in use runs from: ``<root>/.venv/bin/solet-bridge`` in a checkout, ``<release>/venv/bin/solet-bridge`` in a deployed release."""
+    bridge = os.environ.get("SOLET_BRIDGE", "solet-bridge")
+    if os.sep in bridge:
+        located: Path | None = Path(bridge)
+    else:  # a bare name is the first PATH directory that holds a file of that name
+        located = next((Path(directory) / bridge for directory in os.environ.get("PATH", "").split(os.pathsep) if directory and (Path(directory) / bridge).is_file()), None)
+    if located is None:
+        return None
+    parents = located.resolve().parents
+    return parents[2] if len(parents) > 2 else None
+
+
+def _statement_roots() -> list[Path]:
+    """Where the solet's own knowledge base may be, in order: the project directory the host names, the working directory, the tree the bridge runs from, and that tree's ``code`` directory (a release's layout)."""
+    roots = [Path(os.environ["CLAUDE_PROJECT_DIR"])] if os.environ.get("CLAUDE_PROJECT_DIR") else []
+    with contextlib.suppress(OSError):  # a deleted working directory is no root, and no reason to fail a start
+        roots.append(Path.cwd())
+    bridge_root = _bridge_root()
+    if bridge_root is not None:
+        roots += [bridge_root, bridge_root / "code"]
+    return roots
+
+
+def _statement_file() -> Path | None:
+    """The first regular file at the article's place under a root, or None when no root holds one."""
+    return next((path for root in _statement_roots() if (path := root / STATEMENT_FILE).is_file()), None)
+
+
+def _bridge_article(timeout: float) -> str:
+    """The article text, read from the solet's knowledge base through its bridge within ``timeout``."""
+    bridge = os.environ.get("SOLET_BRIDGE", "solet-bridge")
+    job = _run([bridge, "call", PRINCIPLE_PROCESS, _encode(PRINCIPLE_ARGUMENTS)], timeout)
+    if job.get("status") != "completed":
+        raise ContextReadError("BridgeReadFailed")
+    result = _json_object(job.get("result"))
+    if result.get("status") != "success":
+        raise ContextReadError("BridgeReadFailed")
+    return _text(result.get("content"))
+
+
+def principles_context(timeout: float) -> str:
+    """The solet's own principle statement: from its knowledge-base file on disk, which no host load can slow, and through its bridge within ``timeout`` only when no such file is found."""
+    path = _statement_file()
+    article = path.read_text(encoding="utf-8") if path is not None else _bridge_article(timeout)
+    text, clipped = _clipped(_approved_statement(article))
+    block = f"{PRINCIPLE_LABEL}\n{text}"
+    return f"{block}\n{PRINCIPLE_CLIPPED}" if clipped else block
 
 
 def _page(arguments: dict[str, object], timeout: float, instance: str) -> dict[str, Any]:
     bridge = os.environ.get("SOLET_BRIDGE", "solet-bridge")
     envelope = _run([bridge, "call", INBOX_PROCESS, _encode(arguments)], timeout)
     result = _json_object(envelope.get("result"))
-    if result.get("success") is not True:
+    if result.get("success") is not True and result.get("action_status") != "completed":
         raise ContextReadError("BridgeReadFailed")
     data = _json_object(result.get("data"))
     if data.get("recipient_agent_instance_id") != instance:
@@ -169,9 +259,9 @@ def _advance_roles(
     return done
 
 
-def _inbox_totals() -> tuple[set[str], dict[str, set[str]]]:
+def _inbox_totals(timeout: float) -> tuple[set[str], dict[str, set[str]]]:
     arguments, instance = _inbox_arguments()
-    deadline = time.monotonic() + READ_SECONDS
+    deadline = time.monotonic() + timeout
     direct: set[str] = set()
     role_messages: dict[str, set[str]] | None = None
     direct_cursors: set[str] = set()
@@ -191,9 +281,9 @@ def _inbox_totals() -> tuple[set[str], dict[str, set[str]]]:
     return direct, role_messages or {}
 
 
-def inbox_context() -> str:
-    """Page both sections, never acknowledge a page or invent unread semantics."""
-    direct, role_messages = _inbox_totals()
+def inbox_context(timeout: float) -> str:
+    """Page both sections within ``timeout``, never acknowledge a page or invent unread semantics."""
+    direct, role_messages = _inbox_totals(timeout)
     counts = {role: len(ids) for role, ids in sorted(role_messages.items())}
     return _bounded(
         "Live peer_inbox observer totals (paged observation, not an atomic snapshot).\nCurrent bound roles and pending above role covered mark (display/consumption unknown): " + _encode(counts) + f"\nInstance stored-message count: {len(direct)}; unread: unknown (no platform unread semantics).",
@@ -217,14 +307,11 @@ def main() -> int:
         event = {}
     if event.get("hook_event_name", "SessionStart") != "SessionStart":
         return 0
-    if event.get("source", "startup") not in {"startup", "resume", "clear"}:
+    if event.get("source", "startup") not in ACTIVATION_SOURCES:
         return 0
-    context = "\n".join(
-        (
-            _observe(register_context, "Register-wide resume-digest"),
-            _observe(inbox_context, "peer_inbox count"),
-        )
-    )
+    principles = _observe(lambda: principles_context(READ_SECONDS), "Principles")  # first: in hand before the one read that can stall
+    inbox = _observe(lambda: inbox_context(READ_SECONDS), "peer_inbox count")
+    context = "\n".join((inbox, principles))
     print(
         _encode(
             {

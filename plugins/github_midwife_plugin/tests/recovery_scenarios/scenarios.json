@@ -1,0 +1,294 @@
+{
+  "schema": "recovery-scenarios/v1",
+  "design": "workbench/2026-11-08_git_safety_c4_recovery_design.md section 6.2",
+  "tool_column_rule": "One scenario set, one expected outcome per step. The tool is a column of the run (claude or codex), never a fork of the scenario. A tool may differ from the common expectation only through a step's known_differences entry, which names one row of design 5.3 listed under known_differences below.",
+  "actors": {"A": "sess-A", "B": "sess-B"},
+  "known_differences": [
+    {"id": "worktree_location", "design_row": "5.3 Worktree location", "claude": "worktrees live in the repository under .claude/worktrees on a branch", "codex": "worktrees live under CODEX_HOME/worktrees on a detached HEAD", "effect": "the harness creates the linked worktree detached for codex; the saved binding records branch 'detached'"},
+    {"id": "session_end_budget", "design_row": "5.3 Session-end budget", "claude": "SessionEnd may run up to its declared timeout", "codex": "SessionEnd has a 1 s default and 3 s maximum, so its save is tracked and index only", "effect": "an untracked file created after the turn-end save is saved by a Claude SessionEnd and not by a Codex SessionEnd"},
+    {"id": "hook_trust", "design_row": "5.3 Hook trust", "claude": "plugin hooks run once the plugin is installed and enabled", "codex": "hook definitions are inactive until trusted in /hooks", "effect": "none in payload mode, which feeds the hook command directly; live mode satisfies hook trust with --dangerously-bypass-hook-trust and project trust (a separate Codex gate on project-local hooks) with one generated trust table naming every disposable git folder, passed as a single session flag, and records the raw hook log of every cell"},
+    {"id": "registration_form", "design_row": "5.3 Registration form", "claude": "exec form: command python3 with args, no shell", "codex": "command string expanded by Codex", "effect": "none in a scenario; the harness builds each command line exactly as that tool's hooks.json declares it"},
+    {"id": "shell_coverage_gap", "design_row": "5.3 Shell coverage gap", "claude": "commands inside scripts are not seen", "codex": "the same, plus write_stdin input to a running shell", "effect": "none in a scenario: every scenario command is a top-level shell command; the turn-end save is the backstop"}
+  ],
+  "scenarios": [
+    {
+      "id": "S1",
+      "title": "stash pop activates another session's stash",
+      "historical": "2026-05-22 stash pop",
+      "origin": "2026-05-22 historical (evt_d6ba6762ba3241a7b143570560a9416d: git stash pop activated a stale stash from an earlier session)",
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"f": "base-f\n", "g": "base-g\n"}}
+      ],
+      "steps": [
+        {"op": "edit", "actor": "A", "dir": "R", "path": "f", "content": "A-edit\n", "expect": {"stdout": "empty"}},
+        {"op": "shell", "actor": "A", "dir": "R", "command": "git stash push", "expect": {"saves": 1, "trigger": "pre_discard", "saved": ["f"], "foreign_empty": true, "stdout": "empty"}},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "refs/stash"], "store": "a_stash_tip"},
+        {"op": "edit", "actor": "B", "dir": "R", "path": "g", "content": "B-edit\n", "expect": {"stdout": "empty"}},
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git stash pop", "as": "pop_save", "expect": {"saves": 1, "trigger": "pre_discard", "saved": ["g", "f"], "refs": ["stash"], "foreign": ["stash@{0}"], "foreign_excludes": ["g"], "stdout": "notice", "notice_contains": ["changed outside this session", "stash@{0}", "To put them back, ask me to restore save"]}},
+        {"op": "cli", "args": ["restore", "${pop_save}", "--refs"], "expect": {"exit": 0, "outcomes": ["reference restored exactly"]}},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "refs/stash"], "store": "restored_tip"},
+        {"op": "assert_equal", "left": "${restored_tip}", "right": "${a_stash_tip}", "why": "restore --refs re-creates A's entry with its original commit id"},
+        {"op": "worktree", "repo": "R", "dir": "AF", "branch": "af", "detached": true},
+        {"op": "git", "dir": "AF", "args": ["stash", "apply"]},
+        {"op": "file", "dir": "AF", "path": "f", "equals": "A-edit\n", "why": "applying the re-created entry in a clean folder gives A's bytes"}
+      ]
+    },
+    {
+      "id": "S2",
+      "title": "checkout, reset, clean and stash each destroy another session's tracked edit and untracked file",
+      "historical": "2026-06-14 stash/checkout/reset",
+      "origin": "2026-06-14 historical (evt_b22bf182d7d741d5b2927d2b6ba92818: git stash reverted modifications) and the checkout/reset loss in the shared checkout (design finding 1)",
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"f": "base-f\n", "g": "base-g\n"}}
+      ],
+      "steps": [
+        {"op": "edit", "actor": "A", "dir": "R", "path": "f", "content": "A-f\n", "expect": {"stdout": "empty"}},
+        {"op": "edit", "actor": "A", "dir": "R", "path": "u", "content": "A-u\n", "expect": {"stdout": "empty"}},
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git checkout -- f", "as": "s2a", "expect": {"saves": 1, "saved": ["f", "u"], "foreign": ["f", "u"], "stdout": "notice", "notice_contains": ["changed outside this session", "f", "u"]}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "base-f\n", "why": "the discarding command ran"},
+        {"op": "cli", "args": ["restore", "${s2a}"], "expect": {"exit": 0}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "A-f\n"},
+        {"op": "file", "dir": "R", "path": "u", "equals": "A-u\n"},
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git reset --hard", "as": "s2b", "expect": {"saves": 1, "saved": ["f", "u"], "foreign": ["f", "u"], "stdout": "notice", "notice_contains": ["changed outside this session"]}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "base-f\n", "why": "the discarding command ran"},
+        {"op": "cli", "args": ["restore", "${s2b}"], "expect": {"exit": 0}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "A-f\n"},
+        {"op": "file", "dir": "R", "path": "u", "equals": "A-u\n"},
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git clean -fd", "as": "s2c", "expect": {"saves": 1, "saved": ["f", "u"], "foreign": ["f", "u"], "stdout": "notice", "notice_contains": ["changed outside this session"]}},
+        {"op": "file", "dir": "R", "path": "u", "absent": true, "why": "the discarding command ran"},
+        {"op": "cli", "args": ["restore", "${s2c}"], "expect": {"exit": 0}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "A-f\n"},
+        {"op": "file", "dir": "R", "path": "u", "equals": "A-u\n"},
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git stash", "as": "s2d", "expect": {"saves": 1, "saved": ["f", "u"], "foreign": ["f", "u"], "stdout": "notice", "notice_contains": ["changed outside this session"]}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "base-f\n", "why": "the discarding command ran"},
+        {"op": "cli", "args": ["restore", "${s2d}"], "expect": {"exit": 0}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "A-f\n"},
+        {"op": "file", "dir": "R", "path": "u", "equals": "A-u\n"}
+      ]
+    },
+    {
+      "id": "S3",
+      "title": "a stash made in a linked worktree is popped from the main checkout",
+      "historical": "the linked-worktree stash",
+      "origin": "design finding 6 (measured; a stash made in a linked worktree is listed in the main checkout)",
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"f": "base-f\n", "g": "base-g\n"}},
+        {"op": "worktree", "repo": "R", "dir": "W1", "branch": "w1", "detached_for": ["codex"], "known_difference": "worktree_location"}
+      ],
+      "steps": [
+        {"op": "edit", "actor": "A", "dir": "W1", "path": "f", "content": "A-W1\n", "expect": {"stdout": "empty"}},
+        {"op": "shell", "actor": "A", "dir": "W1", "command": "git stash push -u", "expect": {"saves": 1, "saved": ["f"], "foreign_empty": true, "stdout": "empty", "binding_folder": "${W1}"}},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "refs/stash"], "store": "a_stash_tip"},
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git stash pop", "as": "pop_save", "expect": {"saves": 1, "refs": ["stash"], "foreign": ["stash@{0}"], "stdout": "notice", "notice_contains": ["changed outside this session", "stash@{0}"], "binding_folder": "${R}"}},
+        {"op": "cli", "args": ["restore", "${pop_save}", "--refs"], "expect": {"exit": 0, "outcomes": ["reference restored exactly"]}},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "refs/stash"], "store": "restored_tip"},
+        {"op": "assert_equal", "left": "${restored_tip}", "right": "${a_stash_tip}", "why": "the re-created entry is A's original commit"},
+        {"op": "git", "dir": "W1", "args": ["stash", "apply"]},
+        {"op": "file", "dir": "W1", "path": "f", "equals": "A-W1\n", "why": "git -C W1 stash apply gives A's bytes in W1, the restore target"}
+      ]
+    },
+    {
+      "id": "S4",
+      "title": "turn-end save restores work after its worktree is deleted",
+      "origin": "design section 9 row 4: an end-of-turn save restores work after its worktree is deleted",
+      "live": {
+        "status": "partly measurable",
+        "unmeasured": ["session_end A, which expects a save of the work changed after the last turn-end save"],
+        "reason": "one process runs per model turn, so SessionEnd fires right after that same turn's Stop with no edit between; the live run measures the turn-end save, the worktree deletion and the restore --into, and payload mode measures the SessionEnd save"
+      },
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"f": "base-f\n"}},
+        {"op": "worktree", "repo": "R", "dir": "W", "branch": "w", "detached_for": ["codex"], "known_difference": "worktree_location"}
+      ],
+      "steps": [
+        {"op": "edit", "actor": "A", "dir": "W", "path": "f", "content": "A-turn\n", "expect": {"stdout": "empty"}},
+        {"op": "stop", "actor": "A", "dir": "W", "as": "turn_save", "expect": {"saves": 1, "trigger": "turn_end", "saved": ["f"], "binding_folder": "${W}", "stdout": "empty"}},
+        {"op": "edit", "actor": "A", "dir": "W", "path": "u", "content": "A-untracked\n", "expect": {"stdout": "empty"}},
+        {"op": "session_end", "actor": "A", "dir": "W", "expect": {"saves": 1, "saved": ["f", "u"], "stdout": "empty"}, "known_differences": {"session_end_budget": {"codex": {"saves": 0, "saved": []}}}},
+        {"op": "rm_rf", "path": "${W}"},
+        {"op": "cli", "args": ["restore", "${turn_save}", "--into", "${NEW}"], "expect": {"exit": 0}},
+        {"op": "file", "dir": "NEW", "path": "f", "equals": "A-turn\n", "why": "restore --into gives f byte-identical"}
+      ]
+    },
+    {
+      "id": "S5",
+      "title": "a session's own change stays quiet",
+      "origin": "design 6.2: A edits f with its file tool, then runs git checkout -- f",
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"f": "base-f\n"}}
+      ],
+      "steps": [
+        {"op": "edit", "actor": "A", "dir": "R", "path": "f", "content": "A-own\n", "expect": {"stdout": "empty"}},
+        {"op": "shell", "actor": "A", "dir": "R", "command": "git checkout -- f", "as": "s5", "expect": {"saves": 1, "saved": ["f"], "foreign_empty": true, "stdout": "empty"}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "base-f\n", "why": "the command ran"},
+        {"op": "cli", "args": ["restore", "${s5}"], "expect": {"exit": 0}},
+        {"op": "file", "dir": "R", "path": "f", "equals": "A-own\n"}
+      ]
+    },
+    {
+      "id": "S6",
+      "title": "pathological bulk: 50,000 untracked files and one modified tracked file",
+      "origin": "design 6.2",
+      "bulk_files": 50000,
+      "auto_turn_end": false,
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"tracked": "base\n"}},
+        {"op": "bulk", "dir": "R", "count": "${bulk_files}"},
+        {"op": "write", "dir": "R", "path": "tracked", "content": "modified\n"}
+      ],
+      "steps": [
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git checkout -- tracked", "as": "s6", "expect": {"saves": 1, "saved": ["tracked"], "max_seconds": 8, "unsaved_any": true, "stdout": "notice", "notice_contains": ["paths were not saved"]}},
+        {"op": "file", "dir": "R", "path": "tracked", "equals": "base\n", "why": "the command ran"}
+      ]
+    },
+    {
+      "id": "S7",
+      "title": "Stop never blocks",
+      "origin": "design 6.2: every scenario's turn ends; Codex Stop stdout is empty and has no decision; Claude Stop prints nothing",
+      "live": {
+        "status": "partly measurable",
+        "unmeasured": [
+          "stop A on the clean repository, which follows no live turn of that actor",
+          "stop A with stop_hook_active set, which a live tool sets only when a Stop hook continued the turn",
+          "stop B in a folder that is not a repository, and in a folder that does not exist, which have no live turn and no installed hooks"
+        ],
+        "reason": "a live Stop exists only as the end of a real model turn of that actor in a folder with hooks installed; the live run measures the Stop after A's edit (a dirty save, empty stdout) and the silent SessionEnd, and payload mode measures the rest"
+      },
+      "auto_turn_end": false,
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"f": "base-f\n"}},
+        {"op": "mkdir", "dir": "PLAIN"}
+      ],
+      "steps": [
+        {"op": "stop", "actor": "A", "dir": "R", "expect": {"stdout": "empty"}, "why": "clean repository"},
+        {"op": "edit", "actor": "A", "dir": "R", "path": "f", "content": "A-dirty\n", "expect": {"stdout": "empty"}},
+        {"op": "stop", "actor": "A", "dir": "R", "expect": {"saves": 1, "trigger": "turn_end", "stdout": "empty"}, "why": "dirty repository"},
+        {"op": "stop", "actor": "A", "dir": "R", "stop_hook_active": true, "expect": {"saves": 0, "stdout": "empty"}, "why": "stop_hook_active set: the hook must not continue the turn"},
+        {"op": "stop", "actor": "B", "dir": "PLAIN", "expect": {"stdout": "empty"}, "why": "folder that is not a repository"},
+        {"op": "stop", "actor": "B", "dir": "NOWHERE", "expect": {"stdout": "empty"}, "why": "folder that does not exist"},
+        {"op": "session_end", "actor": "A", "dir": "R", "expect": {"stdout": "empty"}, "why": "SessionEnd prints nothing either"}
+      ]
+    },
+    {
+      "id": "S8",
+      "title": "failure modes never block the tool call",
+      "origin": "design 6.2 and the 7.1 failure table",
+      "auto_turn_end": false,
+      "cases": [
+        {"id": "a", "title": "git missing from PATH", "setup": [{"op": "repo", "dir": "R", "files": {"f": "base-f\n"}}, {"op": "write", "dir": "R", "path": "f", "content": "dirty\n"}], "steps": [
+          {"op": "shell", "actor": "B", "dir": "R", "command": "git stash", "fault": "git_missing", "expect": {"saves": 0, "stdout": "empty"}}
+        ]},
+        {"id": "b", "title": "cwd is not a repository", "setup": [{"op": "mkdir", "dir": "PLAIN"}], "steps": [
+          {"op": "shell", "actor": "B", "dir": "PLAIN", "command": "git stash", "expect": {"saves": 0, "stdout": "any"}}
+        ]},
+        {"id": "c", "title": "store root read-only: the person and the model are told, the command runs", "setup": [{"op": "repo", "dir": "R", "files": {"f": "base-f\n"}}, {"op": "write", "dir": "R", "path": "f", "content": "dirty\n"}], "steps": [
+          {"op": "shell", "actor": "B", "dir": "R", "command": "git stash", "fault": "readonly_store", "expect": {"saves": 0, "stdout": "notice", "notice_contains": ["Could not save before", "the command will run"]}}
+        ]},
+        {"id": "d", "title": "store at cap: saving continues and the session is told once at SessionStart", "setup": [{"op": "repo", "dir": "R", "files": {"f": "base-f\n"}}, {"op": "write", "dir": "R", "path": "f", "content": "dirty-1\n"}], "steps": [
+          {"op": "shell", "actor": "B", "dir": "R", "command": "git stash", "expect": {"saves": 1, "stdout": "notice"}},
+          {"op": "store_config", "values": {"store_bytes": 1}},
+          {"op": "session_start", "actor": "B", "dir": "R", "expect": {"saves": 0, "stdout": "context", "context_contains": ["Recovery holds", "Saving continues"]}},
+          {"op": "session_start", "actor": "B", "dir": "R", "expect": {"saves": 0, "stdout": "empty"}, "why": "told once per session"},
+          {"op": "write", "dir": "R", "path": "f", "content": "dirty-2\n"},
+          {"op": "shell", "actor": "B", "dir": "R", "command": "git stash", "expect": {"saves": 1, "stdout": "notice"}, "why": "saving continues over the cap"}
+        ]},
+        {"id": "e", "title": "git -C target missing", "setup": [{"op": "repo", "dir": "R", "files": {"f": "base-f\n"}}], "steps": [
+          {"op": "shell", "actor": "B", "dir": "R", "command": "git -C ${R}/no-such-folder stash", "run": false, "expect": {"saves": 0, "stdout": "any"}}
+        ]},
+        {"id": "f", "title": "malformed payloads", "setup": [{"op": "repo", "dir": "R", "files": {"f": "base-f\n"}}], "steps": [
+          {"op": "raw_hook", "event": "PreToolUse", "stdin": "{not json", "expect": {"saves": 0, "stdout": "empty"}},
+          {"op": "raw_hook", "event": "PreToolUse", "stdin": "[1, 2]", "expect": {"saves": 0, "stdout": "empty"}},
+          {"op": "raw_hook", "event": "PreToolUse", "stdin": "", "expect": {"saves": 0, "stdout": "empty"}},
+          {"op": "raw_hook", "event": "PreToolUse", "stdin": "{\"hook_event_name\": \"Bogus\", \"session_id\": \"s\", \"cwd\": \"${R}\", \"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"git stash\"}}", "expect": {"saves": 0, "stdout": "empty"}}
+        ]},
+        {"id": "g", "title": "interpreter below 3.11: silent at PreToolUse, reported at SessionStart", "setup": [{"op": "repo", "dir": "R", "files": {"f": "base-f\n"}}, {"op": "write", "dir": "R", "path": "f", "content": "dirty\n"}], "steps": [
+          {"op": "shell", "actor": "B", "dir": "R", "command": "git stash", "fault": "python_below_3_11", "expect": {"saves": 0, "stdout": "empty"}},
+          {"op": "session_start", "actor": "B", "dir": "R", "fault": "python_below_3_11", "expect": {"saves": 0, "stdout": "context", "context_contains": ["3.11"]}}
+        ]}
+      ]
+    },
+    {
+      "id": "S9",
+      "title": "git branch -D on a branch with unmerged commits, then a pruned repository",
+      "origin": "design 6.2",
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"f": "base-f\n"}},
+        {"op": "git", "dir": "R", "args": ["switch", "-c", "topic"]},
+        {"op": "write", "dir": "R", "path": "f", "content": "topic-f\n"},
+        {"op": "write", "dir": "R", "path": "t.txt", "content": "topic-new\n"},
+        {"op": "git", "dir": "R", "args": ["add", "."]},
+        {"op": "git", "dir": "R", "args": ["commit", "-m", "topic work"]},
+        {"op": "git", "dir": "R", "args": ["switch", "main"]},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "topic"], "store": "topic_tip"},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "topic^{tree}"], "store": "topic_tree"},
+        {"op": "git", "dir": "R", "args": ["merge-base", "main", "topic"], "store": "merge_base"}
+      ],
+      "steps": [
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git branch -D topic", "as": "s9", "expect": {"saves": 1, "refs": ["branch"], "saved": ["f", "t.txt"], "stdout": "notice", "notice_contains": ["changed outside this session"]}},
+        {"op": "cli", "args": ["restore", "${s9}", "--refs"], "expect": {"exit": 0, "outcomes": ["reference restored exactly"]}},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "topic"], "store": "restored_tip"},
+        {"op": "assert_equal", "left": "${restored_tip}", "right": "${topic_tip}", "why": "(a) before pruning, restore --refs re-creates topic at its original tip"},
+        {"op": "git", "dir": "R", "args": ["branch", "-D", "topic"]},
+        {"op": "git", "dir": "R", "args": ["reflog", "expire", "--expire-unreachable=now", "--all"]},
+        {"op": "git", "dir": "R", "args": ["gc", "--prune=now"]},
+        {"op": "git", "dir": "R", "args": ["cat-file", "-e", "${topic_tip}"], "expect_exit": 1, "why": "the original tip is gone"},
+        {"op": "cli", "args": ["restore", "${s9}", "--refs"], "expect": {"exit": 0, "outcomes": ["reference rebuilt from visible saved paths"]}},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "topic^{tree}"], "store": "rebuilt_tree"},
+        {"op": "assert_equal", "left": "${rebuilt_tree}", "right": "${topic_tree}", "why": "(b) after pruning, the rebuilt commit's tree equals the original tip's tree"},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "topic~1"], "store": "rebuilt_parent"},
+        {"op": "assert_equal", "left": "${rebuilt_parent}", "right": "${merge_base}", "why": "(b) the rebuilt commit sits on the merge base"}
+      ]
+    },
+    {
+      "id": "S10",
+      "title": "git worktree remove --force on a worktree holding another session's dirty files",
+      "origin": "design 6.2",
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {"f": "base-f\n"}},
+        {"op": "worktree", "repo": "R", "dir": "W1", "branch": "w1", "detached_for": ["codex"], "known_difference": "worktree_location"}
+      ],
+      "steps": [
+        {"op": "edit", "actor": "A", "dir": "W1", "path": "f", "content": "A-dirty\n", "expect": {"stdout": "empty"}},
+        {"op": "edit", "actor": "A", "dir": "W1", "path": "u", "content": "A-u\n", "expect": {"stdout": "empty"}},
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git worktree remove --force ../W1", "as": "s10", "expect": {"saves": 1, "saved": ["f", "u"], "foreign": ["f", "u"], "binding_folder": "${W1}", "binding_branch": "w1", "stdout": "notice", "notice_contains": ["changed outside this session"]}, "known_differences": {"worktree_location": {"codex": {"binding_branch": "detached"}}}},
+        {"op": "file", "dir": "W1", "path": "f", "absent": true, "why": "the worktree was removed"},
+        {"op": "cli", "args": ["restore", "${s10}", "--into", "${NEW}"], "expect": {"exit": 0}},
+        {"op": "file", "dir": "NEW", "path": "f", "equals": "A-dirty\n"},
+        {"op": "file", "dir": "NEW", "path": "u", "equals": "A-u\n"}
+      ]
+    },
+    {
+      "id": "S11",
+      "title": "no ignored bytes reach the store",
+      "origin": "findings B1, B1a, B1b; probes P1 to P3, P3e, P3f and P9",
+      "tmpdir_cases": ["inside_store", "symlink_into_store", "outside_store"],
+      "canaries": ["CANARY-ENV-3c1f9a7e", "CANARY-HIDDEN-5b8d2e41"],
+      "setup": [
+        {"op": "repo", "dir": "R", "files": {".gitignore": "hidden/\n", "f": "base-f\n"}}
+      ],
+      "steps": [
+        {"op": "edit", "actor": "A", "dir": "R", "path": ".gitignore", "content": "hidden/\n.env\n", "expect": {"stdout": "empty"}},
+        {"op": "edit", "actor": "A", "dir": "R", "path": ".env", "content": "CANARY-ENV-3c1f9a7e\n", "expect": {"stdout": "empty"}},
+        {"op": "edit", "actor": "A", "dir": "R", "path": "hidden/.gitignore", "content": "CANARY-HIDDEN-5b8d2e41\n", "expect": {"stdout": "empty"}},
+        {"op": "edit", "actor": "A", "dir": "R", "path": "n.txt", "content": "n\n", "expect": {"stdout": "empty"}},
+        {"op": "shell", "actor": "A", "dir": "R", "command": "git stash push --all", "expect": {"saves": 1, "saved": [".gitignore", "n.txt"], "foreign_empty": true, "stdout": "empty"}},
+        {"op": "search_store", "needles": "canaries", "when": "after the stash push classification"},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "refs/stash"], "store": "a_stash_tip"},
+        {"op": "shell", "actor": "B", "dir": "R", "command": "git stash pop", "as": "pop_save", "expect": {"saves": 1, "refs": ["stash"], "saved": [".gitignore", "n.txt"], "unsaved": [".env:ignored_in_ref", "hidden/.gitignore:ignored_in_ref"], "stdout": "notice", "notice_contains": ["changed outside this session", "2 ignored paths left out by design"]}},
+        {"op": "search_store", "needles": "canaries", "when": "after the stash pop classification"},
+        {"op": "cli", "args": ["restore", "${pop_save}", "--refs"], "expect": {"exit": 0, "outcomes": ["reference restored exactly"]}},
+        {"op": "git", "dir": "R", "args": ["rev-parse", "refs/stash"], "store": "restored_tip"},
+        {"op": "assert_equal", "left": "${restored_tip}", "right": "${a_stash_tip}", "why": "(a) restore --refs re-creates the original entry exactly"},
+        {"op": "git", "dir": "R", "args": ["stash", "drop"]},
+        {"op": "git", "dir": "R", "args": ["reflog", "expire", "--expire-unreachable=now", "--all"]},
+        {"op": "git", "dir": "R", "args": ["gc", "--prune=now"]},
+        {"op": "git", "dir": "R", "args": ["cat-file", "-e", "${a_stash_tip}"], "expect_exit": 1, "why": "(b) the dropped entry is pruned"},
+        {"op": "cli", "args": ["restore", "${pop_save}", "--refs"], "expect": {"exit": 0, "outcomes": ["reference rebuilt from visible saved paths"], "output_names": [".env", "hidden/.gitignore"]}, "why": "(b) rebuilds the entry without the ignored paths, and the restore table names both"},
+        {"op": "git", "dir": "R", "args": ["ls-tree", "-r", "--name-only", "refs/stash^3"], "store": "rebuilt_untracked"},
+        {"op": "assert_equal", "left": "${rebuilt_untracked}", "right": "n.txt", "why": "(b) the rebuilt entry holds n.txt and neither ignored path"},
+        {"op": "search_store", "needles": "canaries", "when": "after the restore"},
+        {"op": "no_rules_dirs"}
+      ]
+    }
+  ]
+}

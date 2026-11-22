@@ -21,7 +21,6 @@ contained recovery proof uses a disposable real tmux session.
 
 from __future__ import annotations
 
-import json
 import os
 import shlex
 import shutil
@@ -29,40 +28,15 @@ import subprocess
 import sys
 import tempfile
 import time
-import unittest
-from collections.abc import Callable, Mapping
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
-from _real_state_fake import RealShapeState  # noqa: E402
-from _recorded_lane_worktree_fixture import RecordedLaneWorktreeFixture  # noqa: E402
-from _register_unit_double import (  # noqa: E402  # noqa: E402
-    FIXTURE_UNIT_ID,
-    RegisterUnitDouble,  # noqa: E402
-    fixture_assignment,
-    fixture_assignment_record,
-)
-from ananta.llm.agent_messaging.role_binding import (  # noqa: E402
-    AGENT_ROLE_BINDING_NAMESPACE,
-    COL_AGENT_INSTANCE_ID,
-    COL_AGENT_SESSION_ID,
-    COL_CLAIM_EPOCH,
-    COL_HOLDER_IDENTITY,
-    COL_HOLDER_KIND,
-    COL_ROLE,
-    HOLDER_KIND_SESSION,
-    TABLE_ROLE_BINDING,
-    role_binding_external_id,
-)
-
-import agent_messaging_plugin.session_hosts as session_hosts  # noqa: E402
 from agent_messaging_plugin.codex_adapter import (  # noqa: E402
     CodexAppServerHostDriver,
     CodexTmuxHostDriver,
@@ -70,46 +44,21 @@ from agent_messaging_plugin.codex_adapter import (  # noqa: E402
     _CodexTmuxDriverChannel,
     _identity_env,
 )
+from agent_messaging_plugin.host_end_notice import session_closed_hook_command  # noqa: E402
 from agent_messaging_plugin.local_cli.cli import (  # noqa: E402
     WatchIdentity,
     _register_without_claim,
 )
-from agent_messaging_plugin.managed_dispatch import (  # noqa: E402
-    DISPATCH_ACTIVE,
-    DISPATCH_UPTAKE_PENDING,
-    DISPATCH_WORKER_LOST,
-    DispatchActor,
-    DispatchError,
-    DispatchSpec,
-    _update_dispatch,
-    dispatch_managed_work,
-    mark_dispatch_worker_lost,
-    prepare_managed_dispatch,
-    read_managed_dispatch,
-    record_first_turn_evidence,
-    report_managed_dispatch,
-    resolve_managed_dispatch,
-)
 from agent_messaging_plugin.plugin import (  # noqa: E402
-    AgentMessagingPlugin,
+    _SessionLifecyclePolicyConfig,
     _spawn_session_request_from_params,
 )
-from agent_messaging_plugin.register_unit_client import PsoletRegisterUnitClient, RegisterActor, RegisterUnitError  # noqa: E402
-from agent_messaging_plugin.schema import TABLE_MANAGED_DISPATCH, TABLE_MANAGED_DISPATCH_EVENT, get_managed_session_schema  # noqa: E402
+from agent_messaging_plugin.schema import get_managed_session_schema  # noqa: E402
 from agent_messaging_plugin.session_hosts import (  # noqa: E402
     DriverChannelSendError,
     HostCannotSpawnError,
     resolve_host_driver,
 )
-from agent_messaging_plugin.session_lifecycle_store import (  # noqa: E402
-    backfill_registration,
-    read_managed_session,
-)
-from agent_messaging_plugin.session_lifecycle_verbs import (  # noqa: E402
-    SpawnSessionRequest,  # noqa: E402
-    spawn_dispatch_attempt,  # noqa: E402
-)
-from agent_messaging_plugin.session_sweep import sweep_managed_dispatches  # noqa: E402
 
 # Hoisted out of codex_common to the runner-neutral solet_cli (2026-08-14):
 # the Claude adapters need the identical resolution, and the asymmetry was the
@@ -162,119 +111,6 @@ def _codex_home(path: Path, *, plugin_enabled: bool = True) -> Path:
     return home
 
 
-def _seed_register(state: RealShapeState) -> RegisterUnitDouble:
-    register = RegisterUnitDouble()
-    register.add_unit()
-    _seed_worker_binding(state, role="Coordinator-Main", instance="agi-coordinator")
-    return register
-
-
-def _composite_spec(
-    root: Path,
-    dispatch_id: str,
-    host: str,
-    *,
-    agent_runtime: str = "codex",
-) -> DispatchSpec:
-    # The register Unit is resolved from the lane root, so the fixture names
-    # its own temp checkout rather than inheriting the runner's APP_HOME.
-    (root / ".git").mkdir(exist_ok=True)
-    now = datetime.now(UTC)
-    return DispatchSpec(
-        dispatch_id=dispatch_id,
-        lane_id=dispatch_id,
-        role_name=f"{dispatch_id}-Builder",
-        role_class="project",
-        work_class="production_mutation",
-        budget_line="codex-managed-smoke",
-        unit_id=FIXTURE_UNIT_ID,
-        expected_path=str(root / f"{dispatch_id}-report.md"),
-        completion_contract={
-            "evidence_obligations": [
-                {"id": "focused", "allowed_statuses": ["pass"]},
-            ],
-            "allowed_verdicts": ["READY-FOR-REVIEW", "BLOCKED"],
-        },
-        model="gpt-5.6-sol",
-        effort="xhigh",
-        agent_runtime=agent_runtime,
-        allowed_hosts=[host],
-        host=host,
-        visibility="visible" if host == "tmux" else "headless",
-        local_name=f"{dispatch_id}-Builder",
-        report_by_seconds=900,
-        allowed_tools=("Read",),
-        permission_mode="bypassPermissions",
-        transport="mcp",
-        allow_askuserquestion=False,
-        degraded_hooks_acknowledged=False,
-        spawned_by_instance_id="agi-coordinator",
-        spawned_by_role="Coordinator-Main",
-        directed_by="operator:seat",
-        uptake_due_at=(now + timedelta(minutes=2)).isoformat(),
-        report_by=(now + timedelta(minutes=15)).isoformat(),
-        watchdog_due_at=(now + timedelta(minutes=3)).isoformat(),
-        dispatch_kind="infrastructure",
-        repository_root=str(root),
-    )
-
-
-def _composite_spawn_request(spec: DispatchSpec, host: str) -> SpawnSessionRequest:
-    return SpawnSessionRequest(
-        role_class=spec.role_class,
-        lane_id=spec.lane_id,
-        unit_id=FIXTURE_UNIT_ID,
-        assignment=fixture_assignment(),
-        repository_root=spec.repository_root,
-        work_class=spec.work_class,
-        budget_line=spec.budget_line,
-        agent_runtime=spec.agent_runtime,
-        role_name=spec.role_name,
-        host=host,
-        visibility=spec.visibility,
-        model=spec.model,
-        effort=spec.effort,
-        report_by_seconds=spec.report_by_seconds,
-        spawned_by_instance_id=spec.spawned_by_instance_id,
-        spawned_by_role=spec.spawned_by_role,
-        directed_by=spec.directed_by,
-        allowed_tools=spec.allowed_tools,
-        permission_mode=spec.permission_mode,
-        transport=spec.transport,
-        allow_askuserquestion=spec.allow_askuserquestion,
-        local_name=spec.local_name,
-        degraded_hooks_acknowledged=spec.degraded_hooks_acknowledged,
-        dispatch_kind=spec.dispatch_kind,
-        reviewed_report_vendor=spec.reviewed_report_vendor,
-        pair_id=spec.pair_id,
-    )
-
-
-def _seed_worker_binding(
-    state: RealShapeState,
-    *,
-    role: str,
-    instance: str,
-    agent_id: str = "codex",
-) -> None:
-    state.upsert_state(
-        AGENT_ROLE_BINDING_NAMESPACE,
-        {
-            "table": TABLE_ROLE_BINDING,
-            "record": {
-                "external_id": role_binding_external_id(role),
-                COL_ROLE: role,
-                COL_HOLDER_KIND: HOLDER_KIND_SESSION,
-                COL_AGENT_INSTANCE_ID: instance,
-                COL_AGENT_SESSION_ID: f"ases-{instance}",
-                COL_HOLDER_IDENTITY: {"agent_id": agent_id, "session_label": role},
-                COL_CLAIM_EPOCH: 1,
-            },
-            "conflict_columns": ["external_id"],
-        },
-    )
-
-
 class _FakeClient:
     instances: list[_FakeClient] = []
 
@@ -299,40 +135,6 @@ class _FakeClient:
         self.closed = True
 
 
-class _ClaudeParityChannel:
-    def __init__(self) -> None:
-        self.sent: list[str] = []
-
-    def send(self, text: str) -> None:
-        self.sent.append(text)
-
-
-class _ClaudeParityDriver:
-    def __init__(self, host: str) -> None:
-        self.host = host
-        self.channel = _ClaudeParityChannel()
-
-    def spawn(self, spec: dict[str, object]) -> str:
-        return f"{self.host}:{spec['agent_instance_id']}"
-
-    def alive(self, host_ref: str) -> bool:
-        del host_ref
-        return True
-
-    def terminate(self, host_ref: str, grace_seconds: int) -> None:
-        del host_ref, grace_seconds
-
-    def driver_channel(self, host_ref: str) -> _ClaudeParityChannel:
-        del host_ref
-        return self.channel
-
-    def capability_report(self) -> dict[str, object]:
-        return {}
-
-    def verify_config(self) -> list[str]:
-        return []
-
-
 def test_runtime_registry_is_orthogonal() -> None:
     headless, headless_name = resolve_host_driver("headless", "codex")
     tmux, tmux_name = resolve_host_driver("tmux", "codex")
@@ -346,83 +148,11 @@ def test_runtime_registry_is_orthogonal() -> None:
     )
 
 
-def test_claude_headless_and_tmux_use_the_same_composite_state_machine() -> None:
-    """Accepted-design parity: Claude hosts traverse prepare/turn/ACK identically."""
-    outcomes: list[bool] = []
-    for host in ("headless", "tmux"):
-        key = (session_hosts.AGENT_RUNTIME_CLAUDE_CODE, host)
-        prior = session_hosts._REGISTRY.get(key)  # noqa: SLF001
-        driver = _ClaudeParityDriver(host)
-        session_hosts._REGISTRY[key] = driver  # noqa: SLF001
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                state = RealShapeState()
-                spec = _composite_spec(
-                    root,
-                    f"mdp-claude-{host}",
-                    host,
-                    agent_runtime=session_hosts.AGENT_RUNTIME_CLAUDE_CODE,
-                )
-                register = _seed_register(state)
-                result = dispatch_managed_work(
-                    state,  # type: ignore[arg-type]
-                    spec,
-                    actor=DispatchActor("agi-coordinator", "ases-agi-coordinator", "live_peer_binding"),
-                    spawn_attempt=lambda row, state=state, register=register: spawn_dispatch_attempt(state, row, register=register, actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane")),
-                    register=register,
-                )
-                attempt_id = str(result["attempt"]["agent_instance_id"])
-                backfill_registration(
-                    state,  # type: ignore[arg-type]
-                    agent_instance_id=attempt_id,
-                    agent_id=session_hosts.AGENT_RUNTIME_CLAUDE_CODE,
-                    agent_session_id=f"ases-{attempt_id}",
-                )
-                _seed_worker_binding(
-                    state,
-                    role=spec.role_name,
-                    instance=attempt_id,
-                    agent_id=session_hosts.AGENT_RUNTIME_CLAUDE_CODE,
-                )
-                active = report_managed_dispatch(
-                    state,  # type: ignore[arg-type]
-                    dispatch_id=spec.dispatch_id,
-                    event_id=f"evt-claude-{host}-ack",
-                    event_kind="ack",
-                    attempt_agent_instance_id=attempt_id,
-                    actor=DispatchActor(
-                        attempt_id,
-                        f"ases-{attempt_id}",
-                        "live_peer_binding",
-                    ),
-                    prior_version=int(result["dispatch"]["version"]),
-                    payload={
-                        "assignment_sha256": fixture_assignment().sha256,
-                        "revision_id": "drv_fixture-revision",
-                        "role_binding": spec.role_name,
-                        "scope_readback_sha256": "a" * 64,
-                        "plan_sha256": "b" * 64,
-                    },
-                    observed_at=datetime.now(UTC),
-                )
-                outcomes.append(result["dispatch"]["state"] == DISPATCH_UPTAKE_PENDING and active["state"] == DISPATCH_ACTIVE and len(driver.channel.sent) == 1)
-        finally:
-            if prior is None:
-                session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
-            else:
-                session_hosts._REGISTRY[key] = prior  # noqa: SLF001
-    _check(
-        all(outcomes),
-        "Claude headless+tmux composite parity reaches transport-pending then model ACK",
-    )
-
-
 def test_local_name_reaches_codex_registration_identity_on_both_hosts() -> None:
-    """F8: local_name, not lane_id, is the registered/displayed identity."""
+    """F8: local_name, not the spec label, is the registered/displayed identity."""
     spec = {
         "agent_instance_id": "agi-local-name",
-        "lane_id": "scheduler-action-definition-landing",
+        "label": "scheduler-action-definition-landing",
         "local_name": "Git-Controller",
     }
     headless = CodexAppServerHostDriver._spawn_identity(spec)  # noqa: SLF001
@@ -443,272 +173,19 @@ def test_local_name_reaches_codex_registration_identity_on_both_hosts() -> None:
     )
 
 
-def test_codex_headless_composite_requires_model_ack() -> None:
-    """Codex app-server submission and registration are not model uptake."""
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        _FakeClient.instances.clear()
-        driver = CodexAppServerHostDriver(
-            codex_bin=_executable(root, "codex"),
-            solet_bin=_executable(root / "venv" / "bin", "solet-bridge"),
-            solet_name="testhom",
-            codex_home=_codex_home(root),
-            cwd=root,
-            python_executable=str(root / "venv" / "bin" / "python3"),
-            client_factory=_FakeClient,
-        )
-        key = (session_hosts.AGENT_RUNTIME_CODEX, "headless")
-        prior = session_hosts._REGISTRY.get(key)  # noqa: SLF001
-        session_hosts._REGISTRY[key] = driver  # noqa: SLF001
-        try:
-            state = RealShapeState()
-            spec = _composite_spec(root, "mdp-codex-headless", "headless")
-            register = _seed_register(state)
-            result = dispatch_managed_work(
-                state,  # type: ignore[arg-type]
-                spec,
-                actor=DispatchActor("agi-coordinator", "ases-agi-coordinator", "live_peer_binding"),
-                spawn_attempt=lambda row, state=state, register=register: spawn_dispatch_attempt(state, row, register=register, actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane")),
-                register=register,
-            )
-            attempt_id = str(result["attempt"]["agent_instance_id"])
-            backfill_registration(
-                state,  # type: ignore[arg-type]
-                agent_instance_id=attempt_id,
-                agent_id="codex",
-                agent_session_id=f"ases-{attempt_id}",
-            )
-            backfill_registration(
-                state,  # type: ignore[arg-type]
-                agent_instance_id=attempt_id,
-                agent_id="codex",
-                agent_session_id=f"ases-{attempt_id}",
-            )
-            _seed_worker_binding(state, role=spec.role_name, instance=attempt_id)
-            pending = read_managed_dispatch(
-                state,  # type: ignore[arg-type]
-                spec.dispatch_id,
-            )
-            active = report_managed_dispatch(
-                state,  # type: ignore[arg-type]
-                dispatch_id=spec.dispatch_id,
-                event_id="evt-headless-ack",
-                event_kind="ack",
-                attempt_agent_instance_id=attempt_id,
-                actor=DispatchActor(
-                    agent_instance_id=attempt_id,
-                    agent_session_id=f"ases-{attempt_id}",
-                    authority_source="live_peer_binding",
-                ),
-                prior_version=int(result["dispatch"]["version"]),
-                payload={
-                    "assignment_sha256": fixture_assignment().sha256,
-                    "revision_id": "drv_fixture-revision",
-                    "role_binding": spec.role_name,
-                    "scope_readback_sha256": "a" * 64,
-                    "plan_sha256": "b" * 64,
-                },
-                observed_at=datetime.now(UTC),
-            )
-            duplicate = report_managed_dispatch(
-                state,  # type: ignore[arg-type]
-                dispatch_id=spec.dispatch_id,
-                event_id="evt-headless-ack",
-                event_kind="ack",
-                attempt_agent_instance_id=attempt_id,
-                actor=DispatchActor(
-                    agent_instance_id=attempt_id,
-                    agent_session_id=f"ases-{attempt_id}",
-                    authority_source="live_peer_binding",
-                ),
-                prior_version=int(result["dispatch"]["version"]),
-                payload={
-                    "assignment_sha256": fixture_assignment().sha256,
-                    "revision_id": "drv_fixture-revision",
-                    "role_binding": spec.role_name,
-                    "scope_readback_sha256": "a" * 64,
-                    "plan_sha256": "b" * 64,
-                },
-                observed_at=datetime.now(UTC),
-            )
-            competing_code = ""
-            try:
-                report_managed_dispatch(
-                    state,  # type: ignore[arg-type]
-                    dispatch_id=spec.dispatch_id,
-                    event_id="evt-headless-competing-ack",
-                    event_kind="ack",
-                    attempt_agent_instance_id=attempt_id,
-                    actor=DispatchActor(
-                        agent_instance_id=attempt_id,
-                        agent_session_id=f"ases-{attempt_id}",
-                        authority_source="live_peer_binding",
-                    ),
-                    prior_version=int(result["dispatch"]["version"]),
-                    payload={
-                        "assignment_sha256": fixture_assignment().sha256,
-                        "revision_id": "drv_fixture-revision",
-                        "role_binding": spec.role_name,
-                        "scope_readback_sha256": "c" * 64,
-                        "plan_sha256": "d" * 64,
-                    },
-                    observed_at=datetime.now(UTC),
-                )
-            except DispatchError as exc:
-                competing_code = exc.code
-        finally:
-            if prior is None:
-                session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
-            else:
-                session_hosts._REGISTRY[key] = prior  # noqa: SLF001
-        session = read_managed_session(state, attempt_id)  # type: ignore[arg-type]
-        _check(pending["state"] == DISPATCH_UPTAKE_PENDING, "Codex registration stays uptake_pending")
-        _check(active["state"] == DISPATCH_ACTIVE, "Codex model-turn ACK activates the dispatch")
-        _check(
-            session["agent_session_id"] == f"ases-{attempt_id}" and active["current_agent_instance_id"] == attempt_id,
-            "09 real re-registration preserves managed attempt lineage",
-        )
-        _check(
-            duplicate["version"] == active["version"] and competing_code == "stale_dispatch_version",
-            "09 duplicate/competing ACK order is idempotent and causal",
-        )
-        _check(session["first_turn_delivered"] is True, "Codex first-turn receipt is durable on attempt")
-        _check(len(_FakeClient.instances[-1].sent) == 1, "Codex app-server receives exactly one first turn")
-
-
-class _ManagedTmuxRun:
-    def __init__(self) -> None:
-        self.alive = True
-        self.literal_sent = False
-        self.enter_sent = False
-
-    def __call__(self, argv: list[str], **_kwargs: Any) -> Any:
-        if argv[1:2] == ["-V"]:
-            return SimpleNamespace(returncode=0, stdout="tmux 3.3a", stderr="")
-        if "has-session" in argv:
-            return SimpleNamespace(returncode=0 if self.alive else 1, stdout="", stderr="")
-        if "capture-pane" in argv:
-            if self.enter_sent:
-                content = "Working\n›"
-            elif self.literal_sent:
-                content = "› managed first turn"
-            else:
-                content = "› Ask Codex to do anything"
-            return SimpleNamespace(returncode=0, stdout=content, stderr="")
-        if "send-keys" in argv and "-l" in argv:
-            self.literal_sent = True
-        if argv[-1:] == ["Enter"]:
-            self.enter_sent = True
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-
-def test_codex_tmux_disappearance_converges() -> None:
-    """Codex tmux registration cannot keep a vanished host falsely live."""
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        run = _ManagedTmuxRun()
-        driver = CodexTmuxHostDriver(
-            codex_bin=_executable(root, "codex"),
-            tmux_bin=_executable(root, "tmux"),
-            solet_bin=_executable(root / "venv" / "bin", "solet-bridge"),
-            solet_name="testhom",
-            codex_home=_codex_home(root),
-            cwd=root,
-            python_executable=str(root / "venv" / "bin" / "python3"),
-            run_fn=run,
-        )
-        key = (session_hosts.AGENT_RUNTIME_CODEX, "tmux")
-        prior = session_hosts._REGISTRY.get(key)  # noqa: SLF001
-        session_hosts._REGISTRY[key] = driver  # noqa: SLF001
-        try:
-            state = RealShapeState()
-            spec = _composite_spec(root, "mdp-codex-tmux", "tmux")
-            register = _seed_register(state)
-            result = dispatch_managed_work(
-                state,  # type: ignore[arg-type]
-                spec,
-                actor=DispatchActor("agi-coordinator", "ases-agi-coordinator", "live_peer_binding"),
-                spawn_attempt=lambda row, state=state, register=register: spawn_dispatch_attempt(state, row, register=register, actor=RegisterActor("agi-coordinator", "ases-agi-coordinator", "Coordinator-Main", "fixture-lane")),
-                register=register,
-            )
-            attempt_id = str(result["attempt"]["agent_instance_id"])
-            backfill_registration(
-                state,  # type: ignore[arg-type]
-                agent_instance_id=attempt_id,
-                agent_id="codex",
-                agent_session_id=f"ases-{attempt_id}",
-            )
-            run.alive = False
-            sweep = sweep_managed_dispatches(
-                state,  # type: ignore[arg-type]
-                now=datetime.now(UTC),
-                register=None,
-            )
-            dispatch = read_managed_dispatch(
-                state,  # type: ignore[arg-type]
-                spec.dispatch_id,
-            )
-            session = read_managed_session(state, attempt_id)  # type: ignore[arg-type]
-        finally:
-            if prior is None:
-                session_hosts._REGISTRY.pop(key, None)  # noqa: SLF001
-            else:
-                session_hosts._REGISTRY[key] = prior  # noqa: SLF001
-        _check(result["dispatch"]["state"] == DISPATCH_UPTAKE_PENDING, "tmux transport is pending before ACK")
-        _check(sweep["dead"] == 1, "tmux disappearance is detected in the next supervisor interval")
-        _check(dispatch["state"] == DISPATCH_WORKER_LOST, "tmux disappearance yields worker_lost")
-        _check(session["lifecycle_state"] == "terminated", "vanished tmux attempt cannot remain live")
-
-
-def test_runtime_is_schema_and_restart_sticky() -> None:
+def test_runtime_is_schema_backed_and_carried_by_spawn() -> None:
     column = get_managed_session_schema().columns["agent_runtime"]
     _check(
         column.default == "claude_code" and column.not_null is not True,
         "managed_session.agent_runtime is declarative nullable TEXT with claude_code default",
     )
+    generic = {"model": "fixture-model", "effort": "high", "workspace": "/", "first_message": "fixture first message"}
     request = _spawn_session_request_from_params(
-        {
-            "role_class": "ephemeral",
-            "lane_id": "lane-codex",
-            "unit_id": FIXTURE_UNIT_ID,
-            "work_class": "read_only",
-            "budget_line": "budget",
-            "agent_runtime": "codex",
-        },
-        "operator:test",
+        {**generic, "agent_runtime": "codex"},
+        {"call_context": None},
+        _SessionLifecyclePolicyConfig(),
     )
     _check(request.agent_runtime == "codex", "spawn transport preserves agent_runtime=codex")
-    defaulted = _spawn_session_request_from_params(
-        {
-            "role_class": "ephemeral",
-            "lane_id": "lane-claude",
-            "unit_id": FIXTURE_UNIT_ID,
-            "work_class": "read_only",
-            "budget_line": "budget",
-        },
-        "operator:test",
-    )
-    _check(
-        defaulted.agent_runtime == "claude_code",
-        "omitted runtime keeps backward-compatible claude_code behavior",
-    )
-    params = AgentMessagingPlugin()._build_restart_spawn_params(  # noqa: SLF001
-        {
-            **fixture_assignment_record(),
-            "unit_id": FIXTURE_UNIT_ID,
-            "work_class": "read_only",
-            "budget_line": "budget",
-            "agent_runtime": "codex",
-            "host": "headless",
-        },
-        "ephemeral",
-        "lane-codex",
-        "",
-    )
-    _check(
-        params["agent_runtime"] == "codex",
-        "restart carries codex runtime instead of silently respawning Claude",
-    )
 
 
 def test_headless_spawn_uses_codex_native_config_and_identity() -> None:
@@ -722,18 +199,15 @@ def test_headless_spawn_uses_codex_native_config_and_identity() -> None:
             codex_home=_codex_home(root),
             cwd=root,
             python_executable=str(root / "venv" / "bin" / "python3"),
-            client_factory=_FakeClient,
+            client_factory=_FakeClient,  # pyright: ignore[reportArgumentType]
         )
         host_ref = driver.spawn(
             {
-                **fixture_assignment_record(),
                 "agent_instance_id": "agi-codex-1",
-                "lane_id": "cheap-review",
+                "label": "cheap-review",
                 "model": "gpt-5.6-luna",
                 "effort": "low",
                 "transport": "mcp",
-                "role_class": "ephemeral",
-                "unit_id": FIXTURE_UNIT_ID,
                 "spawned_by_role": "Coordinator-Main",
             },
         )
@@ -777,13 +251,12 @@ def test_codex_provider_overlay_is_refused_loud() -> None:
             codex_home=_codex_home(root),
             cwd=root,
             python_executable=str(root / "venv" / "bin" / "python3"),
-            client_factory=_FakeClient,
+            client_factory=_FakeClient,  # pyright: ignore[reportArgumentType]
         )
         raised = False
         try:
             driver.spawn(
                 {
-                    **fixture_assignment_record(),
                     "agent_instance_id": "agi-provider-refuse",
                     "transport": "mcp",
                     "provider_env": {"CLAUDE_CODE_USE_BEDROCK": "1"},
@@ -926,8 +399,8 @@ def test_wedged_code_mode_host_refuses_the_spawn_on_both_hosts() -> None:
         )
         raised = False
         try:
-            CodexAppServerHostDriver(**kwargs, client_factory=_FakeClient).spawn(
-                {**fixture_assignment_record(), "agent_instance_id": "agi-code-mode-wedge", "transport": "mcp"},
+            CodexAppServerHostDriver(**kwargs, client_factory=_FakeClient).spawn(  # pyright: ignore[reportArgumentType]
+                {"agent_instance_id": "agi-code-mode-wedge", "transport": "mcp"},
             )
         except HostCannotSpawnError:
             raised = True
@@ -1047,7 +520,7 @@ def test_app_server_channel_translates_clear_compact_and_active_turn() -> None:
     client._thread_id = "thread-original"  # noqa: SLF001
     client.send("/clear")
     _check(
-        client._thread_id == "thread-after-clear",  # noqa: SLF001
+        client._thread_id == "thread-after-clear",  # pyright: ignore[reportUnnecessaryComparison]  # noqa: SLF001
         "/clear rotates only the Codex backend thread inside the same channel object",
     )
     client.send("/compact")
@@ -1088,6 +561,21 @@ class _Clock:
         self.value += 0.1
 
 
+def _check_channel_exact_targets(calls: list[list[str]]) -> None:
+    targeted = [call for call in calls if "-t" in call]
+    _check(
+        bool(targeted) and all(call[call.index("-t") + 1] == "=codex-test:" for call in targeted),
+        "all channel send and capture commands use the exact pane target",
+    )
+
+
+def _check_composer_exact_target(calls: list[list[str]]) -> None:
+    _check(
+        any(call[1] == "display-message" and call[call.index("-t") + 1] == "=codex-test:" for call in calls),
+        "composer port resolves the exact pane target while retaining the session name",
+    )
+
+
 def test_tmux_channel_verifies_styled_pickup() -> None:
     """Updated for the baseline-gate fix (driver-channel strand fix,
     2026-08-14): the pre-send idle screen and the post-render composed
@@ -1117,6 +605,41 @@ def test_tmux_channel_verifies_styled_pickup() -> None:
         any("capture-pane" in call and "-e" in call for call in run.calls),
         "tmux pickup verification uses styled capture-pane -e",
     )
+    _check_channel_exact_targets(run.calls)
+    before = len(run.calls)
+    channel.send_drain_notice("notice")
+    _check_composer_exact_target(run.calls[before:])
+
+
+def test_tmux_host_uses_exact_targets_and_rejects_invalid_refs() -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: Any) -> Any:
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="12345\n", stderr="")
+
+    driver = CodexTmuxHostDriver(tmux_bin="tmux", solet_name="testhom", run_fn=fake_run)
+    _check(driver.alive("codex-test"), "exact host reference remains alive")
+    _check(calls[-1] == ["tmux", "has-session", "-t", "=codex-test"], "has-session uses the exact session target")
+    _check(driver._pane_pid("codex-test") == 12345, "pane lookup returns the named session PID")  # noqa: SLF001
+    _check(
+        calls[-1] == ["tmux", "list-panes", "-t", "=codex-test:", "-F", "#{pane_pid}"],
+        "list-panes uses the exact pane target",
+    )
+    with patch("agent_messaging_plugin.codex_tmux._pid_alive", return_value=False):
+        driver.terminate("codex-test", 1)
+        _check(calls[-1] == ["tmux", "kill-session", "-t", "=codex-test"], "kill-session uses the exact session target")
+        for ref in ("", "bad:name", "bad.name", "=bad"):
+            before = len(calls)
+            try:
+                is_alive = driver.alive(ref)
+                pane_pid = driver._pane_pid(ref)  # noqa: SLF001
+                channel = driver.driver_channel(ref)
+                driver.terminate(ref, 1)
+                absent = not is_alive and pane_pid is None and channel is None
+            except ValueError:
+                absent = False
+            _check(absent and len(calls) == before, f"invalid reference {ref!r} reaches no tmux command")
 
 
 def test_tmux_channel_enter_waits_for_baseline_change() -> None:
@@ -1325,7 +848,7 @@ def test_ready_gate_reads_the_status_line_not_the_placeholder() -> None:
 
 
 def test_busy_pane_failure_says_busy_not_broken() -> None:
-    """RED-FIRST (2026-09-09): the half that blocked Project-Solet-Main.
+    """RED-FIRST (2026-09-09): the half that blocked the dispatching session.
 
     ``spawn_session`` delivers the bootstrap first turn itself, so a
     ``drive_session`` issued straight afterwards races a pane that is busy BY
@@ -1451,17 +974,14 @@ def test_headless_watch_transport_watcher_keeps_spool() -> None:
             codex_home=_codex_home(root),
             cwd=root,
             python_executable=str(root / "venv" / "bin" / "python3"),
-            client_factory=_FakeClient,
-            popen_fn=fake_popen,
+            client_factory=_FakeClient,  # pyright: ignore[reportArgumentType]
+            popen_fn=fake_popen,  # pyright: ignore[reportArgumentType]
         )
         driver.spawn(
             {
-                **fixture_assignment_record(),
                 "agent_instance_id": "agi-codex-watch-1",
-                "lane_id": "watch-lane",
+                "label": "watch-lane",
                 "transport": "watch",
-                "role_class": "ephemeral",
-                "unit_id": FIXTURE_UNIT_ID,
                 "spawned_by_role": "Coordinator-Main",
             },
         )
@@ -1502,18 +1022,18 @@ def test_tmux_watch_transport_pane_command_keeps_spool() -> None:
             python_executable=str(root / "venv" / "bin" / "python3"),
             run_fn=fake_run,
         )
-        driver.spawn(
+        host_ref = driver.spawn(
             {
-                **fixture_assignment_record(),
                 "agent_instance_id": "agi-codex-tmux-watch-1",
-                "lane_id": "tmux-watch-lane",
+                "label": "tmux-watch-lane",
                 "transport": "watch",
-                "role_class": "ephemeral",
-                "unit_id": FIXTURE_UNIT_ID,
                 "spawned_by_role": "Coordinator-Main",
             },
         )
         new_session_call = next(call for call in calls if "new-session" in call)
+        expected_ref = f"fleet-testhom-tmux-watch-lane-{'agi-codex-tmux-watch-1'[-8:]}"
+        _check(host_ref == expected_ref, "spawned session name contains the solet name")
+        _check(new_session_call[new_session_call.index("-s") + 1] == expected_ref, "new-session receives the recorded name")
         pane_command = new_session_call[-1]
         pane_tokens = shlex.split(pane_command)
         release_cli = str(root / "venv" / "bin" / "solet-bridge")
@@ -1539,6 +1059,60 @@ def test_tmux_watch_transport_pane_command_keeps_spool() -> None:
         _check(
             pane_tokens.count("--no-claim") == 1,
             "tmux pane command still arms --no-claim exactly once (unrelated flag left untouched)",
+        )
+
+
+def test_codex_tmux_spawn_arms_the_session_closed_notice() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> Any:
+            calls.append(argv)
+            if argv[1:2] == ["-V"]:
+                return SimpleNamespace(returncode=0, stdout="tmux 3.3a", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        driver = CodexTmuxHostDriver(
+            codex_bin=_executable(root, "codex"),
+            tmux_bin=_executable(root, "tmux"),
+            solet_bin=_executable(root / "venv" / "bin", "solet-bridge"),
+            solet_name="testhom",
+            codex_home=_codex_home(root),
+            cwd=root,
+            python_executable=str(root / "venv" / "bin" / "python3"),
+            run_fn=fake_run,
+        )
+        driver.spawn({"agent_instance_id": "agi-codex-arm1", "label": "codex-arm", "transport": "mcp"})
+        _check(
+            [driver._tmux_bin, "show-hooks", "-g", "session-closed"] in calls,
+            "Codex tmux spawn checks the global session-closed hook",
+        )
+        hook_call = [driver._tmux_bin, "set-hook", "-ga", "session-closed", session_closed_hook_command("testhom", driver._solet_bin)]
+        _check(calls.count(hook_call) == 1, "Codex tmux spawn arms one session-closed notice")
+
+
+def test_codex_tmux_spawn_warns_when_solet_name_is_empty() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+
+        def fake_run(_argv: list[str], **_kwargs: Any) -> Any:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        driver = CodexTmuxHostDriver(
+            tmux_bin="tmux",
+            solet_bin="solet-bridge",
+            solet_name="",
+            codex_home=_codex_home(root),
+            cwd=root,
+            run_fn=fake_run,
+        )
+        with patch.object(driver, "verify_config", return_value=[]), patch("logging.Logger.warning", autospec=True) as warning:
+            host_ref = driver.spawn({"agent_instance_id": "agi-empty-12345678", "label": "empty", "transport": "mcp"})
+        _check(host_ref == "fleet-empty-12345678", "empty solet name omits the segment")
+        _check(
+            any(args and args[0].name == "agent_messaging_plugin.codex_tmux" for args, _kwargs in warning.call_args_list),
+            "empty solet name emits a driver warning",
         )
 
 
@@ -1596,6 +1170,10 @@ def test_real_tmux_parked_composer_requires_interrupt_before_drive() -> None:
         return
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
+        wrapper = root / "private-tmux"
+        wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(tmux_bin)} -S {shlex.quote(str(root / "tmux.sock"))} "$@"\n')
+        wrapper.chmod(0o755)
+        tmux_bin = str(wrapper)
         parked_stub = root / "parked-codex-stub.py"
         parked_stub.write_text(
             "import os\n"
@@ -1722,295 +1300,14 @@ def test_real_tmux_parked_composer_requires_interrupt_before_drive() -> None:
                 text=True,
                 timeout=5,
             )
-
-
-class CausalAnnotationTests(unittest.TestCase):
-    """Production CAS and client response boundaries; no native parser/PG claim."""
-
-    def setUp(self) -> None:
-        from managed_dispatch_smoke import _spec, _state
-
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.state = _state()
-        self.spec = _spec(Path(self.tmp.name))
-        self.register = RegisterUnitDouble()
-        self.assigned = self.register.add_unit()
-        self.launches: list[Mapping[str, Any]] = []
-
-    def launch(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
-        self.launches.append(dict(row))
-        return {"agent_instance_id": f"agi-attempt-{len(self.launches)}", "host_ref": "recorded-only"}
-
-    def dispatch(self, spec: DispatchSpec | None = None) -> dict[str, Any]:
-        from managed_dispatch_smoke import T0, _coordinator_actor
-
-        return dispatch_managed_work(self.state, spec or self.spec, register=self.register, actor=_coordinator_actor(), spawn_attempt=self.launch, now=T0)
-
-    def actor(self) -> RegisterActor:
-        return RegisterActor("agi-coordinator", "ases-coordinator", "Coordinator-Main", self.spec.lane_id)
-
-    def preparing(self) -> dict[str, Any]:
-        from managed_dispatch_smoke import T0, _coordinator_actor
-
-        from agent_messaging_plugin.managed_dispatch_unit import capture_annotation_source
-
-        row = prepare_managed_dispatch(self.state, self.spec, register=self.register, actor=_coordinator_actor(), now=T0)
-        return _update_dispatch(self.state, row, {"attempt_receipt": {"annotation_source": capture_annotation_source(row, self.actor())}})
-
-    def uncertain(self, register: Any = None) -> dict[str, Any]:
-        from managed_dispatch_smoke import T0
-
-        return record_first_turn_evidence(
-            self.state,
-            dispatch_id=self.spec.dispatch_id,
-            agent_instance_id="agi-original",
-            source="charter",
-            delivered=False,
-            error="original error",
-            host="headless",
-            host_ref="original-host",
-            agent_runtime="codex",
-            observed_at=T0,
-            register=register,
-            actor=self.actor(),
-        )
-
-    def lost(self, register: Any = None, instance: str = "agi-original") -> dict[str, Any]:
-        from managed_dispatch_smoke import T0
-
-        return mark_dispatch_worker_lost(
-            self.state,
-            dispatch_id=self.spec.dispatch_id,
-            agent_instance_id=instance,
-            observed_at=T0,
-            detail="original liveness detail",
-            register=register,
-        )
-
-    def failures(self) -> list[dict[str, Any]]:
-        return [e for e in cast(RealShapeState, self.state).rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_DISPATCH_EVENT) if e["event_kind"] == "register_annotation_failed"]
-
-    def test_outage_and_missing_client_preserve_both_original_results(self) -> None:
-        from managed_dispatch_smoke import _state
-
-        for missing in (False, True):
-            with self.subTest(missing=missing):
-                self.state = _state()
-                self.preparing()
-                client = None if missing else self.register
-                failure = RegisterUnitError("unit_register_unavailable", "exact native outage detail")
-                with patch.object(self.register, "record_unit_event", side_effect=failure):
-                    row = self.uncertain(client)
-                    lost = self.lost(client)
-                self.assertEqual(row["state"], "uptake_uncertain")
-                self.assertEqual(row["first_turn_error"], "original error")
-                self.assertEqual(lost["state"], "worker_lost")
-                self.assertEqual(lost["host_liveness_detail"], "original liveness detail")
-                audits = self.failures()
-                self.assertEqual([e["payload"]["event"] for e in audits], ["uptake_uncertain", "worker_lost"], "ANNOTATION_FAILURE_AUDIT_EXACTLY_ONE")
-                for e in audits:
-                    self.assertEqual(e["actor_instance_id"], self.actor().agent_instance_id)
-                    self.assertEqual(e["attempt_agent_instance_id"], "agi-original")
-                    self.assertEqual(e["payload"]["attempt_number"], 1)
-                    self.assertEqual(e["payload"]["source_actor"]["agent_session_id"], self.actor().agent_session_id)
-                    self.assertEqual(e["payload"]["code"], "unit_register_unavailable")
-                    self.assertEqual(e["payload"]["detail"], "No register client is bound to this call." if missing else failure.detail)
-
-    def test_malformed_old_cross_attempt_and_cross_dispatch_source(self) -> None:
-        from managed_dispatch_smoke import _state
-
-        for mode in ("missing", "container", "malformed", "attempt_number", "dispatch_id", "assignment_sha256"):
-            with self.subTest(mode=mode):
-                self.state = _state()
-                row = self.preparing()
-                receipt = dict(row["attempt_receipt"])
-                source = dict(receipt["annotation_source"])
-                if mode == "missing":
-                    receipt = {}
-                elif mode == "malformed":
-                    receipt["annotation_source"] = {"actor": None}
-                else:
-                    source[mode] = 7 if mode == "attempt_number" else "wrong"
-                    receipt["annotation_source"] = source
-                _update_dispatch(self.state, row, {"attempt_receipt": ["corrupt container"] if mode == "container" else receipt})
-                count = len(self.register.events)
-                self.assertEqual(self.uncertain(self.register)["state"], "uptake_uncertain")
-                self.assertEqual(self.lost(self.register)["state"], "worker_lost")
-                self.assertEqual(len(self.register.events), count, "ANNOTATION_INVALID_SOURCE_ZERO_NATIVE")
-                self.assertEqual(len(self.failures()), 2)
-                self.assertTrue(all(e["payload"]["code"].startswith("annotation_source_") for e in self.failures()))
-
-    def test_duplicate_stale_terminal_and_real_cas_loser_zero_observations(self) -> None:
-        from managed_dispatch_smoke import _state
-
-        self.preparing()
-        row = self.uncertain(self.register)
-        before = len(self.register.events)
-        self.uncertain(self.register)
-        with self.assertRaises(DispatchError):
-            self.lost(self.register, "agi-prior")
-        self.assertEqual(len(self.register.events), before, "ANNOTATION_STALE_DUPLICATE_ZERO")
-        lost = self.lost(self.register)
-        before = len(self.register.events)
-        self.lost(self.register)
-        self.assertEqual(len(self.register.events), before, "ANNOTATION_TERMINAL_ZERO")
-        self.assertEqual(lost["state"], "worker_lost")
-        for terminal in ("cancelled", "completed", "failed_start", "rejected", "expired"):
-            raw = cast(RealShapeState, self.state).rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_DISPATCH)[0]
-            raw["state"] = terminal
-            self.lost(self.register)
-            self.assertEqual(len(self.register.events), before, "ANNOTATION_OTHER_TERMINAL_ZERO")
-        self.state = _state()
-        row = self.preparing()
-        original_update = self.state.update_state
-
-        def lose(namespace: str, query: Any, updates: Any) -> Any:
-            if query.get("table") == TABLE_MANAGED_DISPATCH and updates.get("state") == "uptake_uncertain":
-                original_update(namespace, query, {"version": row["version"] + 1})
-            return original_update(namespace, query, updates)
-
-        with patch.object(self.state, "update_state", side_effect=lose), self.assertRaises(DispatchError) as caught:
-            self.uncertain(self.register)
-        self.assertEqual(caught.exception.code, "stale_dispatch_version")
-        self.assertEqual(len(self.register.events), before, "ANNOTATION_CAS_LOSER_ZERO")
-        from _register_unit_double import check_lost_annotation_cas_loser
-
-        check_lost_annotation_cas_loser(self)
-
-    def test_post_cas_retry_cannot_relabel_original_annotation(self) -> None:
-        from managed_dispatch_smoke import _state
-
-        for trigger in ("uptake_uncertain", "worker_lost"):
-            with self.subTest(trigger=trigger):
-                self.state = _state()
-                self.preparing()
-                if trigger == "worker_lost":
-                    self.uncertain(self.register)
-                original_update = self.state.update_state
-                raced = False
-
-                def replace_after_cas(namespace: str, query: Any, updates: Any, original_update: Callable[..., Any] = original_update, trigger: str = trigger) -> Any:
-                    from managed_dispatch_smoke import T0, _seed_binding
-
-                    nonlocal raced
-                    result = original_update(namespace, query, updates)
-                    if not raced and query.get("table") == TABLE_MANAGED_DISPATCH and updates.get("state") == trigger:
-                        raced = True
-                        current = read_managed_dispatch(self.state, self.spec.dispatch_id)
-                        _seed_binding(self.state, role="Coordinator-Main", instance="agi-successor", session="ases-successor")
-                        resolve_managed_dispatch(
-                            self.state,
-                            dispatch_id=self.spec.dispatch_id,
-                            event_id="racing-retry",
-                            action="request_retry",
-                            actor=DispatchActor("agi-successor", "ases-successor", "live_peer_binding"),
-                            prior_version=current["version"],
-                            payload={"reason": "replacement race"},
-                            observed_at=T0,
-                            register=self.register,
-                            spawn_attempt=lambda _row: {"agent_instance_id": "agi-replacement"},
-                        )
-                    return result
-
-                before = len(self.register.events)
-                with patch.object(self.state, "update_state", side_effect=replace_after_cas):
-                    result = self.uncertain(self.register) if trigger == "uptake_uncertain" else self.lost(self.register)
-                self.assertTrue(raced)
-                self.assertEqual(result["current_agent_instance_id"], "agi-replacement")
-                events = [(d, self.register.event_actors[i]) for i, (_unit, d) in enumerate(self.register.events) if i >= before and d["event"] == trigger]
-                self.assertEqual(len(events), 1)
-                detail, actor = events[0]
-                self.assertEqual((detail["agent_instance_id"], detail["attempt_number"], actor), ("agi-original", 1, self.actor()), "ANNOTATION_RACE_ORIGINAL_IDENTITY")
-                replacement = read_managed_dispatch(self.state, self.spec.dispatch_id)
-                source = replacement["attempt_receipt"]["annotation_source"]
-                self.assertEqual((source["attempt_number"], source["actor"]["agent_instance_id"]), (2, "agi-successor"))
-                self.assertEqual(replacement["spawned_by_instance_id"], "agi-coordinator")
-                first_turn = next(e for e in cast(RealShapeState, self.state).rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MANAGED_DISPATCH_EVENT) if e["event_kind"] == "first_turn")
-                self.assertEqual(first_turn["payload"]["annotation_source"]["actor"]["agent_instance_id"], "agi-coordinator")
-
-    def test_reserved_duplicate_cannot_expose_source_only_receipt(self) -> None:
-        from concurrent.futures import ThreadPoolExecutor
-
-        from managed_dispatch_smoke import T0, _coordinator_actor
-
-        def launch(row: Mapping[str, Any]) -> Mapping[str, Any]:
-            self.assertEqual(set(row["attempt_receipt"]), {"annotation_source"})
-            with ThreadPoolExecutor(max_workers=1) as pool, self.assertRaises(DispatchError) as caught:
-                pool.submit(self.dispatch).result(timeout=5)
-            self.assertEqual(caught.exception.code, "dispatch_attempt_in_progress")
-            return {"agent_instance_id": "agi-original", "annotation_source": {"forged": True}}
-
-        result = dispatch_managed_work(self.state, self.spec, register=self.register, actor=_coordinator_actor(), spawn_attempt=launch, now=T0)
-        self.assertEqual(result["attempt"]["annotation_source"]["actor"]["agent_instance_id"], "agi-coordinator")
-        self.assertEqual(len(self.register.events), 1)
-
-    def test_native_history_retains_observation_correction_and_withdrawal(self) -> None:
-        from _register_unit_double import NativeOwnerCLIDouble
-
-        client = NativeOwnerCLIDouble()
-        self.preparing()
-        self.uncertain(client)
-        original = dict(client.native_events[0])
-        for kind in ("correction", "withdrawal"):
-            client._run(  # noqa: SLF001 - inspect the existing client argv double only
-                "db",
-                "unit",
-                "record-event",
-                self.spec.unit_id,
-                "--event-kind",
-                kind,
-                "--target-event",
-                original["event_id"],
-                "--detail",
-                kind + " reason",
-                "--agent-instance-id",
-                self.actor().agent_instance_id,
-            )
-        records = client._run("db", "unit", "events", self.spec.unit_id)  # noqa: SLF001
-        history = json.loads(records.stdout)["records"]
-        self.assertEqual(history[0], original)
-        self.assertEqual([e["event_kind"] for e in history], ["observation", "correction", "withdrawal"])
-        self.assertEqual([e["target_event_id"] for e in history[1:]], [original["event_id"]] * 2)
-        shown = client._run("db", "unit", "event-show", original["event_id"])  # noqa: SLF001
-        self.assertEqual(json.loads(shown.stdout), original)
-
-    def test_production_subprocess_retired_actor_audit_and_exact_argv(self) -> None:
-        from managed_dispatch_smoke import _state
-
-        for retired in (False, True):
-            with self.subTest(retired=retired):
-                self.state = _state()
-                self.preparing()
-                client = PsoletRegisterUnitClient("fixture-psolet", solet_name="annotation-test")
-                stderr = b"project-solet: actor act-original is retired; agi-coordinator ases-coordinator"
-                completed = subprocess.CompletedProcess([], 2 if retired else 0, b"{}", stderr if retired else b"")
-                with patch("agent_messaging_plugin.register_unit_client.subprocess.run", return_value=completed) as process:
-                    row = self.uncertain(client)
-                self.assertEqual(row["state"], "uptake_uncertain")
-                self.assertEqual(row["first_turn_error"], "original error")
-                self.assertEqual(process.call_count, 1, "ANNOTATION_NO_AUTOMATIC_RETRY")
-                argv = process.call_args.args[0]
-                for flag, expected in (("--agent-instance-id", "agi-coordinator"), ("--agent-session-id", "ases-coordinator"), ("--role-name", "Coordinator-Main"), ("--lane-id", self.spec.lane_id)):
-                    self.assertEqual(argv[argv.index(flag) + 1], expected, "ANNOTATION_EXACT_NATIVE_SOURCE_ARGV")
-                self.assertEqual(argv[argv.index("--event-kind") + 1], "observation")
-                if retired:
-                    audit = self.failures()
-                    self.assertEqual(len(audit), 1, "ANNOTATION_RETIRED_EXACT_AUDIT")
-                    self.assertIn(stderr.decode(), audit[0]["payload"]["detail"])
-                    self.assertEqual(audit[0]["actor_instance_id"], "agi-coordinator")
-                else:
-                    self.assertEqual(self.failures(), [])
+            subprocess.run([tmux_bin, "kill-server"], check=False, capture_output=True, text=True, timeout=5)
 
 
 def main() -> int:
     tests = [
         test_runtime_registry_is_orthogonal,
-        test_claude_headless_and_tmux_use_the_same_composite_state_machine,
         test_local_name_reaches_codex_registration_identity_on_both_hosts,
-        test_codex_headless_composite_requires_model_ack,
-        test_codex_tmux_disappearance_converges,
-        test_runtime_is_schema_and_restart_sticky,
+        test_runtime_is_schema_backed_and_carried_by_spawn,
         test_headless_spawn_uses_codex_native_config_and_identity,
         test_codex_provider_overlay_is_refused_loud,
         test_codex_environment_does_not_adopt_parent_runtime_or_provider,
@@ -2023,6 +1320,7 @@ def main() -> int:
         test_tmux_driver_resolves_codex_and_tmux_from_local_bin_when_path_is_minimal,
         test_app_server_channel_translates_clear_compact_and_active_turn,
         test_tmux_channel_verifies_styled_pickup,
+        test_tmux_host_uses_exact_targets_and_rejects_invalid_refs,
         test_tmux_channel_enter_waits_for_baseline_change,
         test_tmux_channel_refuses_two_enter_noops,
         test_tmux_channel_ready_check_survives_banner_scroll,
@@ -2032,23 +1330,12 @@ def main() -> int:
         test_real_tmux_parked_composer_requires_interrupt_before_drive,
         test_headless_watch_transport_watcher_keeps_spool,
         test_tmux_watch_transport_pane_command_keeps_spool,
+        test_codex_tmux_spawn_arms_the_session_closed_notice,
+        test_codex_tmux_spawn_warns_when_solet_name_is_empty,
         test_watch_registration_does_not_claim_label,
     ]
-    with tempfile.TemporaryDirectory() as raw:
-        with RecordedLaneWorktreeFixture(Path(raw)) as fixture:
-            for test in tests:
-                test()
-            provisioned_roles = {call.role_name for call in fixture.provisioning_calls}
-            _check(
-                fixture.has_recorded_provisioning()
-                and {
-                    "mdp-claude-headless-Builder",
-                    "mdp-claude-tmux-Builder",
-                    "mdp-codex-headless-Builder",
-                    "mdp-codex-tmux-Builder",
-                }.issubset(provisioned_roles),
-                "recorded fixture contains both runtime dispatch paths under its temp root",
-            )
+    for test in tests:
+        test()
     print(f"\nPASSED: {_passed}")
     print(f"FAILED: {len(_failed)}")
     for label in _failed:

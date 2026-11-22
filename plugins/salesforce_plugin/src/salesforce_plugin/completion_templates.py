@@ -15,10 +15,22 @@ from typing import Literal
 
 # The typed family verbs (typed_families.py) share one result instruction.
 _TYPED_FAMILIES = frozenset({"composite", "tooling", "bulk_jobs", "reports", "dashboards", "rest_resources", "actions", "metadata", "content_files"})
+# Build 6: verbs over the bound orgs themselves (orgs.py, org_service.py).
+_ORG_REGISTRY = frozenset({"list_orgs", "bind_org", "login", "logout", "set_default_org", "disconnect_org"})
 
 
 def _instructions(action_name: str, outcome: Literal["result", "error"]) -> list[str]:
     if outcome == "result":
+        if action_name in _ORG_REGISTRY:
+            return [
+                f"A Salesforce {action_name} finished. Report the org alias and org_id it names, and for list_orgs every bound org with its type, Dev Hub flag and which one is the default.",
+                "A binding names the vault secrets its login uses only by name; never ask for a secret's value. disconnect_org reports logout_status, the secrets it deleted and the new default_org.",
+            ]
+        if action_name == "org_lifecycle":
+            return [
+                "A Salesforce org_lifecycle operation finished. Report job_payload.operation, org and org_id, and the operation's outcome: ready, job_id, scratch_org_info, sandbox_process, binding, deleted or url.",
+                "A create only submits the request: relay next as the call to make. While ready is false, resume again later; when ready is true the new org is bound under binding.alias. A url is a single-use login link: give it to the operator once and do not repeat it.",
+            ]
         if action_name == "authenticated_request":
             return [
                 "A Salesforce authenticated request finished. Report job_payload.status, headers and body faithfully; HTTP 4xx/5xx are vendor failures even though the transport completed.",
@@ -36,7 +48,7 @@ def _instructions(action_name: str, outcome: Literal["result", "error"]) -> list
         ]
     return [
         f"A salesforce_plugin '{action_name}' job ended with an error.",
-        "The error message in job_error is already topology-safe (no org host or session detail) and is safe to relay to the user verbatim.",
+        "Relay job_error's code and message as received. For sf.unknown_org the message lists the bound orgs: ask which one to use, or name it as org. For sf.auth_failed the org needs a new login (login, or sf org login web).",
         "Reply with action using the active IO plugin's post_message (process_key: plugin::<io_plugin>::post_message) if the flow calls for messaging the user directly.",
     ]
 

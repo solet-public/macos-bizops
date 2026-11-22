@@ -1,0 +1,3 @@
+# Checkout-only marker for the landing close-out procedure smoke. The development
+# checkout skills and checklist article are intentionally absent from born-seed products.
+# not shipped: quality_gates/tests/landing_closeout_procedure_smoke.py requires ananta/knowledge_bases/ananta_platform/22_testing/05_change_closeout_checklist.md; the smoke guards the development checkout's landing close-out procedure (fleet_tooling)

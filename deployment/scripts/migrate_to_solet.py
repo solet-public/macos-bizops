@@ -47,10 +47,19 @@ solet-owned LaunchAgent plists, ``~/.claude/``, the project ``.claude/``, and
 This mode never writes anything — see ``scan_stale`` for why some hits can't
 be auto-fixed at all.
 
+``--scan-stale`` also asks each router under ``~/.ananta/runtime`` for its
+``status`` (the only verb it sends) and reports every colour whose instance id
+still carries the old name: a process started before the rename keeps the
+router's active binding for as long as it runs, and no file scan can see that.
+The report says how many routers it checked, so a check that did not run is
+never mistaken for a clean one, and it names the listening pid and prints a
+recovery recipe. It never quits a process or writes to the router.
+
 Residual guard (manual, platform must be up): after relaunch, enumerate the
 plugin-config store and fail loud on any ``homunculus_name`` key — see the
 seed-update runbook step this script ships with.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -64,7 +73,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from macos_self_deployment_plugin.constants import AUTOSTART_LOG_DIR_DEFAULT
+from macos_self_deployment_plugin import stale_runtime_cleanup
+from macos_self_deployment_plugin.constants import AUTOSTART_LOG_DIR_DEFAULT, ROUTER_SOCKET_SUFFIX
+from macos_self_deployment_plugin.router_client import RouterClient, RouterClientError
 
 REPO = Path(__file__).resolve().parent.parent.parent
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
@@ -166,10 +177,7 @@ def _wait_until_unloaded(label: str) -> None:
         if not _is_loaded(label):
             return
         time.sleep(_BOOTOUT_POLL_INTERVAL_S)
-    raise SystemExit(
-        f"REFUSING: {label} still loaded {_BOOTOUT_WAIT_TIMEOUT_S}s after "
-        "bootout — not bootstrapping over a still-winding-down process"
-    )
+    raise SystemExit(f"REFUSING: {label} still loaded {_BOOTOUT_WAIT_TIMEOUT_S}s after bootout — not bootstrapping over a still-winding-down process")
 
 
 def _env_renames(payload: dict[str, object]) -> list[tuple[str, str]]:
@@ -210,10 +218,7 @@ def _is_solet_owned(payload: dict[str, object]) -> bool:
     if label.startswith(SOLET_LABEL_PREFIXES):
         return True
     roots = (str(REPO), str(ANANTA_HOME))
-    return any(
-        any(root in arg for root in roots) or arg.startswith(SOLET_OWNED_MODULE_PREFIX)
-        for arg in _argv(payload)
-    )
+    return any(any(root in arg for root in roots) or arg.startswith(SOLET_OWNED_MODULE_PREFIX) for arg in _argv(payload))
 
 
 def _read_plist(path: Path, qualifier: str) -> dict[str, Any]:
@@ -240,9 +245,7 @@ def _plan_one_plist(path: Path) -> PlistPlan | None:
     # is only meaningful for plists ``autostart_manager`` itself renders.
     # Deriving it from an arbitrary owned label would invent a solet name.
     is_autostart_managed = label.startswith(SOLET_LABEL_PREFIXES)
-    add_log_keys = is_autostart_managed and (
-        "StandardOutPath" not in payload or "StandardErrorPath" not in payload
-    )
+    add_log_keys = is_autostart_managed and ("StandardOutPath" not in payload or "StandardErrorPath" not in payload)
     if not (env_renames or arg_renames or new_label != label or add_log_keys):
         return None
     # Derived the same way autostart_manager._render_plist derives it — the
@@ -266,11 +269,7 @@ def plan_plists() -> list[PlistPlan]:
     """Plan every solet-owned LaunchAgent. Ownership is tested per-payload in
     ``_plan_one_plist`` — never by filename, which is what let a vendor-named
     plist of ours escape the P2 rename."""
-    return [
-        plan
-        for plan in map(_plan_one_plist, sorted(LAUNCH_AGENTS.glob("*.plist")))
-        if plan is not None
-    ]
+    return [plan for plan in map(_plan_one_plist, sorted(LAUNCH_AGENTS.glob("*.plist"))) if plan is not None]
 
 
 def apply_plist(plan: PlistPlan) -> None:
@@ -321,8 +320,7 @@ def plan_manifest() -> bool:
 def apply_manifest() -> None:
     manifest = REPO / "root_manifest.yaml"
     text = manifest.read_text(encoding="utf-8")
-    manifest.write_text(re.sub(r"^homunculus_name:", "solet_name:", text, count=1, flags=re.M),
-                        encoding="utf-8")
+    manifest.write_text(re.sub(r"^homunculus_name:", "solet_name:", text, count=1, flags=re.M), encoding="utf-8")
 
 
 def shim_state() -> tuple[bool, bool]:
@@ -381,15 +379,8 @@ def plan_claude_json() -> dict[str, list[tuple[str, str]]]:
 def apply_claude_json(plan: dict[str, list[tuple[str, str]]]) -> None:
     running = _claude_code_running()
     if running is not False:
-        why = (
-            "a Claude Code process is running"
-            if running else "process-running status could not be determined"
-        )
-        raise SystemExit(
-            f"REFUSING to write {CLAUDE_JSON}: {why}. Quit Claude Code first, "
-            "then re-run with --apply — it holds this file in memory and "
-            "rewrites it on exit, silently clobbering an in-session edit."
-        )
+        why = "a Claude Code process is running" if running else "process-running status could not be determined"
+        raise SystemExit(f"REFUSING to write {CLAUDE_JSON}: {why}. Quit Claude Code first, then re-run with --apply — it holds this file in memory and rewrites it on exit, silently clobbering an in-session edit.")
     data = json.loads(CLAUDE_JSON.read_text(encoding="utf-8"))
     servers = data["mcpServers"]
     for name, renames in plan.items():
@@ -498,11 +489,7 @@ def scan_stale() -> list[StaleHit]:
     hits = _scan_launch_agents()
     hits += _scan_tree(CLAUDE_DIR, classify=True)
     hits += _scan_tree(REPO / ".claude", classify=False)
-    hits += [
-        StaleHit(path=p, count=n, category="fixable")
-        for p in sorted(REPO.glob("CLAUDE*.md"))
-        if (n := _count_stale_token(p))
-    ]
+    hits += [StaleHit(path=p, count=n, category="fixable") for p in sorted(REPO.glob("CLAUDE*.md")) if (n := _count_stale_token(p))]
     return hits
 
 
@@ -512,10 +499,8 @@ def print_stale_report(hits: list[StaleHit]) -> None:
     for hit in hits:
         by_category[hit.category].append(hit)
     labels = {
-        "fixable": "FIXABLE — safe to edit directly (memory facts: move filename + "
-                   "frontmatter name: + every [[link]] together, never a blind substitution)",
-        "live_process_state": "LIVE PROCESS STATE — fix by relaunching that session, "
-                               "never by hand-editing the file",
+        "fixable": "FIXABLE — safe to edit directly (memory facts: move filename + frontmatter name: + every [[link]] together, never a blind substitution)",
+        "live_process_state": "LIVE PROCESS STATE — fix by relaunching that session, never by hand-editing the file",
         "historical": "HISTORICAL — leave alone, never rewrite (falsifies the record)",
     }
     for category in ("fixable", "live_process_state", "historical"):
@@ -523,6 +508,140 @@ def print_stale_report(hits: list[StaleHit]) -> None:
         print(f"\n{labels[category]} ({len(group)}):")
         for hit in group:
             print(f"  {hit.path} ({hit.count} hit(s))")
+
+
+# The router's instance ids: ``solet-<color>-<uuid8>`` since the P2 rename,
+# ``homunculus-<color>-<uuid8>`` before it. This script reads only the router's
+# published ``status`` reply, so the shape is held here rather than imported
+# from the router, the swap orchestrator or the doctor.
+POST_RENAME_INSTANCE_ID = re.compile(r"solet-(?:blue|green)-[0-9a-f]{8}")
+
+
+@dataclass
+class RouterBinding:
+    """One colour a router reports, with a verdict on its instance id."""
+
+    socket: Path
+    color: str
+    instance_id: str
+    port: int
+    active: bool
+    heartbeat_age_s: float
+    verdict: str  # "stale" (old name) | "ok" (solet-<color>-<uuid8>) | "unrecognized"
+    pid: int | None  # the listener on ``port``; looked up for a stale binding only
+
+
+@dataclass
+class RouterScan:
+    runtime_dir: Path
+    bindings: list[RouterBinding] = field(default_factory=list)
+    checked: int = 0  # routers that answered ``status``
+    unreachable: list[tuple[Path, str]] = field(default_factory=list)  # (socket, reason)
+
+
+def _instance_verdict(instance_id: str) -> str:
+    if STALE_TOKEN.search(instance_id):
+        return "stale"
+    if POST_RENAME_INSTANCE_ID.fullmatch(instance_id):
+        return "ok"
+    return "unrecognized"
+
+
+def _listening_pid(port: int) -> int | None:
+    """The one process listening on ``port``, or ``None`` when that is not certain.
+
+    Exactly one numeric ``lsof`` line is a pid. No output, two pids, a nonzero
+    exit or a missing ``lsof`` is unknown, never a guess — the way
+    ``_claude_code_running`` treats ambiguity.
+    """
+    try:
+        probe = _run(["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"], check=False)
+    except OSError:
+        return None
+    pids = probe.stdout.split()
+    if probe.returncode != 0 or len(pids) != 1 or not pids[0].isdecimal():
+        return None
+    return int(pids[0])
+
+
+def _binding_from_row(socket_path: Path, row: object, now: float) -> RouterBinding:
+    if not isinstance(row, dict):
+        raise ValueError(f"a colour row is not an object: {row!r}")
+    color, instance_id = row.get("color"), row.get("instance_id")
+    port, beat = row.get("port"), row.get("last_heartbeat")
+    if not (isinstance(color, str) and isinstance(instance_id, str) and isinstance(port, int) and isinstance(beat, int | float)):
+        raise ValueError(f"a colour row lacks color/instance_id/port/last_heartbeat: {row!r}")
+    verdict = _instance_verdict(instance_id)
+    return RouterBinding(
+        socket=socket_path,
+        color=color,
+        instance_id=instance_id,
+        port=port,
+        active=row.get("status") == "active",
+        heartbeat_age_s=now - float(beat),
+        verdict=verdict,
+        pid=_listening_pid(port) if verdict == "stale" else None,
+    )
+
+
+def _router_bindings(socket_path: Path, now: float) -> list[RouterBinding]:
+    """Every colour one router reports; raises when it cannot say."""
+    status = RouterClient(socket_path).status()
+    rows = status.get("colors")
+    if not isinstance(rows, list):
+        raise ValueError(f"the status reply has no colors list (error={status.get('error')!r})")
+    return [_binding_from_row(socket_path, row, now) for row in rows]
+
+
+def scan_router_bindings(runtime_dir: Path | None = None) -> RouterScan:
+    """Report-only: which router colours a process started under the old name holds.
+
+    After a rename, a process still running under the old name keeps the
+    router's binding while it keeps heartbeating, and a LaunchAgent/``~/.claude``
+    scan cannot see it. This asks each ``<name>.router.sock`` for ``status`` —
+    the only verb it ever sends — and gives each reported colour a verdict from
+    its instance id. A router that cannot answer (no listener, an error reply, a
+    malformed reply) is an ``unreachable`` entry, never an exception: an unknown
+    is printed as unknown, not passed as clean. It writes nothing and creates no
+    directory (``stale_runtime_cleanup.runtime_dir`` only names the path).
+    """
+    base = runtime_dir if runtime_dir is not None else stale_runtime_cleanup.runtime_dir()
+    scan = RouterScan(runtime_dir=base)
+    now = time.time()
+    for socket_path in sorted(base.glob(f"*{ROUTER_SOCKET_SUFFIX}")):
+        try:
+            scan.bindings += _router_bindings(socket_path, now)
+        except (RouterClientError, OSError, ValueError) as exc:
+            scan.unreachable.append((socket_path, str(exc)))
+        else:
+            scan.checked += 1
+    return scan
+
+
+def _print_stale_binding(binding: RouterBinding) -> None:
+    state = "active" if binding.active else "inactive"
+    pid = f"pid {binding.pid}" if binding.pid is not None else "pid unresolved"
+    print(f"  STALE {binding.socket.name}: {binding.color} {binding.instance_id} port {binding.port} {state}, heartbeat {binding.heartbeat_age_s:.0f}s ago, {pid}")
+    find = f"ps -p {binding.pid} -o lstart=,command=" if binding.pid is not None else f"lsof -nP -iTCP:{binding.port} -sTCP:LISTEN"
+    print(f"    1. confirm it is the pre-rename process: {find}")
+    print("    2. quit it yourself (this script never does); the router drops its binding about 35 s after its last heartbeat")
+    print("    3. start the solet under its migrated label so it registers as solet-<color>-<id>")
+    print("    4. re-run --scan-stale until this section shows 0 stale")
+
+
+def print_router_binding_report(scan: RouterScan) -> None:
+    print("\nROUTER BINDINGS — a process started before the rename keeps its binding while it runs (never auto-fixed):")
+    if scan.checked == 0 and not scan.unreachable:
+        print(f"  no router sockets under {scan.runtime_dir}: router bindings NOT checked")
+        return
+    by_verdict = {v: [b for b in scan.bindings if b.verdict == v] for v in ("stale", "ok", "unrecognized")}
+    print(f"  {scan.checked} router(s) checked: {len(by_verdict['stale'])} stale, {len(by_verdict['ok'])} ok, {len(by_verdict['unrecognized'])} unrecognized, {len(scan.unreachable)} unreachable")
+    for socket_path, reason in scan.unreachable:
+        print(f"  NOT checked: {socket_path} ({reason})")
+    for binding in by_verdict["unrecognized"]:
+        print(f"  unrecognized: {binding.socket.name}: {binding.color} {binding.instance_id} (neither the old name nor solet-<color>-<id>)")
+    for binding in by_verdict["stale"]:
+        _print_stale_binding(binding)
 
 
 def _print_plist_plan(plans: list[PlistPlan]) -> None:
@@ -578,22 +697,22 @@ def _apply_all(
         print("migrated ~/.claude.json mcpServers env keys")
     apply_reinstall()
     print("reinstalled agent_messaging_plugin; `solet-bridge` CLI active")
-    print("NEXT (manual, from the runbook): refresh installed coordination-hooks "
-          "plugin caches, wait for the platform log to go stable, then run the "
-          "config-store residual check (fail loud on any homunculus_name key).")
+    print("NEXT (manual, from the runbook): refresh installed coordination-hooks plugin caches, wait for the platform log to go stable, then run the config-store residual check (fail loud on any homunculus_name key).")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="execute (default: dry run)")
     parser.add_argument(
-        "--scan-stale", action="store_true",
+        "--scan-stale",
+        action="store_true",
         help="report-only scan for surviving homunculus-era references; mutates nothing",
     )
     args = parser.parse_args()
 
     if args.scan_stale:
         print_stale_report(scan_stale())
+        print_router_binding_report(scan_router_bindings())
         return 0
 
     mode = "APPLY" if args.apply else "DRY RUN"

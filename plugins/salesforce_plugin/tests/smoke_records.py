@@ -211,7 +211,7 @@ def test_plugin_level_classifies_cli_call_error() -> None:
     plugin.logger = None
     plugin._cli_executor = MagicMock()  # noqa: SLF001 — smoke reaches internal state directly
 
-    def _produce(_executor: Any) -> dict[str, Any]:
+    def _produce() -> dict[str, Any]:
         raise SalesforceCliCallError("NOT_FOUND", "Account ID 001x not found")
 
     result = plugin._run(_produce, "test_verb")  # noqa: SLF001
@@ -233,7 +233,7 @@ def test_edge_parity() -> None:
     except Exception as exc:  # FrameworkError on mismatch
         raised = exc
     _assert("EDGE parity: validator raises nothing", raised is None, str(raised))
-    _assert("all 25 verbs discovered", len(actions) == 25)
+    _assert("all 32 verbs discovered", len(actions) == 32, str(len(actions)))
 
 
 def main() -> int:

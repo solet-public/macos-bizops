@@ -18,6 +18,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT / "plugins" / "platform_dev_surface_plugin" / "src"))
 
+from platform_dev_surface_plugin.quality.landing_verify import LandingVerificationError  # noqa: E402
 from platform_dev_surface_plugin.quality.operations import QualityOperations  # noqa: E402
 
 _passed = 0
@@ -51,18 +52,18 @@ def _git(root: Path, *args: str) -> str:
 def _build_git_fixture(root: Path) -> tuple[Path, str]:
     register = root / "quality_gates" / "gate_smokes.txt"
     register.parent.mkdir()
-    register.write_text("base_smoke.py\n", encoding="utf-8")
+    register.write_text("base_smoke.py\nanchor_smoke.py\n", encoding="utf-8")
     _git(root, "init", "-q", "--initial-branch=main")
     _git(root, "config", "user.email", "gc-smoke@example.invalid")
     _git(root, "config", "user.name", "GC smoke")
     _git(root, "add", ".")
     _git(root, "commit", "-q", "-m", "base")
     base_ref = _git(root, "rev-parse", "HEAD").strip()
-    register.write_text("base_smoke.py\nmaster_smoke.py\n", encoding="utf-8")
+    register.write_text("master_smoke.py\nanchor_smoke.py\n", encoding="utf-8")
     _git(root, "add", ".")
     _git(root, "commit", "-q", "-m", "master drift")
-    _git(root, "checkout", "-q", "-b", "lane", base_ref)
-    register.write_text("base_smoke.py\nlane_smoke.py\n", encoding="utf-8")
+    _git(root, "checkout", "-q", "-b", "candidate", base_ref)
+    register.write_text("base_smoke.py\nanchor_smoke.py\ncandidate_smoke.py\n", encoding="utf-8")
     return register, base_ref
 
 
@@ -74,7 +75,6 @@ def _test_hash_verify(ops: QualityOperations, root: Path) -> None:
         (root / ".venv").symlink_to(external_venv, target_is_directory=True)
         digest = hashlib.sha256(payload.read_bytes()).hexdigest()
         result = ops.verify_hash_manifest(
-            "unt-gc-smoke",
             str(root),
             {"payload.txt": digest, "missing.txt": digest},
         )
@@ -87,20 +87,36 @@ def _test_hash_verify(ops: QualityOperations, root: Path) -> None:
 
 
 def _test_merge_predict(ops: QualityOperations, root: Path, base_ref: str, register: Path) -> None:
-    before = _git(root, "status", "--porcelain")
+    before = (_git(root, "status", "--porcelain"), register.read_bytes())
     result = ops.predict_gate_smokes_merge(
-        base_ref,
-        str(root),
-        "main",
-        str(register.relative_to(root)),
+        base_ref=base_ref,
+        candidate_root_path=str(root),
+        current_master="main",
+        register_path=str(register.relative_to(root)),
     )
-    after = _git(root, "status", "--porcelain")
-    _check(before == after, "merge prediction leaves the real lane worktree unchanged")
+    after = (_git(root, "status", "--porcelain"), register.read_bytes())
+    _check(before == after, "merge prediction leaves the candidate directory unchanged")
+    _check(result["candidate_root_path"] == str(root.resolve()), "clean report identifies the resolved candidate root")
     _check(result["master_drifted_since_base"] is True, "merge verb detects genuine master drift")
-    _check(result["lane_change_is_append_only"] is True, "merge verb extracts an append-only lane hunk")
-    _check(result["lane_registrations"] == ["lane_smoke.py"], "merge verb extracts lane registration")
-    _check(result["missing_registrations_on_master"] == ["lane_smoke.py"], "merge verb reports registration missing from master")
-    _check(result["merge_verdict"] in {"clean", "conflict"}, "merge verb returns an explicit Git merge-file verdict")
+    _check(result["candidate_change_is_append_only"] is True, "merge verb extracts an append-only candidate hunk")
+    _check(result["candidate_registrations"] == ["candidate_smoke.py"], "merge verb extracts the candidate registration")
+    _check(result["missing_registrations_on_master"] == ["candidate_smoke.py"], "merge verb reports registration missing from master")
+    _check((result["merge_verdict"], result["git_merge_file_exit_code"]) == ("clean", 0), "independent edits merge cleanly")
+    _check(result["merged_candidate_content"] == "master_smoke.py\nanchor_smoke.py\ncandidate_smoke.py\n", "clean merge contains both edits")
+
+
+def _test_merge_predict_failures(ops: QualityOperations, root: Path, base_ref: str, register: Path) -> None:
+    register.write_text("conflicting_smoke.py\nanchor_smoke.py\n", encoding="utf-8")
+    result = ops.predict_gate_smokes_merge(base_ref=base_ref, candidate_root_path=str(root), current_master="main")
+    _check(result["candidate_root_path"] == str(root.resolve()), "conflict report identifies the resolved candidate root")
+    _check((result["merge_verdict"], result["git_merge_file_exit_code"]) == ("conflict", 1), "overlapping edits produce a conflict report")
+    _check("<<<<<<<" in result["merged_candidate_content"], "conflict report includes Git conflict markers")
+    try:
+        ops.predict_gate_smokes_merge(base_ref=base_ref, candidate_root_path=str(root / "absent"), current_master="main")
+    except LandingVerificationError as error:
+        _check(str(error).startswith("candidate_root_path must be an existing absolute directory"), "missing candidate root names the public argument")
+    else:
+        _check(False, "missing candidate root raises LandingVerificationError")
 
 
 def _test_scope_gaps(ops: QualityOperations) -> None:
@@ -125,6 +141,7 @@ def main() -> int:
         register, base_ref = _build_git_fixture(fixture)
         _test_hash_verify(ops, fixture)
         _test_merge_predict(ops, fixture, base_ref, register)
+        _test_merge_predict_failures(ops, fixture, base_ref, register)
         _test_scope_gaps(ops)
     finally:
         shutil.rmtree(fixture, ignore_errors=True)

@@ -22,6 +22,8 @@ one is not. R6 scenarios:
         this module is a self-contained D11 regression guard).
   (iv)  a pre-existing stale file is overwritten on the next routerless
         write (R3 self-heal for port re-roll).
+  (v)   every port file it publishes is mode 0o600 from creation (no chmod
+        after the rename), and a failed rename leaves the old file intact.
 
 Plus the R1 fail-loud contract for ``_router_is_declared``: an absent
 ``orchestrator_ref``, an absent ``APP_HOME``, and an absent
@@ -37,13 +39,17 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 from ananta.core.runtime.port_manager import (  # noqa: E402
+    get_runtime_dir,
     read_port_file,
     remove_port_file,
     write_port_file,
@@ -111,7 +117,8 @@ def _scenario_router_declared_set_never_writes(solet: str) -> None:
     with tempfile.TemporaryDirectory(prefix="d11_smoke_home_") as home:
         app_home = Path(home)
         _write_manifest(
-            app_home, ["macos_self_deployment_plugin", "agent_messaging_plugin"],
+            app_home,
+            ["macos_self_deployment_plugin", "agent_messaging_plugin"],
         )
         plugin = _new_plugin(app_home)
 
@@ -155,6 +162,108 @@ def _scenario_stale_file_overwritten_on_next_write(solet: str) -> None:
     healed = read_port_file("bridge", solet)
     _check(healed == 40002, f"rewrite on next start self-heals to the new port (got {healed!r})")
     _check(healed != stale, "healed value differs from the stale value")
+
+
+_PRIVATE_PORT = 54321
+_STALE_PORT_TEXT = "99999"
+
+
+class _ChmodRecorder:
+    """Stand-in for ``os.chmod`` that records the mode the final file has when chmod reaches it."""
+
+    def __init__(self, target: str) -> None:
+        self._target = target
+        self._real_chmod = os.chmod
+        self.modes_at_chmod: list[int] = []
+
+    def __call__(self, path: str | os.PathLike[str], mode: int, **kwargs: Any) -> None:
+        if os.fspath(path) == self._target and os.path.exists(self._target):
+            self.modes_at_chmod.append(os.stat(self._target).st_mode & 0o777)
+        self._real_chmod(path, mode, **kwargs)
+
+
+def _check_private_publish(
+    label: str,
+    final_path: Path,
+    write: Callable[[], object],
+    *,
+    pre_existing: bool,
+) -> None:
+    runtime = final_path.parent
+    if pre_existing:
+        final_path.write_text(_STALE_PORT_TEXT, encoding="utf-8")
+        final_path.chmod(0o644)
+    else:
+        _check(not final_path.exists(), f"{label}: precondition, no file yet")
+    before = set(os.listdir(runtime))
+    recorder = _ChmodRecorder(str(final_path))
+    try:
+        with mock.patch("os.chmod", new=recorder):
+            write()
+    except OSError as exc:
+        _check(False, f"{label}: writer completes (raised {exc!r})")
+        return
+    after = set(os.listdir(runtime))
+    bad = [mode for mode in recorder.modes_at_chmod if mode != 0o600]
+    _check(not bad, f"{label}: no chmod saw the final file below 0o600 (seen {[oct(m) for m in bad]})")
+    mode = final_path.stat().st_mode & 0o777
+    _check(mode == 0o600, f"{label}: final mode 0o600 (got {mode:#o})")
+    _check(
+        final_path.read_text(encoding="utf-8") == str(_PRIVATE_PORT),
+        f"{label}: content is the port",
+    )
+    _check(after == before | {final_path.name}, f"{label}: no temp file left behind")
+
+
+def _scenario_port_files_private_from_creation(solet: str) -> None:
+    print("\nScenario (v): port files are published at mode 0o600 from creation (umask 022)")
+    runtime = get_runtime_dir(solet)
+    bridge = runtime / f"{solet}.bridge.port"
+    rest = runtime / f"{solet}.rest.port"
+    previous_umask = os.umask(0o022)
+    try:
+        _check_private_publish(
+            "bridge, fresh",
+            bridge,
+            lambda: write_routerless_bridge_port_file(_PRIVATE_PORT, solet),
+            pre_existing=False,
+        )
+        _check_private_publish(
+            "bridge, over a 0o644 file",
+            bridge,
+            lambda: write_routerless_bridge_port_file(_PRIVATE_PORT, solet),
+            pre_existing=True,
+        )
+        _check_private_publish(
+            "rest, fresh",
+            rest,
+            lambda: write_port_file(_PRIVATE_PORT, "rest", solet),
+            pre_existing=False,
+        )
+        _check_private_publish(
+            "rest, over a 0o644 file",
+            rest,
+            lambda: write_port_file(_PRIVATE_PORT, "rest", solet),
+            pre_existing=True,
+        )
+        # Failure leg: the rename fails, so the writer must raise, the old file
+        # must keep its bytes, and no temp file may be left behind.
+        before_bytes = bridge.read_bytes()
+        before_names = set(os.listdir(runtime))
+        raised = False
+        with mock.patch("os.replace", side_effect=OSError("injected rename failure")):
+            try:
+                write_routerless_bridge_port_file(_PRIVATE_PORT + 1, solet)
+            except OSError:
+                raised = True
+        _check(raised, "failed rename: the writer raises")
+        _check(
+            bridge.read_bytes() == before_bytes,
+            "failed rename: the old bridge file keeps its bytes",
+        )
+        _check(set(os.listdir(runtime)) == before_names, "failed rename: no temp file remains")
+    finally:
+        os.umask(previous_umask)
 
 
 def _scenario_predicate_fails_loud() -> None:
@@ -202,6 +311,7 @@ def main() -> int:
             _scenario_generic_guard_still_raises("d11-smoke-iii")
             _scenario_stale_file_overwritten_on_next_write("d11-smoke-iv")
             _scenario_predicate_fails_loud()
+            _scenario_port_files_private_from_creation("d11-smoke-v")
         finally:
             if prior_xdg is None:
                 os.environ.pop("XDG_RUNTIME_DIR", None)

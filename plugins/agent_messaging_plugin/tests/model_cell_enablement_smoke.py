@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
+from collections.abc import Generator
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,7 +28,7 @@ from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 from agent_messaging_plugin import model_capability_store as store  # noqa: E402
 from agent_messaging_plugin import model_capability_verbs as verbs  # noqa: E402
 from agent_messaging_plugin import model_cell_enablement as policy  # noqa: E402
-from agent_messaging_plugin.dispatch_tier_selection import Pin, TierSelectionError, select_tier  # noqa: E402
+from agent_messaging_plugin.dispatch_tier_selection import BillingObjective, CapabilityCell, Pin, TierSelectionError, select_tier  # noqa: E402
 from agent_messaging_plugin.model_capability_reconcile import ReconcileOutcome  # noqa: E402
 from agent_messaging_plugin.model_capability_store import CatalogError, selection_catalog  # noqa: E402
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
@@ -110,7 +114,70 @@ def change(state: RealShapeState, **params: Any) -> dict[str, Any]:
 
 
 def selected(state: RealShapeState, **params: Any) -> dict[str, Any]:
-    return verbs.select_dispatch_tier(typed(state), {"required_score": 40, "billing_objective": "metered_usd", **params})
+    return verbs.select_dispatch_tier(typed(state), {"required_score": 40, **params})
+
+
+# Preference weight fixtures: the live shape at score 55, where Sonnet max and Opus xhigh both clear and Opus is cheaper.
+_PLAN_NOW = datetime(2026, 10, 3, 12, tzinfo=UTC)  # admits the newest shipped economics profile
+_PLAN_ID = "anthropic-max-20x-2026-08-22"
+_ECONOMICS = _ROOT / "plugins/agent_messaging_plugin/model_profiles/usage_economics.v1.json"
+_OBJECTIVES = ("metered_usd", "relative", "allowance_weighted")
+_SONNET = {"model_family_prefix": "claude-sonnet"}
+_OLD_SELECTED_KEYS = {"runtime", "model", "effort", "capability_score", "cost_per_task_usd", "relative_cost_multiplier", "measured_at", "acceptance", "enabled"}
+
+
+@contextmanager
+def neutral_plan() -> Generator[None]:
+    """The shipped flat-rate plan with every dispatch weight 1.0, so only the policy weight can order cells."""
+    raw = json.loads(_ECONOMICS.read_text(encoding="utf-8"))
+    plan = next(row for row in raw["profiles"] if row["profile_id"] == _PLAN_ID)
+    plan["dispatch_weights"]["by_model_prefix"] = {"claude-sonnet": 1.0}
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "usage_economics.v1.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with patch.object(verbs, "_USAGE_ECONOMICS_PROFILE_PATH", path):
+            yield
+
+
+def priced_cell(model: str, effort: str, *, score: float, usd: float) -> dict[str, Any]:
+    stamp = _PLAN_NOW.isoformat()
+    record = cell(model, runtime="claude_code")
+    record.update({"effort": effort, "capability_score": score, "cost_per_task_usd": usd, "relative_cost_multiplier": round(usd * 100, 2), "measured_at": stamp, "accepted_at": stamp})
+    return record
+
+
+def sonnet_opus_state() -> RealShapeState:
+    state = fixture()
+    for record in (priced_cell("claude-sonnet-5-5", "xhigh", score=50, usd=4.09), priced_cell("claude-sonnet-5-5", "max", score=55, usd=10.02), priced_cell("claude-opus-5-5", "xhigh", score=57, usd=6.05)):
+        state.write_state(NS, {"table": CELLS, "record": record})
+    return state
+
+
+def rule(state: RealShapeState, **params: Any) -> dict[str, Any]:
+    """One operator verb call with no defaults, so a weight-only rule can omit enabled."""
+    return policy.set_model_cells_enabled(typed(state), {"reason": "fixture", "expected_updated_at": policy.read_policy(typed(state)).updated_at, **params}, actor="ases-operator")
+
+
+def pick(state: RealShapeState, objective: str = "metered_usd", **params: Any) -> dict[str, Any]:
+    runtime = "claude_code" if objective == "allowance_weighted" else None
+    if objective == "allowance_weighted":
+        return verbs.select_dispatch_tier(typed(state), {"required_score": 55, "runtime": runtime, "max_staleness_hours": 72, **params}, now=_PLAN_NOW)
+    raw = json.loads(_ECONOMICS.read_text(encoding="utf-8"))
+    if objective == "metered_usd":
+        raw["profiles"] = [profile for profile in raw["profiles"] if profile.get("kind") != "flat_rate_quota"]
+    else:
+        for profile in raw["profiles"]:
+            if profile.get("kind") == "flat_rate_quota":
+                profile.pop("dispatch_weights", None)
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "usage_economics.v1.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with patch.object(verbs, "_USAGE_ECONOMICS_PROFILE_PATH", path):
+            return verbs.select_dispatch_tier(typed(state), {"required_score": 55, "runtime": runtime, "max_staleness_hours": 72, **params}, now=_PLAN_NOW)
+
+
+def read_cell(state: RealShapeState, model: str, effort: str) -> dict[str, Any]:
+    return next(row for row in policy.read_model_cell_policy(typed(state))["cells"] if row["model"] == model and row["effort"] == effort)
 
 
 class CellEnablementSmoke(unittest.TestCase):
@@ -146,12 +213,13 @@ class CellEnablementSmoke(unittest.TestCase):
         history = store.read_cell_history(typed(state), runtime="codex", model="cheap", effort="medium", limit=100)
         self.assertTrue(any(row["metric"] == "enabled_change" for row in history["observations"]))
 
-    def test_pin_and_receipt_replay(self) -> None:
+    def test_pin_and_selection_follow_enablement(self) -> None:
         state = fixture()
         for model in ("cheap", "permitted"):
             state.write_state(NS, {"table": CELLS, "record": cell(model)})
-        receipt = selected(state)["selection_receipt"]
+        self.assertEqual(selected(state)["selected"]["model"], "cheap", "ENABLED_CELL_SELECTED")
         change(state, selector={"model": "cheap"}, enabled=False)
+        self.assertNotEqual(selected(state)["selected"]["model"], "cheap", "DISABLED_CELL_NOT_SELECTED")
         catalog = selection_catalog(state.rows(NS, CELLS))
         try:
             select_tier(catalog, required_score=40, objective="metered_usd", now=datetime.now(UTC), max_age=timedelta(days=7), pin=Pin("codex", "cheap", "medium"))
@@ -159,8 +227,6 @@ class CellEnablementSmoke(unittest.TestCase):
             self.assertEqual(exc.code, "pin_cell_unavailable", "DISABLED_PIN_REFUSED")
         else:
             self.fail("DISABLED_PIN_REFUSED")
-        with self.assertRaises(CatalogError, msg="DISABLED_RECEIPT_REPLAY_REFUSED"):
-            verbs.verify_selection_receipt(typed(state), difficulty_score=40, selection_receipt=receipt, dispatch_kind=None, scope_tags=(), agent_runtime="codex", model="cheap", effort="medium")
         change(state, action="clear")
         self.assertEqual(selected(state)["selected"]["model"], "cheap", "REENABLE_RESTORES_ELIGIBILITY")
 
@@ -229,15 +295,27 @@ class CellEnablementSmoke(unittest.TestCase):
         state = fixture()
         plugin = object.__new__(OperatorPlugin)
         plugin.fixture_state = typed(state)
-        args = {"selector": {}, "enabled": True, "expected_updated_at": None, "reason": "fixture"}
+        args: dict[str, Any] = {"selector": {}, "enabled": True, "expected_updated_at": None, "reason": "fixture"}
         answer = plugin.set_model_cells_enabled(args, {"caller_attribution_instance_id": "agi-operator"})
         self.assertEqual(answer["action_status"], "completed", "OPERATOR_SET_ACCEPTED")
         args["expected_updated_at"] = policy.read_policy(typed(state)).updated_at
         before = deepcopy(state._rows)
-        for context, spoof in (({}, {}), ({"caller_attribution_instance_id": "agi-worker"}, {}), ({"caller_attribution_instance_id": "agi-worker"}, {"actor": "ases-operator"}), ({"caller_attribution_instance_id": "agi-operator"}, {"actor": "ases-operator"})):
+        worker = {"caller_attribution_instance_id": "agi-worker"}  # derived identity of a session that does not hold Operator
+        # Refused: no derived identity, and every attempt to supply an actor. Holding Operator is not a condition.
+        for context, spoof in (({}, {}), (worker, {"actor": "ases-operator"}), (worker, {"agent_instance_id": "agi-operator"}), ({"caller_attribution_instance_id": "agi-operator"}, {"actor": "ases-operator"})):
             result = plugin.set_model_cells_enabled({**args, **spoof}, context)
-            self.assertEqual(result["action_status"], "failed", "SPOOFED_OPERATOR_REFUSED")
-            self.assertEqual(state._rows, before, "SPOOFED_OPERATOR_REFUSED")
+            self.assertEqual(result["action_status"], "failed", "UNIDENTIFIED_OR_SPOOFED_REFUSED")
+            self.assertEqual(state._rows, before, "UNIDENTIFIED_OR_SPOOFED_REFUSED")
+        # A session that does not hold Operator is held to the same stale-premise refusal and writes nothing.
+        stale = plugin.set_model_cells_enabled({**args, "expected_updated_at": "2000-01-01T00:00:00+00:00"}, worker)
+        self.assertEqual(stale["action_status"], "failed", "NONOPERATOR_STALE_REFUSED")
+        self.assertEqual(state._rows, before, "NONOPERATOR_STALE_WRITES_NOTHING")
+        # Pass path: that session may set the value; the immutable history names it and its reason.
+        applied = plugin.set_model_cells_enabled({**args, "selector": {"model_family_prefix": "claude-sonnet"}, "enabled": False, "reason": "nonoperator session applying the user's order"}, worker)
+        self.assertEqual(applied["action_status"], "completed", "NONOPERATOR_SET_ACCEPTED")
+        snapshot = json.loads(applied["data"]["history"][0]["note"])
+        self.assertEqual((snapshot["actor"], snapshot["reason"]), ("ases-worker", "nonoperator session applying the user's order"), "HISTORY_NAMES_THE_NONOPERATOR_SESSION")
+        self.assertEqual(json.loads(applied["data"]["history"][1]["note"])["actor"], "ases-operator", "EARLIER_WRITER_STAYS_IN_HISTORY")
 
     def test_quota_telemetry_is_independent(self) -> None:
         state = fixture()
@@ -279,6 +357,316 @@ class CellEnablementSmoke(unittest.TestCase):
         with self.assertRaises(CatalogError) as caught:
             policy.read_policy(typed(state))
         self.assertEqual(caught.exception.code, "policy_invalid")
+
+
+class PreferenceWeightSmoke(unittest.TestCase):
+    """Operator preference weight on cell policy rules: ordering, reporting, lifecycle and compatibility, offline."""
+
+    def test_weight_orders_selection_under_every_objective(self) -> None:
+        unweighted, weighted = sonnet_opus_state(), sonnet_opus_state()
+        change(weighted, selector=_SONNET, weight=0.5)
+        with neutral_plan():
+            for objective in _OBJECTIVES:
+                with self.subTest(objective=objective):
+                    self.assertEqual(pick(unweighted, objective)["selected"]["model"], "claude-opus-5-5", f"NO_WEIGHT_{objective}_PICKS_THE_CHEAPER_OPUS")
+                    self.assertEqual(pick(weighted, objective)["selected"]["model"], "claude-sonnet-5-5", f"WEIGHT_{objective}_PICKS_THE_PREFERRED_SONNET")
+            self.assertEqual(pick(weighted, "metered_usd", runtime="claude_code")["selected"]["model"], "claude-sonnet-5-5", "WEIGHT_APPLIES_UNDER_A_RUNTIME_CONSTRAINT")
+        self.assertEqual(pick(weighted, required_score=57)["selected"]["model"], "claude-opus-5-5", "WEIGHT_NEVER_LIFTS_A_CELL_OVER_THE_BAR")
+
+    def test_weight_orders_but_never_changes_reported_cost(self) -> None:
+        state = sonnet_opus_state()
+        rule_id = change(state, selector=_SONNET, weight=0.5)["rule_id"]
+        answer = pick(state)
+        self.assertEqual(answer["selected"]["model"], "claude-sonnet-5-5")
+        catalog_relative = read_cell(sonnet_opus_state(), "claude-sonnet-5-5", "max")["relative_cost_multiplier"]
+        self.assertEqual(answer["selected"]["cost_per_task_usd"], 10.02, "REPORTED_USD_IS_THE_CATALOG_PRICE")
+        self.assertEqual(answer["selected"]["relative_cost_multiplier"], catalog_relative, "REPORTED_RELATIVE_IS_THE_CATALOG_VALUE")
+        self.assertEqual(answer["preference"], {"weight": 0.5, "rule_id": rule_id}, "APPLIED_WEIGHT_AND_RULE_REPORTED")
+        self.assertAlmostEqual(answer["ladder"][0]["cost_delta"], 10.02 - 4.09, msg="LADDER_COST_DELTA_IS_UNWEIGHTED")
+        self.assertEqual([row["model"] for row in answer["frontier"]], ["claude-opus-5-5"], "FRONTIER_USES_TRUE_COST")
+        self.assertEqual([(row["weaker"]["model"], row["stronger"]["model"]) for row in answer["dominated"]], [("claude-sonnet-5-5", "claude-opus-5-5")], "DOMINATION_USES_TRUE_COST")
+        pinned = pick(state, pin={"runtime": "claude_code", "model": "claude-sonnet-5-5", "effort": "max"}, pin_basis="fixture")
+        self.assertAlmostEqual(pinned["pin_cost_delta"], 10.02 - 6.05, msg="PIN_COST_DELTA_IS_UNWEIGHTED")
+
+    def test_ordering_cost_scales_and_cost_does_not(self) -> None:
+        weighted = CapabilityCell("claude_code", "claude-sonnet-5-5", "max", 55, 10.02, 1002.0, _PLAN_NOW, "accepted", plan_weight=0.5, preference_weight=0.5, preference_rule="rule-x")
+        true_costs: tuple[tuple[BillingObjective, float], ...] = (("metered_usd", 10.02), ("relative", 1002.0), ("allowance_weighted", 501.0))
+        for objective, true_cost in true_costs:
+            self.assertAlmostEqual(weighted.cost(objective) or 0.0, true_cost, msg=f"COST_{objective}_IS_THE_TRUE_COST")
+            self.assertAlmostEqual(weighted.ordering_cost(objective) or 0.0, true_cost * 0.5, msg=f"ORDERING_COST_{objective}_IS_WEIGHTED")
+        unpriced = CapabilityCell("claude_code", "claude-sonnet-5-5", "max", 55, None, None, _PLAN_NOW, "accepted", preference_weight=0.5)
+        self.assertIsNone(unpriced.ordering_cost("metered_usd"), "UNPRICED_STAYS_UNPRICED")
+
+    def test_weight_lifecycle_set_read_correct_clear(self) -> None:
+        state = sonnet_opus_state()
+        created = rule(state, selector=_SONNET, weight=0.5)
+        rule_id = created["rule_id"]
+        self.assertEqual(created["rules"], [{"id": rule_id, "selector": _SONNET, "weight": 0.5, "kind": None, "words": "fixture", "ends_at": None, "lapsed": False}], "WEIGHT_ONLY_RULE_STORES_NO_ENABLED_KEY")
+        self.assertEqual(json.loads(created["history"][0]["note"])["next_rules"][0]["weight"], 0.5, "AUDIT_SNAPSHOT_KEEPS_THE_WEIGHT")
+        sonnet, opus = read_cell(state, "claude-sonnet-5-5", "max"), read_cell(state, "claude-opus-5-5", "xhigh")
+        self.assertEqual((sonnet["preference_weight"], sonnet["preference_provenance"], sonnet["enabled"]), (0.5, rule_id, True), "READBACK_SHOWS_THE_APPLIED_WEIGHT")
+        self.assertEqual((opus["preference_weight"], opus["preference_provenance"]), (1.0, "default_weight"), "READBACK_DEFAULT_WEIGHT")
+        self.assertEqual(pick(state)["selected"]["model"], "claude-sonnet-5-5")
+        corrected = rule(state, action="correct", rule_id=rule_id, selector=_SONNET, weight=0.9)
+        self.assertEqual(corrected["rules"], [{"id": rule_id, "selector": _SONNET, "weight": 0.9, "kind": None, "words": "fixture", "ends_at": None, "lapsed": False}], "WEIGHT_CORRECTED_IN_PLACE")
+        self.assertEqual(pick(state)["selected"]["model"], "claude-opus-5-5", "CORRECTED_WEIGHT_NO_LONGER_PREFERS_SONNET")
+        before = deepcopy(state._rows)
+        with self.assertRaises(CatalogError, msg="CORRECTION_KEEPING_NEITHER_ENABLED_NOR_WEIGHT_REFUSED") as caught:
+            rule(state, action="correct", rule_id=rule_id, selector=_SONNET)
+        self.assertEqual(caught.exception.code, "parameter_invalid")
+        self.assertEqual(state._rows, before, "REFUSED_CORRECTION_WRITES_NOTHING")
+        both = rule(state, action="correct", rule_id=rule_id, selector=_SONNET, enabled=True, weight=0.5)
+        self.assertEqual(both["rules"], [{"id": rule_id, "selector": _SONNET, "enabled": True, "weight": 0.5, "kind": None, "words": "fixture", "ends_at": None, "lapsed": False}], "ENABLED_AND_WEIGHT_TOGETHER")
+        cleared = rule(state, action="correct", rule_id=rule_id, selector=_SONNET, enabled=True)
+        self.assertEqual(cleared["rules"], [{"id": rule_id, "selector": _SONNET, "enabled": True, "kind": None, "words": "fixture", "ends_at": None, "lapsed": False}], "CORRECT_WITHOUT_WEIGHT_CLEARS_IT")
+        self.assertEqual(pick(state)["selected"]["model"], "claude-opus-5-5", "CLEARED_WEIGHT_RESTORES_COST_ORDER")
+        lone = rule(state, selector=_SONNET, weight=0.5)["rule_id"]
+        self.assertEqual(pick(state)["selected"]["model"], "claude-sonnet-5-5")
+        retired = rule(state, action="retire", rule_id=lone)
+        self.assertNotIn(lone, [row["id"] for row in retired["rules"]], "RETIRE_CLEARS_A_WEIGHT_ONLY_RULE")
+        self.assertEqual(pick(state)["selected"]["model"], "claude-opus-5-5", "RETIRED_WEIGHT_RESTORES_COST_ORDER")
+        premise = policy.read_policy(typed(state)).updated_at
+        rule(state, selector=_SONNET, weight=0.5)
+        before = deepcopy(state._rows)
+        with self.assertRaises(CatalogError, msg="STALE_WEIGHT_WRITE_REFUSED") as caught:
+            rule(state, selector=_SONNET, weight=0.4, expected_updated_at=premise)
+        self.assertEqual(caught.exception.code, "stale_policy_state")
+        self.assertEqual(state._rows, before, "STALE_WEIGHT_WRITES_NOTHING")
+
+    def test_weight_never_enables_a_disabled_cell_and_later_rules_override(self) -> None:
+        state = sonnet_opus_state()
+        off = change(state, selector={"model_family_prefix": "claude-opus"}, enabled=False)["rule_id"]
+        tiny = rule(state, selector={"model_family_prefix": "claude-opus"}, weight=0.01)["rule_id"]
+        answer = pick(state)
+        self.assertEqual(answer["selected"]["model"], "claude-sonnet-5-5", "DISABLED_CELL_STAYS_OFF_UNDER_ANY_WEIGHT")
+        self.assertEqual(answer["excluded"]["operator_disabled"], 1)
+        opus = read_cell(state, "claude-opus-5-5", "xhigh")
+        self.assertEqual((opus["enabled"], opus["enabled_provenance"], opus["preference_weight"], opus["preference_provenance"]), (False, off, 0.01, tiny), "WEIGHT_RULE_LEAVES_ENABLEMENT_ALONE")
+        state = sonnet_opus_state()
+        broad = rule(state, selector=_SONNET, weight=0.5)["rule_id"]
+        narrow = rule(state, selector={"model": "claude-sonnet-5-5", "effort": "max"}, weight=2.0)["rule_id"]
+        change(state, selector=_SONNET, enabled=True)
+        top, low = read_cell(state, "claude-sonnet-5-5", "max"), read_cell(state, "claude-sonnet-5-5", "xhigh")
+        self.assertEqual((top["preference_weight"], top["preference_provenance"]), (2.0, narrow), "LATER_WEIGHT_RULE_OVERRIDES_EARLIER")
+        self.assertEqual(policy.preference(policy.read_policy(typed(state)), top), (2.0, narrow), "PREFERENCE_RESOLVES_LAST_MATCHING_WEIGHT_RULE")
+        self.assertEqual(policy.preference(policy.read_policy(typed(state)), {"model": "unmatched"}), (1.0, None), "PREFERENCE_DEFAULT_WITHOUT_A_MATCH")
+        self.assertEqual((low["preference_weight"], low["preference_provenance"]), (0.5, broad), "EARLIER_WEIGHT_STANDS_WHERE_LATER_DOES_NOT_MATCH")
+        self.assertEqual(pick(state)["selected"]["model"], "claude-opus-5-5", "WEIGHT_ABOVE_ONE_DISFAVOURS_A_CELL")
+
+    def test_policy_without_weights_reads_and_selects_as_before(self) -> None:
+        state = sonnet_opus_state()
+        change(state)
+        old = [{"id": "rule-old", "selector": _SONNET, "enabled": True}]
+        state.rows(NS, POLICY)[0]["rules"] = deepcopy(old)
+        self.assertEqual(policy.read_model_cell_policy(typed(state))["rules"], [{**old[0], "kind": None, "words": "no words were recorded for this rule", "ends_at": None, "lapsed": False}], "OLD_RULES_READ_BACK_UNCHANGED")
+        answer = pick(state)
+        self.assertEqual(answer["selected"]["model"], "claude-opus-5-5", "OLD_POLICY_SELECTS_BY_COST")
+        self.assertNotIn("preference", answer, "NO_WEIGHT_NO_PREFERENCE_FIELD")
+        self.assertEqual(set(answer["selected"]), _OLD_SELECTED_KEYS, "SELECTED_PAYLOAD_SHAPE_UNCHANGED")
+        weighted = sonnet_opus_state()
+        change(weighted, selector=_SONNET, weight=0.5)
+        self.assertEqual(set(pick(weighted)["selected"]), _OLD_SELECTED_KEYS, "SELECTED_SHAPE_UNCHANGED_UNDER_A_WEIGHT")
+
+    def test_invalid_weight_is_refused_and_writes_nothing(self) -> None:
+        state = sonnet_opus_state()
+        change(state)
+        before = deepcopy(state._rows)
+        for bad in (0, -0.5, float("nan"), float("inf"), True, "0.5", [0.5]):
+            with self.assertRaises(CatalogError, msg=f"BAD_WEIGHT_{bad!r}_REFUSED") as caught:
+                rule(state, selector=_SONNET, weight=bad)
+            self.assertEqual(caught.exception.code, "parameter_invalid")
+        with self.assertRaises(CatalogError, msg="RULE_WITH_NEITHER_ENABLED_NOR_WEIGHT_REFUSED") as caught:
+            rule(state, selector=_SONNET)
+        self.assertEqual(caught.exception.code, "parameter_invalid")
+        self.assertEqual(state._rows, before, "REFUSED_WEIGHT_WRITES_NOTHING")
+        for stored in ({"id": "r", "selector": {}, "weight": 0}, {"id": "r", "selector": {}, "weight": "x"}, {"id": "r", "selector": {}, "enabled": True, "weight": True}, {"id": "r", "selector": {}}):
+            state.rows(NS, POLICY)[0]["rules"] = [stored]
+            with self.assertRaises(CatalogError, msg=f"MALFORMED_STORED_RULE_{stored}") as caught:
+                policy.read_policy(typed(state))
+            self.assertEqual(caught.exception.code, "policy_invalid")
+
+    def test_unreadable_policy_degrades_to_cost_order_with_a_notice(self) -> None:
+        state = sonnet_opus_state()
+        change(state, selector=_SONNET, weight=0.5)
+        state.rows(NS, POLICY)[0]["rules"] = [{"id": "r", "selector": {}, "weight": 0}]
+        answer = pick(state)
+        self.assertEqual(answer["selected"]["model"], "claude-opus-5-5", "UNREADABLE_POLICY_DOES_NOT_STOP_DISPATCH")
+        self.assertTrue(any("preference weights were not applied" in line for line in answer["warnings"]), "UNREADABLE_POLICY_SAYS_SO")
+        self.assertNotIn("preference", answer)
+
+    def test_only_discards_weight_rules_and_says_so(self) -> None:
+        state = sonnet_opus_state()
+        weighed = rule(state, selector=_SONNET, weight=0.5)["rule_id"]
+        answer = rule(state, selector={"model_family_prefix": "claude-opus"}, enabled=True, only=True)
+        self.assertEqual(len(answer["rules"]), 2, "ONLY_REPLACES_EVERY_RULE")
+        self.assertTrue(any(weighed in line for line in answer["warnings"]), "ONLY_NAMES_THE_WEIGHT_RULES_IT_REPLACED")
+        self.assertIn(weighed, answer["history"][0]["note"], "ONLY_KEEPS_THE_REPLACED_WEIGHT_IN_HISTORY")
+
+    def test_selection_follows_the_live_weight(self) -> None:
+        state = sonnet_opus_state()
+        rule_id = change(state, selector=_SONNET, weight=0.5)["rule_id"]
+        self.assertEqual(pick(state)["selected"]["model"], "claude-sonnet-5-5", "WEIGHTED_SELECTION_CHOSES_SONNET")
+        rule(state, action="retire", rule_id=rule_id)
+        self.assertEqual(pick(state)["selected"]["model"], "claude-opus-5-5", "RETIRING_WEIGHT_CHANGES_SELECTION")
+
+
+class RuleKindWordsEndSmoke(unittest.TestCase):
+    """Exercise rule behavior through the real state-interface shape.
+
+    These cases use the same state interface shape as policy writes, rather
+    than replacing the policy reader with a matching stub. That keeps the
+    audit rows, compare-and-set premise and cell updates in the exercised path.
+    The planning rule has an exact kind, not an extra selector dimension:
+    session limit callers share the selector vocabulary and have no kind.
+    Each enabled and preference opinion is independent and ordered. An
+    explicit no-kind request consequently retains the original global policy.
+    A cell's stored flag is a write-time snapshot, while effective readback
+    and provenance are evaluated together after the end boundary has passed.
+    The fixed clock in the lapse case makes both sides of that boundary
+    observable without sleeping or depending on host scheduling.
+    Legacy words are recovered from policy-change snapshots, newest first;
+    unrelated later edits cannot replace the rule's own explanation. More
+    than one history page distinguishes a full search from a bounded view.
+    Invalid inputs are checked against a copy of all state, including audit
+    and cell tables, so a refusal that partially writes does not pass.
+    Finally, the public wrapper exercises server-derived caller attribution
+    and the process metadata, not just the implementation function.
+    """
+
+    def test_rule_keeps_kind_words_and_end_and_read_shows_them(self) -> None:
+        state = fixture()
+        end = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        result = change(state, kind="planning", words="my words", ends_at=end)
+        row = result["rules"][0]
+        self.assertEqual(
+            (row.get("kind"), row.get("words"), row.get("ends_at"), row.get("lapsed")),
+            ("planning", "my words", end, False),
+            "RULE_FIELDS_READ_BACK",
+        )
+
+    def test_a_rule_with_a_kind_applies_only_to_that_kind(self) -> None:
+        state = fixture()
+        change(state, enabled=False, weight=2.0)
+        change(state, kind="planning", enabled=True, weight=0.5)
+        import inspect
+
+        self.assertIn("kind", inspect.signature(policy.decision).parameters, "KIND_MATCH")
+        current = policy.read_policy(typed(state))
+        for kind, expected in (
+            ("planning", (True, 0.5)),
+            ("author", (False, 2.0)),
+            (None, (False, 2.0)),
+        ):
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    (
+                        policy.decision(current, cell(), kind)[0],
+                        policy.preference(current, cell(), kind)[0],
+                    ),
+                    expected,
+                    "KIND_MATCH",
+                )
+
+    def test_a_rule_past_its_end_does_not_apply_and_reads_lapsed(self) -> None:
+        state = fixture()
+        state.write_state(NS, {"table": CELLS, "record": cell()})
+        end = datetime.now(UTC) + timedelta(days=1)
+        change(state, enabled=False, ends_at=end.isoformat())
+        self.assertTrue(hasattr(policy, "_now"), "AFTER_END")
+        current = policy.read_policy(typed(state))
+        self.assertFalse(policy.decision(current, cell(), None, end - timedelta(seconds=1))[0], "BEFORE_END")
+        with patch.object(policy, "_now", return_value=end + timedelta(seconds=1)):
+            result = policy.read_model_cell_policy(typed(state))
+        row = result["cells"][0]
+        self.assertEqual(
+            (
+                row["enabled"],
+                row["stored_enabled"],
+                row["enabled_provenance"],
+                result["rules"][0]["lapsed"],
+            ),
+            (True, False, "default_on", True),
+            "AFTER_END",
+        )
+        past = change(state, enabled=False, ends_at=(datetime.now(UTC) - timedelta(days=1)).isoformat())
+        self.assertTrue(any("end" in warning.lower() for warning in past["warnings"]), "PAST_END_WARNING")
+
+    def test_a_kind_rule_is_not_stored_on_the_cells(self) -> None:
+        state = fixture()
+        state.write_state(NS, {"table": CELLS, "record": cell("fable")})
+        change(state, enabled=False)
+        change(state, selector={"model": "fable"}, kind="planning", enabled=True)
+        self.assertFalse(model_cell(state, "fable")["enabled"], "NO_KIND_STORAGE")
+        import inspect
+
+        self.assertIn("kind", inspect.signature(policy.decision).parameters, "KIND_ENABLED")
+        self.assertTrue(
+            policy.decision(policy.read_policy(typed(state)), cell("fable"), "planning")[0],
+            "KIND_ENABLED",
+        )
+
+    def test_old_rules_read_with_no_kind_no_end_and_the_history_reason_as_words(self) -> None:
+        state = fixture()
+        created = change(state, reason="introduction")
+        identifier = created["rule_id"]
+        change(state, action="correct", rule_id=identifier, enabled=False, reason="latest change")
+        stored = state.rows(NS, POLICY)[0]["rules"][0]
+        stored.pop("words", None)
+        for i in range(105):
+            change(state, selector={"model": f"other-{i}"}, reason="unrelated")
+        result = policy.read_model_cell_policy(typed(state))
+        old = next(row for row in result["rules"] if row["id"] == identifier)
+        self.assertEqual(
+            (old.get("kind"), old.get("ends_at"), old.get("words")),
+            (None, None, "latest change"),
+            "LEGACY_HISTORY_PAGINATES",
+        )
+        stored = state.rows(NS, POLICY)[0]["rules"][0]
+        stored["id"] = "no-history"
+        old = next(row for row in policy.read_model_cell_policy(typed(state))["rules"] if row["id"] == "no-history")
+        self.assertEqual(old["words"], "no words were recorded for this rule", "EXHAUSTED_HISTORY")
+
+    def test_a_bad_kind_words_or_end_is_refused_and_writes_nothing(self) -> None:
+        state = fixture()
+        policy.read_policy(typed(state))  # Materialize the fake table before comparing writes.
+        before = deepcopy(state._rows)
+        for key, value in (
+            ("kind", " "),
+            ("kind", 3),
+            ("words", ""),
+            ("words", 3),
+            ("ends_at", "bad"),
+            ("ends_at", "2026-01-01T00:00:00"),
+        ):
+            with (
+                self.subTest(key=key, value=value),
+                self.assertRaises(CatalogError, msg="INVALID_FIELD_REFUSED"),
+            ):
+                change(state, **{key: value})
+            self.assertEqual(state._rows, before, "INVALID_FIELD_WRITES_NOTHING")
+
+    def test_words_default_to_the_reason_and_the_surface_accepts_the_new_keys(self) -> None:
+        state = fixture()
+        plugin = object.__new__(OperatorPlugin)
+        plugin.fixture_state = typed(state)
+        end = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        answer = plugin.set_model_cells_enabled(
+            {
+                "selector": {},
+                "enabled": True,
+                "expected_updated_at": None,
+                "reason": "because",
+                "kind": "planning",
+                "ends_at": end,
+            },
+            {"caller_attribution_instance_id": "agi-operator"},
+        )
+        self.assertEqual(answer["data"]["rules"][0].get("words"), "because", "REASON_DEFAULTS_WORDS")
+        metadata = AgentMessagingPlugin.set_model_cells_enabled
+        self.assertTrue(
+            all(key in str(getattr(metadata, "_platform_process_metadata", metadata.__dict__)) for key in ("kind", "words", "ends_at")),
+            "SURFACE_KEYS",
+        )
 
 
 if __name__ == "__main__":

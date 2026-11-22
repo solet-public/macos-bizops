@@ -11,37 +11,26 @@ Verbs:
   operator-confirmation citation are supplied. Per Architect Q1 ruling
   (2026-05-30) it is **NOT** a startup-blocking gate: it runs only when an
   operator or CI calls it via ``process_call``.
-* ``plugin::platform_health_plugin::check_host_disk_headroom`` — the
-  discoverable EDGE host-disk check, for direct calls.
-* ``plugin::platform_health_plugin::check_host_disk_headroom_cron`` — the
-  EDGE_SINK cron target (``is_discoverable=False``, no processor
-  customizations). It hands one check to a single-slot background thread and
-  returns at once (``started`` / ``already_running`` / ``inactive``), so the
-  check's filesystem stat, state reads/writes and alert delivery never run on
-  the action-queue loop (the fast-return contract).
-* ``plugin::platform_health_plugin::ensure_host_disk_guard_schedule`` — the
-  idempotent install primitive for that cron (``is_discoverable=False``).
 * ``plugin::platform_health_plugin::check_model_capability_catalog`` — runs the
-  model capability catalog refresh once and alerts the configured role when the
-  catalog stops renewing (``is_discoverable=False``: it reaches the network).
+  model capability catalog refresh once, classifies the catalog, and records and
+  logs a severity change; it sends nothing to any session
+  (``is_discoverable=False``: it reaches the network).
 * ``plugin::platform_health_plugin::check_model_capability_catalog_cron`` — its
-  daily EDGE_SINK cron target, same background-thread shape as the host-disk one.
+  daily EDGE_SINK cron target, dispatched on a background thread.
 * ``plugin::platform_health_plugin::ensure_model_capability_guard_schedule`` — the
-  idempotent install primitive for that cron (``is_discoverable=False``). Unlike
-  the host-disk installer it does not require ``alert_role``: the refresh itself
-  is the point, so a cron without an alert target is still worth installing.
+  idempotent install primitive for that cron (``is_discoverable=False``). It needs
+  no configuration, so the cron installs on any deployment.
 
 ``scheduling_service`` is resolved at call time, never at readiness: it lives
 on the orchestrator's ``service_manager``, which startup creates only at its
 ``init_service_manager`` step, AFTER every plugin's ``prepare_for_readiness``
 and ``start_services`` have run. So this plugin comes up ready without it,
 and nothing installs the cron from a lifecycle method. The install runs as a
-starting action (``ensure_host_disk_guard_schedule``, the ``session_ledger``
+starting action (``ensure_model_capability_guard_schedule``, the ``session_ledger``
 ``ensure_periodic_poll_schedule`` precedent) in the deployment's own runtime
 ``config/starting_action_definitions.json``, which the orchestrator submits
-after startup completes. No shipped profile template carries it: the guard
-needs a deployment-local ``alert_role`` (decisions ``dec_a975b80b``,
-``dec_02f96c32``). The cron fire honours ``set_active``: the inactive colour
+after startup completes. No shipped profile template carries it; a deployment
+adds the starting action itself. The cron fire honours ``set_active``: the inactive colour
 of a blue-green pair does nothing on a fire.
 """
 
@@ -62,7 +51,6 @@ from ananta.core.actions.action_metadata import (
     ReturnValueSchema,
     platform_process,
 )
-from ananta.core.config.config_manager import get_config
 from ananta.core.domain.enums import ActionStatus, ProcessorPolicyCategory
 from ananta.core.plugins.plugin_base import PluginBase
 from ananta.interfaces.edge_process_provider import (
@@ -73,30 +61,6 @@ from ananta.interfaces.edge_process_provider import (
 from platform_health_plugin.constants import (
     PLUGIN_NAME,
     SWEEP_PROCESS_NAME,
-)
-from platform_health_plugin.host_disk_guard import (
-    CHECK_PROCESS_NAME,
-    DEFAULT_CRITICAL_FLOOR_BYTES,
-    DEFAULT_SCHEDULE_CRON,
-    DEFAULT_SCHEDULE_TAG,
-    DEFAULT_WARNING_FLOOR_BYTES,
-    ENSURE_SCHEDULE_PROCESS_NAME,
-    HostDiskGuardConfig,
-)
-from platform_health_plugin.host_disk_guard import (
-    check_host_disk_headroom as _check_host_disk_headroom,
-)
-from platform_health_plugin.host_disk_guard import (
-    ensure_host_disk_guard_schedule as _ensure_host_disk_guard_schedule,
-)
-from platform_health_plugin.main_seat_heartbeat import (
-    ensure_schedule as _ensure_seat_heartbeat_schedule,
-)
-from platform_health_plugin.main_seat_heartbeat import (
-    maintain_marker as _maintain_seat_heartbeat_marker,
-)
-from platform_health_plugin.main_seat_heartbeat import (
-    run_heartbeat as _run_seat_heartbeat,
 )
 from platform_health_plugin.model_capability_guard import (
     CHECK_PROCESS_NAME as MODEL_CAPABILITY_CHECK_PROCESS_NAME,
@@ -136,9 +100,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         self._active = True
         # Single slot for the cron-fired check: a fire that lands while the
         # previous check is still running is a no-op, never a second check.
-        self._check_lock = threading.Lock()
         self._catalog_check_lock = threading.Lock()
-        self._seat_heartbeat_lock = threading.Lock()
 
     def prepare_for_readiness(self) -> None:
         if self.orchestrator_ref is None:
@@ -162,33 +124,11 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
 
     def set_active(self, active: bool) -> None:
         self._active = active
-        self.logger.info("%s host-disk cron %s", self.name, "active" if active else "inactive")
-
-    def _dispatch_check_in_background(self, state: dict[str, Any]) -> str:
-        """Hand one headroom check to a background thread and return at once
-        (``fleet_maintenance_plugin`` ``_dispatch_in_background`` precedent):
-        the check's stat, state reads/writes and alert delivery run off the
-        action-queue loop."""
-        if not self._active:
-            return "inactive"
-        if not self._check_lock.acquire(blocking=False):
-            return "already_running"
-
-        def body() -> None:
-            try:
-                self._run_headroom_check({}, state)
-            except Exception:  # noqa: BLE001 — logged at ERROR with the traceback, never swallowed silently
-                self.logger.exception("%s host-disk check failed", self.name)
-            finally:
-                self._check_lock.release()
-
-        threading.Thread(target=body, name="host-disk-headroom-check", daemon=True).start()
-        return "started"
 
     def _dispatch_catalog_check_in_background(self, state: dict[str, Any]) -> str:
         """Hand one catalog refresh + check to a background thread and return
-        at once: the refresh's network fetches, state reads/writes and alert
-        delivery run off the action-queue loop. A fire landing while the
+        at once: the refresh's network fetches and state reads/writes run off
+        the action-queue loop. A fire landing while the
         previous one is still running is a no-op."""
         if not self._active:
             return "inactive"
@@ -209,7 +149,7 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
     def _run_catalog_check(self, state: dict[str, Any]) -> dict[str, Any]:
         if self.orchestrator_ref is None:
             raise RuntimeError(f"{self.name}: orchestrator_ref unavailable; cannot refresh the catalog")
-        config = ModelCapabilityGuardConfig(alert_role=_configured_alert_role())
+        config = ModelCapabilityGuardConfig()
         return _run_model_capability_guard(self.orchestrator_ref, config=config, state=state)
 
     def _require_scheduling_service(self) -> Any:
@@ -221,28 +161,12 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         service = self.orchestrator_ref.get_service("scheduling_service")
         if service is None:
             raise RuntimeError(
-                f"{self.name}: scheduling_service is not available yet -- it exists only after startup's init_service_manager step; run ensure_host_disk_guard_schedule as a starting action or later, never from a plugin lifecycle method",
+                f"{self.name}: scheduling_service is not available yet -- it exists only after startup's init_service_manager step; run ensure_model_capability_guard_schedule as a starting action or later, never from a plugin lifecycle method",
             )
         return service
 
-    def _run_headroom_check(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        if self.orchestrator_ref is None:
-            raise RuntimeError(f"{self.name}: orchestrator_ref unavailable; cannot dispatch an alert")
-        config = HostDiskGuardConfig(
-            path=str(params.get("path") or HostDiskGuardConfig().path),
-            warning_floor_bytes=int(params.get("warning_floor_bytes") or DEFAULT_WARNING_FLOOR_BYTES),
-            critical_floor_bytes=int(params.get("critical_floor_bytes") or DEFAULT_CRITICAL_FLOOR_BYTES),
-            alert_role=_resolve_alert_role(params),
-        )
-        return _check_host_disk_headroom(self.orchestrator_ref, config=config, state=state)
-
     def get_edge_process_definitions(self) -> dict[str, EdgeProcessDefinition]:
         return {
-            "ensure_main_seat_heartbeat_schedule": EdgeProcessDefinition(
-                name="ensure_main_seat_heartbeat_schedule",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(result_type="seat_heartbeat_schedule_result"),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
-            ),
             SWEEP_PROCESS_NAME: EdgeProcessDefinition(
                 name=SWEEP_PROCESS_NAME,
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
@@ -250,24 +174,6 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
                 ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
-                ),
-            ),
-            CHECK_PROCESS_NAME: EdgeProcessDefinition(
-                name=CHECK_PROCESS_NAME,
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                    result_type="host_disk_headroom_result",
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=False,
-                ),
-            ),
-            ENSURE_SCHEDULE_PROCESS_NAME: EdgeProcessDefinition(
-                name=ENSURE_SCHEDULE_PROCESS_NAME,
-                result_processor_template_customizations=MergeResultProcessorCustomizations(
-                    result_type="host_disk_guard_schedule_ensure_result",
-                ),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True,
                 ),
             ),
             MODEL_CAPABILITY_CHECK_PROCESS_NAME: EdgeProcessDefinition(
@@ -396,165 +302,19 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         }
 
     @platform_process(
-        name="check_host_disk_headroom",
-        context_handling=ContextHandling.NONE,
-        parameters={
-            "path": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=False,
-                description="Filesystem path to measure free space at. Default '/Users'.",
-            ),
-            "warning_floor_bytes": ParameterMetadata(
-                type=ParameterType.INTEGER,
-                required=False,
-                description=f"Below this many free bytes: WARNING. Default {DEFAULT_WARNING_FLOOR_BYTES} (100 GiB).",
-            ),
-            "critical_floor_bytes": ParameterMetadata(
-                type=ParameterType.INTEGER,
-                required=False,
-                description=f"Below this many free bytes: CRITICAL. Default {DEFAULT_CRITICAL_FLOOR_BYTES} (50 GiB).",
-            ),
-            "alert_role": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=False,
-                description=(
-                    "Durable role to peer_send_by_name on a severity transition. No baked-in default: falls back to this plugin's own config key 'alert_role' (plugin.yaml `config:` block); if that is also unset, the check still measures but cannot alert -- see alert_reason='alert_target_unconfigured' on the result."
-                ),
-            ),
-        },
-        output_type="object",
-        output_description="Host free-space headroom measurement and alert outcome.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Headroom status, the measurement, and whether an alert was dispatched.",
-            properties={
-                "status": ParameterMetadata(type=ParameterType.STRING, description="One of: ok, warning, critical."),
-                "free_bytes": ParameterMetadata(type=ParameterType.INTEGER, description="Measured free bytes at path."),
-                "path": ParameterMetadata(type=ParameterType.STRING, description="Path measured."),
-                "transitioned": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether status differs from the last status an alert was successfully delivered for (the durable marker) -- true on entering warning/critical AND on recovery."),
-                "alerted": ParameterMetadata(
-                    type=ParameterType.BOOLEAN, description="Whether the alert was confirmed DELIVERED TO A LIVE holder this call (queued_wake/queued_notification/queued_watcher). False on no transition, on a vacant/malformed role, or on queued_for_replay (persisted but nobody live received it)."
-                ),
-                "alert_role": ParameterMetadata(type=ParameterType.STRING, description="Role a transition was reported to, or null if there was no transition this call."),
-                "alert_reason": ParameterMetadata(type=ParameterType.STRING, description="Set when transitioned is true and alerted is false: why the alert was not confirmed delivered to a live holder."),
-            },
-        ),
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        result_processor_customizations=MergeResultProcessorCustomizations(
-            action_label="Host disk headroom check",
-            result_type="host_disk_headroom_result",
-            result_description="Free-space measurement against the WARNING/CRITICAL floors, and whether an operator alert fired.",
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
-    )
-    def check_host_disk_headroom(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        return _envelope(self._run_headroom_check(params, state))
-
-    # Literal ``name=``: the whole-tree gate resolves a cron target's
-    # processor_policy_category from the literal decorator name.
-    @platform_process(
-        name="check_host_disk_headroom_cron",
-        is_discoverable=False,
-        context_handling=ContextHandling.NONE,
-        parameters={},
-        output_type="object",
-        output_description="Whether this fire started a background host-disk headroom check.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Cron fire outcome.",
-            properties={
-                "dispatch": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="started | already_running | inactive",
-                ),
-            },
-        ),
-        processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
-    )
-    def check_host_disk_headroom_cron(
-        self,
-        params: dict[str, Any],  # noqa: ARG002 — required by @platform_process signature
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        outcome = self._dispatch_check_in_background(state)
-        self.logger.info("%s host-disk cron fire: %s", self.name, outcome)
-        return _envelope({"dispatch": outcome})
-
-    @platform_process(
-        name="ensure_host_disk_guard_schedule",
-        context_handling=ContextHandling.NONE,
-        is_discoverable=False,
-        parameters={
-            "cron_expression": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=False,
-                description=f"Cron expression (UTC). Default '{DEFAULT_SCHEDULE_CRON}' (every 10 minutes).",
-            ),
-            "tag": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=False,
-                description=f"Schedule tag, used for idempotent lookup. Default '{DEFAULT_SCHEDULE_TAG}'.",
-            ),
-        },
-        output_type="object",
-        output_description="Ensure result for the host-disk-guard cron.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Whether the cron was created or already present.",
-            properties={
-                "status": ParameterMetadata(type=ParameterType.STRING, description="One of: created, already_present, refused (no alert_role configured -- see reason)."),
-                "tag": ParameterMetadata(type=ParameterType.STRING, description="Schedule tag."),
-                "reason": ParameterMetadata(type=ParameterType.STRING, description="Set when status is refused: 'alert_target_unconfigured'."),
-            },
-        ),
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        result_processor_customizations=MergeResultProcessorCustomizations(
-            action_label="Ensure host disk guard schedule",
-            result_type="host_disk_guard_schedule_ensure_result",
-            result_description="Whether the host-disk-guard cron was just created or was already present.",
-        ),
-        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
-    )
-    def ensure_host_disk_guard_schedule(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002 — required by @platform_process signature
-    ) -> dict[str, Any]:
-        if "alert_role" in params:
-            # The cron fires with empty arguments, so every fire resolves the
-            # target from config alone. A call-time override here could only
-            # get an inert cron past the refusal below.
-            raise ValueError(
-                "alert_role is not a parameter of ensure_host_disk_guard_schedule; the installed cron alerts the platform_health_plugin config key 'alert_role'",
-            )
-        cron_expression = str(params.get("cron_expression") or DEFAULT_SCHEDULE_CRON)
-        tag = str(params.get("tag") or DEFAULT_SCHEDULE_TAG)
-        report = _ensure_host_disk_guard_schedule(
-            self._require_scheduling_service(),
-            alert_role=_configured_alert_role(),
-            cron_expression=cron_expression,
-            tag=tag,
-        )
-        return _envelope(report)
-
-    @platform_process(
         is_async=True,
         name="check_model_capability_catalog",
         is_discoverable=False,
         context_handling=ContextHandling.NONE,
         parameters={},
         output_type="object",
-        output_description="Model capability catalog refresh outcome, severity and alert outcome.",
+        output_description="Model capability catalog refresh outcome and severity.",
         return_value_schema=JOB_RETURN_SCHEMA,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         result_processor_customizations=MergeResultProcessorCustomizations(
             action_label="Model capability catalog check",
             result_type="model_capability_guard_result",
-            result_description="Catalog refresh outcome and renewal health, and whether an operator alert fired.",
+            result_description="Catalog refresh outcome and renewal health, and whether the severity changed on this call.",
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
     )
@@ -628,9 +388,9 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
 
     def admit_registered_operation(self, action_name: str, parameters: dict[str, Any], state: dict[str, Any]) -> dict[str, Any] | None:
         """Admit the whole guard installer; its scheduler dependency stays synchronous."""
-        if action_name not in ("ensure_model_capability_guard_schedule", "ensure_main_seat_heartbeat_schedule"):
+        if action_name != "ensure_model_capability_guard_schedule":
             return None
-        operation = self.ensure_main_seat_heartbeat_schedule if action_name == "ensure_main_seat_heartbeat_schedule" else self.ensure_model_capability_guard_schedule
+        operation = self.ensure_model_capability_guard_schedule
         context = dict(state)
         return self.submit_scheduler_operation(self, action_name, dict(parameters), context, lambda values: operation(values, context))
 
@@ -661,81 +421,6 @@ class PlatformHealthPlugin(PluginBase, EdgeProcessProvider):
         )
         return _envelope(report)
 
-    @platform_process(
-        name="check_main_seat_heartbeat_cron",
-        is_discoverable=False,
-        context_handling=ContextHandling.NONE,
-        processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
-        parameters={
-            "role": ParameterMetadata(type=ParameterType.STRING, required=False, description="Runtime seat role; supplied by the installed schedule."),
-            "operation": ParameterMetadata(type=ParameterType.STRING, required=False, description="observe (default), read, correct or clear; maintenance is operator-invoked."),
-            "record_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Historical marker record id for read."),
-            "expected_record_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Current marker identity for correction/clear."),
-            "reason": ParameterMetadata(type=ParameterType.STRING, required=False),
-            "tokens": ParameterMetadata(type=ParameterType.LIST, required=False),
-        },
-        output_type="object",
-        output_description="Prompt background dispatch or marker maintenance readback; never a model continuation.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Terminal dispatch outcome or marker maintenance readback.",
-            properties={
-                "dispatch": ParameterMetadata(type=ParameterType.STRING, required=False),
-                "marker": ParameterMetadata(type=ParameterType.OBJECT, required=False),
-                "found": ParameterMetadata(type=ParameterType.BOOLEAN, required=False),
-            },
-        ),
-    )
-    def check_main_seat_heartbeat_cron(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        if not self._active:
-            return _envelope({"dispatch": "inactive"})
-        if not self._seat_heartbeat_lock.acquire(blocking=False):
-            return _envelope({"dispatch": "already_running"})
-        operation = params.get("operation", "observe")
-        if operation != "observe":
-            try:
-                if self.orchestrator_ref is None:
-                    raise RuntimeError("heartbeat orchestrator unavailable")
-                return _envelope(_maintain_seat_heartbeat_marker(self.orchestrator_ref, params))
-            finally:
-                self._seat_heartbeat_lock.release()
-
-        def body() -> None:
-            try:
-                if self.orchestrator_ref is None:
-                    raise RuntimeError("heartbeat orchestrator unavailable")
-                _run_seat_heartbeat(self.orchestrator_ref, state=state, role=str(params.get("role") or ""))
-            except Exception:  # noqa: BLE001 -- never turn a failed tick into quiet
-                self.logger.exception("%s seat heartbeat failed", self.name)
-            finally:
-                self._seat_heartbeat_lock.release()
-
-        threading.Thread(target=body, name="seat-heartbeat-check", daemon=True).start()
-        return _envelope({"dispatch": "started"})
-
-    @platform_process(
-        name="ensure_main_seat_heartbeat_schedule",
-        is_async=True,
-        is_discoverable=False,
-        context_handling=ContextHandling.NONE,
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "role": ParameterMetadata(type=ParameterType.STRING, required=False, description="Runtime seat role for this installation."),
-            "prior_tag": ParameterMetadata(type=ParameterType.STRING, required=False, description="Deployment-specific predecessor schedule tag for migration."),
-            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="Advisory only: the scheduler has no conditional replacement verb."),
-        },
-        output_type="object",
-        output_description="Persisted installer admission; read the exact job for its result.",
-        return_value_schema=JOB_RETURN_SCHEMA,
-        result_processor_customizations=MergeResultProcessorCustomizations(result_type="seat_heartbeat_schedule_result"),
-        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
-    )
-    def ensure_main_seat_heartbeat_schedule_action(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        return cast("dict[str, Any]", self.admit_registered_operation("ensure_main_seat_heartbeat_schedule", params, state))
-
-    def ensure_main_seat_heartbeat_schedule(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002 -- process signature
-        return _envelope(_ensure_seat_heartbeat_schedule(self._require_scheduling_service(), role=str(params.get("role") or ""), prior_tag=params.get("prior_tag"), expected_revision=params.get("expected_revision")))
-
 
 def _envelope(data: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -745,29 +430,6 @@ def _envelope(data: dict[str, Any]) -> dict[str, Any]:
         "error": None,
         "timestamp": datetime.now(UTC).isoformat(),
     }
-
-
-def _configured_alert_role() -> str | None:
-    """This plugin's own ``alert_role`` config key, or ``None`` when unset
-    (deliberately no baked-in identity; see ``host_disk_guard``'s module
-    docstring). Read fresh on every call via the process-wide
-    :func:`get_config` singleton rather than cached at plugin init, matching
-    how other plugins read their own settings on demand (e.g.
-    ``postgres_state_management_plugin._ensure_plugin_ready``). This is the
-    ONLY source the cron fire and the installer use."""
-    configured = get_config().get_plugin_config(PLUGIN_NAME, default_config={}).get("alert_role")
-    if isinstance(configured, str) and configured.strip():
-        return configured.strip()
-    return None
-
-
-def _resolve_alert_role(params: dict[str, Any]) -> str | None:
-    """The alert target for a direct ``check_host_disk_headroom`` call: an
-    explicit ``params.alert_role`` override, else :func:`_configured_alert_role`."""
-    explicit = params.get("alert_role")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
-    return _configured_alert_role()
 
 
 def _parse_external_namespaces(value: object) -> tuple[str, ...]:

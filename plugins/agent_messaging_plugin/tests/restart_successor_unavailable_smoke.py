@@ -4,6 +4,7 @@
 In-memory boundary doubles only. No database, host process or worktree action.
 A post-termination refusal mutant must violate the predecessor assertions.
 """
+
 from __future__ import annotations
 
 import sys
@@ -79,15 +80,16 @@ class FakeState:
 
 
 class FakeManager:
-    def __init__(self, state: FakeState, role_class: str, committed: bool) -> None:
+    def __init__(self, state: FakeState, committed: bool) -> None:
         self.state = state
         self.committed = committed
         self.status = "queued"
         self.error: dict[str, object] = {}
         self.attempted_error: dict[str, object] = {}
         self.request: dict[str, object] = {
-            "agent_instance_id": "agi-predecessor", "role_name": "Fixture-Worker",
-            "role_class": role_class, "grace_seconds": 0,
+            "agent_instance_id": "agi-predecessor",
+            "role_name": "Fixture-Worker",
+            "grace_seconds": 0,
         }
 
     def get_job(self, job_id: str) -> dict[str, object]:
@@ -116,12 +118,18 @@ class FakeManager:
         return {"action_status": "completed", "data": {"outcome_committed": True}}
 
 
-def _case(role_class: str, committed: bool) -> None:
+def _case(*, committed: bool) -> None:
     host, state = FakeHost(), FakeState()
-    manager = FakeManager(state, role_class, committed)
+    manager = FakeManager(state, committed)
     plugin = AgentMessagingPlugin.__new__(AgentMessagingPlugin)
-    row = {"agent_instance_id": "agi-predecessor", "lane_id": "fixture-lane",
-           "host": "tmux", "agent_runtime": "codex", "lifecycle_state": "live"}
+    row = {
+        "agent_instance_id": "agi-predecessor",
+        "label": "predecessor",
+        "session_origin": "spawned",
+        "host": "tmux",
+        "agent_runtime": "codex",
+        "lifecycle_state": "live",
+    }
     with (
         patch.object(plugin, "_update_choreography_progress"),
         patch.object(plugin, "_build_session_lifecycle_policy_config", return_value=None),
@@ -132,7 +140,9 @@ def _case(role_class: str, committed: bool) -> None:
         patch.object(plugin_module, "lifecycle_clear_session", side_effect=host.clear),
     ):
         plugin._run_restart_session_job(  # noqa: SLF001 -- actual reserved worker boundary
-            "job-fixture", cast(AsyncJobManager, manager), state,
+            "job-fixture",
+            cast(AsyncJobManager, manager),
+            state,
         )
     assert host.effects == [] and host.live, "predecessor still reachable; zero terminate/spawn/clear"
     assert host.role_holder == "agi-predecessor", "role holder preserved"
@@ -203,9 +213,8 @@ def _assert_frozen_origins() -> None:
 
 def main() -> None:
     _assert_frozen_origins()
-    for role_class in ("principal", "project"):
-        for committed in (True, False):
-            _case(role_class, committed)
+    for committed in (True, False):
+        _case(committed=committed)
     _assert_frozen_origins()
     print("PASS restart refusal: real reserved worker, intact Codex predecessor, committed/uncommitted outcomes")
 

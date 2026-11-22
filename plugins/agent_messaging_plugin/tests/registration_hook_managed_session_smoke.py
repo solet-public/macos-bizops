@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from ananta.llm.agent_messaging.state_results import require_records  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
@@ -152,10 +151,7 @@ def test_first_registration_fires_spawning_to_live_and_backfills() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-hook-1",
-            lane_id="lane-hook",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="budget-hook",
+            session_origin="spawned",
             host="headless",
         ),
     )
@@ -173,7 +169,7 @@ def test_first_registration_fires_spawning_to_live_and_backfills() -> None:
         "the ROUTE fires spawning->live on first registration (was stuck 'spawning' pre-fix)",
     )
     _check(
-        row["agent_session_id"] == "sess-hook-1" and row["agent_id"] == "claude_code",
+        row["agent_session_id"] == "sess-hook-1" and row["agent_id"] == "claude_code" and row["session_origin"] == "spawned",
         "the ROUTE backfills agent_session_id/agent_id (were permanently null pre-fix)",
     )
 
@@ -188,10 +184,6 @@ def test_reconnect_does_not_refire_edge_or_clobber_later_state() -> None:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-hook-2",
-            lane_id="lane-hook",
-            assignment=fixture_assignment(),
-            work_class="read_only",
-            budget_line="budget-hook",
             host="headless",
         ),
     )
@@ -218,9 +210,7 @@ def test_reconnect_does_not_refire_edge_or_clobber_later_state() -> None:
     )
     _check(
         resp.status_code == 200,
-        "a reconnect arriving after the row went terminal still returns 200 "
-        "(the backfill's identity write is unconditional and harmless; only "
-        "the edge is state-guarded, and it correctly does not fire here)",
+        "a reconnect arriving after the row went terminal still returns 200 (the backfill's identity write is unconditional and harmless; only the edge is state-guarded, and it correctly does not fire here)",
     )
     row = read_managed_session(state, "agi-hook-2")
     _check(
@@ -256,7 +246,7 @@ def test_hand_launched_registration_creates_operator_inventory_row() -> None:
     if rows:
         row = rows[0]
         _check(
-            row["host"] == "operator" and row["lifecycle_state"] == "live",
+            row["host"] == "operator" and row["lifecycle_state"] == "live" and row["session_origin"] == "registered",
             "the inventory row is an active operator session, not a fabricated spawn",
         )
         _check(
@@ -264,8 +254,8 @@ def test_hand_launched_registration_creates_operator_inventory_row() -> None:
             "the row carries no report-by or TTL deadline the session never agreed to",
         )
         _check(
-            row.get("provisioning_mode") == "operator_existing_checkout",
-            "the operator row records its shared checkout rather than a fabricated worktree",
+            row["workspace"] == "" and row["spawned_by_instance_id"] == "",
+            "a hand-launched registration without verified cwd records empty workspace and caller",
         )
         _check(
             row.get("local_name") == "session-label",

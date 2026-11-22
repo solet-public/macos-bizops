@@ -22,6 +22,10 @@ from ananta.work_folders import WorkFolder, process_binding, register_work_folde
 __all__ = ["Fixture", "_group_alive", "_scratch_exception_and_advisory", "_wait_for_groups_exit", "interrupt_cleanup", "stale_scratch"]
 
 _REPO = Path(__file__).resolve().parents[2]
+# A hang guard, not a timing assertion: every wait in this fixture is about a
+# process that exists, so the result must come from what it did, never from how
+# long a busy host took to start it. 60 s bounds a genuine hang only.
+HANG_GUARD_SECONDS = 60.0
 _STUB = """import json, os, signal, stat, subprocess, sys, tempfile, time
 from pathlib import Path
 home = Path(HOME_VALUE)
@@ -33,7 +37,7 @@ child = None
 if INTERRUPT_VALUE:
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
     def finish(number, frame):
-        child.wait(timeout=5)
+        child.wait(timeout=GUARD_VALUE)
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, finish)
 owner = json.loads((Path(root) / '.owner.json').read_text()) if root else None
@@ -121,7 +125,7 @@ class Fixture:
         return self
 
     def start(self, case: str = "normal", serial: bool = True) -> None:
-        source = _STUB.replace("HOME_VALUE", repr(str(self.home))).replace("INTERRUPT_VALUE", repr(case == "interrupt"))
+        source = _STUB.replace("HOME_VALUE", repr(str(self.home))).replace("INTERRUPT_VALUE", repr(case == "interrupt")).replace("GUARD_VALUE", repr(HANG_GUARD_SECONDS))
         (self.home / "child.py").write_text(source)
         (self.home / "register").write_text(str(self.home / "child.py") + "\n")
         env = {key: value for key, value in os.environ.items() if not key.startswith("AGENT_") and key != "HOMUNCULUS_NAME"}
@@ -135,7 +139,7 @@ class Fixture:
 
     def finish(self) -> tuple[str, str]:
         assert self.process is not None
-        stdout, stderr = self.process.communicate(timeout=10)
+        stdout, stderr = self.process.communicate(timeout=HANG_GUARD_SECONDS)
         print(stdout, stderr, flush=True)
         assert self.process.returncode == 0, ("FIXTURE_RUNNER_FAILED", self.process.returncode)
         return stdout, stderr
@@ -144,7 +148,7 @@ class Fixture:
         try:
             if self.process is not None and self.process.poll() is None:
                 self.process.terminate()
-                self.process.communicate(timeout=10)
+                self.process.communicate(timeout=HANG_GUARD_SECONDS)
             record = self.home / "observed.json"
             if record.exists():
                 group = json.loads(record.read_text())["pgid"]
@@ -238,7 +242,7 @@ def _group_alive(group: int) -> bool:
     return True
 
 
-def _wait_for_groups_exit(groups: tuple[int, ...], timeout: float = 2.0) -> None:
+def _wait_for_groups_exit(groups: tuple[int, ...], timeout: float = HANG_GUARD_SECONDS) -> None:
     """Require ESRCH after reaping; tolerate no live or inaccessible group."""
     deadline = time.monotonic() + timeout
     while any(_group_alive(group) for group in groups):
@@ -252,17 +256,37 @@ def interrupt_cleanup(signum: int | None = signal.SIGINT, serial: bool | None = 
             _interrupt_case(number, mode)
 
 
+def _await_observation(fixture: Fixture) -> dict[str, object]:
+    """Read observed.json once the runner writes it; a missing file is never read.
+
+    The wait ends at once when the runner has exited, and fails with its return
+    code and stderr. A runner still silent at the hang guard is stopped first so
+    its stderr can be read.
+    """
+    process = fixture.process
+    assert process is not None
+    record = fixture.home / "observed.json"
+    deadline = time.monotonic() + HANG_GUARD_SECONDS
+    while not record.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if not record.exists():
+        hung = process.poll() is None
+        if hung:
+            process.terminate()
+        _, stderr = process.communicate(timeout=HANG_GUARD_SECONDS)
+        state = f"still running after {HANG_GUARD_SECONDS:.0f}s" if hung else "exited"
+        raise AssertionError(f"RUNNER_NEVER_WROTE_OBSERVED_JSON: runner {state}, return code {process.returncode}, stderr: {stderr}")
+    return fixture.read()
+
+
 def _interrupt_case(number: int, mode: bool) -> None:
     with Fixture() as fixture:
         fixture.start("interrupt", mode)
-        deadline = time.monotonic() + 5
-        while not (fixture.home / "observed.json").exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        observed = fixture.read()
+        observed = _await_observation(fixture)
         assert observed["pid"] == observed["pgid"] == observed["descendant_pgid"], observed
         assert fixture.process is not None
         fixture.process.send_signal(number)
-        stdout, stderr = fixture.process.communicate(timeout=10)
+        stdout, stderr = fixture.process.communicate(timeout=HANG_GUARD_SECONDS)
         print(stdout, stderr, flush=True)
         group = observed["pgid"]
         assert isinstance(group, int), observed

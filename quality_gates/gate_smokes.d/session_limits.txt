@@ -1,0 +1,2 @@
+# engine-5 S2 A1 (chg_fe282783): the session limit store and the room function; in-memory state, offline, no file written.
+plugins/agent_messaging_plugin/tests/session_limits_smoke.py

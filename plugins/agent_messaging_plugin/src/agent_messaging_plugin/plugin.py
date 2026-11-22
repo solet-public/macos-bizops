@@ -18,7 +18,7 @@ The plugin intentionally does NOT register through the service-binding
 system (``ServiceName`` enum + ``service_bindings.json``).  Bound
 ServiceProviders are skipped from the ``plugin::<name>::*`` registry
 namespace by ``process_registry/builder.py::_should_skip_plugin``,
-which would hide ``send_peer_message`` / ``peer_send_by_name`` / the
+which would hide ``peer_send`` / ``peer_send_by_name`` / the
 session-lifecycle EDGE processes from ``submit_action_definition``.
 ``AgentMessagingServiceInterface`` is satisfied by structural
 delegation; callers resolve us via
@@ -42,7 +42,7 @@ from collections import OrderedDict, deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import copy_context
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
@@ -120,7 +120,7 @@ from ananta.services.inference_service.completion_request_schema import (
     COL_RESUME_PROCESS_KEY as COL_ICR_RESUME_PROCESS_KEY,
 )
 
-from ._permission_prompt_state import permission_mode_advisory, permission_prompt_state
+from ._permission_prompt_state import permission_prompt_state
 from .accepted_authorization_verbs import (
     change_accepted_authorization as lifecycle_change_accepted_authorization,
 )
@@ -174,6 +174,7 @@ from .choreography_verbs import (
 from .constants import (
     PLUGIN_NAME,
     SYSTEM_AGENT_ID,
+    SYSTEM_SCHEDULER_ID,
 )
 from .context_status_verbs import report_context_status as lifecycle_report_context_status
 from .context_status_verbs import session_context_status as lifecycle_session_context_status
@@ -197,25 +198,6 @@ from .fleet_check_run_verbs import (
 )
 from .fleet_check_run_verbs import (
     record_fleet_progress_run as lifecycle_record_fleet_progress_run,
-)
-from .fleet_stall_sweep import (
-    DEFAULT_SCHEDULE_CRON as FLEET_STALL_SWEEP_CRON,
-)
-from .fleet_stall_sweep import (
-    DEFAULT_SCHEDULE_TAG as FLEET_STALL_SWEEP_TAG,
-)
-from .fleet_stall_sweep import (
-    DEFAULT_WINDOW_SECONDS as FLEET_STALL_WINDOW_SECONDS,
-)
-from .fleet_stall_sweep import (
-    FleetStallSweepError,
-    PsoletFleetStallReader,
-    ensure_sweep_schedule,
-    read_sweep_status,
-    run_fleet_stall_sweep,
-)
-from .fleet_stall_sweep import (
-    clear_completed_run as clear_fleet_stall_sweep_completed_run,
 )
 from .fleet_status import FleetStatusError
 from .fleet_status import fleet_status as lifecycle_fleet_status
@@ -255,33 +237,7 @@ from .inbox_consumption_verbs import (
 from .inbox_consumption_verbs import (
     session_inbox_consumption_status as lifecycle_session_inbox_consumption_status,
 )
-from .lane_worktree_evidence import PsoletRetirementEvidenceReader, RetirementEvidenceReader
 from .ledger_tmux_reconciliation import collect_ledger_tmux_report
-from .managed_dispatch import (
-    DispatchActor,
-    DispatchError,
-    DispatchSpec,
-)
-from .managed_dispatch import (
-    dispatch_managed_work as lifecycle_dispatch_managed_work,
-)
-from .managed_dispatch import (
-    managed_dispatch_events as lifecycle_managed_dispatch_events,
-)
-from .managed_dispatch import (
-    managed_dispatch_inventory as lifecycle_managed_dispatch_inventory,
-)
-from .managed_dispatch import (
-    managed_dispatch_status as lifecycle_managed_dispatch_status,
-)
-from .managed_dispatch import (
-    report_managed_dispatch as lifecycle_report_managed_dispatch,
-)
-from .managed_dispatch import (
-    resolve_managed_dispatch as lifecycle_resolve_managed_dispatch,
-)
-from .managed_dispatch_unit import require_assignment
-from .managed_dispatch_uptake import managed_dispatch_uptake_rate as lifecycle_managed_dispatch_uptake_rate
 from .mcp_streamable import (
     BearerVerifier,
     StreamableSessionManager,
@@ -340,7 +296,8 @@ from .model_capability_verbs import (
 )
 from .model_catalog_policy import read_catalog_configuration, set_catalog_configuration
 from .model_cell_enablement import read_model_cell_policy, set_model_cells_enabled
-from .model_dispatch_policy import DispatchPolicyError
+from .model_kind_rule_layer import NoRuleServesError
+from .model_kind_rule_layer import select_model_cell_for_kind as select_kind_cell
 from .operation_jobs import JOB_RETURN_SCHEMA, AsyncJobs, RegisteredOperations
 from .operator_session_liveness_reconciliation import (
     reconcile_operator_session_liveness as lifecycle_reconcile_operator_session_liveness,
@@ -365,15 +322,9 @@ from .peer_registry import (
     PeerSessionAmbiguousError,
     PeerUnreachableError,
 )
+from .peer_send_outcome import read_peer_send_outcome
 from .platform_surface import PlatformSurface
 from .process_exposure import ProcessExportPolicy
-from .register_unit_client import (
-    CONFIG_PSOLET_CLI,
-    PsoletRegisterUnitClient,
-    RegisterActor,
-    RegisterUnitError,
-    resolve_psolet_cli,
-)
 from .retired_role_registry import (
     RetiredRoleRegistryError,
     RetireRoleCall,
@@ -400,13 +351,7 @@ from .role_claim import (
     live_holder_of,
     send_handover_notice,
 )
-from .role_class_backfill import backfill_role_class
 from .role_message_consumed_backfill import backfill_role_message_consumed
-from .rotation_self_notice import (
-    BandEdgeLatch,
-    SelfNoticeCounts,
-    sweep_rotation_self_notice,
-)
 from .route_activity import make_model_activity_middleware
 from .schema import (
     get_accepted_authorization_schema_definition,
@@ -421,77 +366,57 @@ from .sender_provenance import (
     SENDER_PRINCIPAL_KIND_SYSTEM,
 )
 from .session_claude_mapping_ingest import (
-    detect_hook_absent_sessions as lifecycle_detect_hook_absent_sessions,
-)
-from .session_claude_mapping_ingest import (
     drain_session_claude_mapping_spool as lifecycle_drain_session_claude_mapping_spool,
 )
 from .session_claude_mapping_store import (
     list_session_claude_mappings as lifecycle_list_session_claude_mappings,
 )
 from .session_context_status_store import GAUGE_HISTORY_RETENTION
+from .session_end import (
+    SessionEndError,
+    check_session_records,
+    end_reported_session,
+    on_host_session_closed,
+)
 from .session_inference_provider import SessionInferenceProvider
-from .session_launch_adapters import bind_bare_assignment, qualification_request, reject_retired_launch_fields, submit_launch
+from .session_launch_adapters import qualification_request, submit_launch
 from .session_launch_jobs import SessionLaunchJobs, run_reserved_restart
 from .session_launch_store import get_session_launch_schema_definition
 from .session_lifecycle_control import report_teardown
-from .session_lifecycle_store import SessionNotFoundError, format_directed_by, read_managed_session
+from .session_lifecycle_store import format_directed_by
 from .session_lifecycle_verbs import (
     LIST_SESSIONS_DEFAULT_LIMIT,
     LIST_SESSIONS_MAX_LIMIT,
     ArmSessionDependencyRequest,
-    CaptureLaneCharterRequest,
-    LegislateRoleRequest,
+    DispatchActor,
     SpawnSessionRequest,
     VerbError,
-    spawn_dispatch_attempt,
-    validate_spawn_admission,
 )
 from .session_lifecycle_verbs import arm_session_dependency as lifecycle_arm_session_dependency
-from .session_lifecycle_verbs import capture_lane_charter as lifecycle_capture_lane_charter
 from .session_lifecycle_verbs import clear_session as lifecycle_clear_session
 from .session_lifecycle_verbs import compact_session as lifecycle_compact_session
 from .session_lifecycle_verbs import drive_session as lifecycle_drive_session
-from .session_lifecycle_verbs import legislate_role as lifecycle_legislate_role
 from .session_lifecycle_verbs import list_sessions as lifecycle_list_sessions
-from .session_lifecycle_verbs import preserve_lane_evidence as lifecycle_preserve_lane_evidence
-from .session_lifecycle_verbs import read_lane_evidence as lifecycle_read_lane_evidence
 from .session_lifecycle_verbs import report_alive as lifecycle_report_alive
-from .session_lifecycle_verbs import resolve_local_name as lifecycle_resolve_local_name
-from .session_lifecycle_verbs import (
-    resolve_provisioned_role_class as lifecycle_resolve_provisioned_role_class,
-)
-from .session_lifecycle_verbs import resolve_retire_packet as lifecycle_resolve_retire_packet
-from .session_lifecycle_verbs import (
-    retire_completed_lane_sessions as lifecycle_retire_completed_lane_sessions,
-)
-from .session_lifecycle_verbs import retire_packet_selection as lifecycle_retire_packet_selection
 from .session_lifecycle_verbs import retire_session as lifecycle_retire_session
 from .session_lifecycle_verbs import session_status as lifecycle_session_status
 from .session_lifecycle_verbs import spawn_session as lifecycle_spawn_session
 from .session_lifecycle_verbs import terminate_session as lifecycle_terminate_session
+from .session_limits import LimitError, get_session_limit_schema_definition, list_limits, set_limit
+from .session_origin_backfill import backfill_session_origins
 from .session_role_claim_store import delete_session_role_claim_if_still_holds
 from .session_sweep import (
-    NoticeLatch,
     SessionRoleClaimPruner,
-    StewardNoticeCounts,
     sweep_deadline_dependencies,
-    sweep_gauge_coverage,
-    sweep_gauge_staleness,
-    sweep_lane_closed_dependencies,
-    sweep_managed_dispatches,
-    sweep_overdue_sessions,
-    sweep_rotation_due_sessions,
-    sweep_unregistered_spawning_sessions,
 )
 from .session_usage_verbs import (
     UsageVerbError,
 )
 from .session_usage_verbs import (
-    read_session_usage_window as lifecycle_read_session_usage_window,
+    read_label_usage as lifecycle_read_label_usage,
 )
 from .session_usage_verbs import (
-    read_unit_usage as lifecycle_read_unit_usage,
+    read_session_usage_window as lifecycle_read_session_usage_window,
 )
 from .system_slots import (
     validate_system_slot_declarations,
@@ -517,7 +442,6 @@ if TYPE_CHECKING:  # pragma: no cover — type-only references
     from .models import BridgeSessionState
 
 logger = logging.getLogger(__name__)
-SYSTEM_SCHEDULER_ID: Final[str] = "system:scheduler"
 SYSTEM_SCHEDULER_LABEL: Final[str] = "System (Scheduler)"
 SYSTEM_JOB_COMPLETION_ID: Final[str] = "system:job-completion"
 """Sender sentinel for a job completion pushed into a role inbox (Lane W).
@@ -530,82 +454,6 @@ their own thread per recipient instead of interleaving them with scheduler
 traffic.
 """
 SYSTEM_JOB_COMPLETION_LABEL: Final[str] = "System (Job Completion)"
-
-
-def _require_provisioner_authority(
-    state_service: Any,
-    spawned_by_role: str,
-    actor: DispatchActor,
-) -> None:
-    if not holds_role(state_service, spawned_by_role, actor.agent_session_id):
-        raise DispatchError(
-            "coordinator_authority_denied",
-            "Authenticated caller does not hold spawned_by_role.",
-        )
-
-
-def _provisioned_live_role_holder(
-    plugin: AgentMessagingPlugin,
-    state_service: Any,
-    role_name: str,
-) -> dict[str, object] | None:
-    """Return the current live holder before provisioning a named role.
-
-    The durable binding supplies the holder instance id; ``peer_holds_role``
-    then derives that instance's current stable session id from the live peer
-    registry and re-checks the binding. A stale binding remains replaceable,
-    while a live one is returned without starting another worker.
-    """
-    try:
-        binding = resolve_role_binding(state_service, role_name)
-    except (RoleBindingVacantError, RoleBindingMalformedError):
-        return None
-    if not binding.agent_instance_id:
-        return None
-    outcome = plugin.peer_holds_role(
-        {
-            "parameters": {
-                "name": role_name,
-                "agent_instance_id": binding.agent_instance_id,
-            },
-        },
-        {},
-    )
-    data = outcome.get("data")
-    if outcome.get("action_status") != "completed" or not isinstance(data, dict):
-        return None
-    if data.get("holds") is not True:
-        return None
-    return {
-        "name": role_name,
-        "agent_instance_id": binding.agent_instance_id,
-        "agent_session_id": str(data.get("agent_session_id") or ""),
-        "delivery_route_attached": data.get("delivery_route_attached") is True,
-    }
-
-
-def _provision_legislation(
-    state_service: Any,
-    *,
-    needs_legislation: bool,
-    role_name: str,
-    role_class: str,
-    unit_id: str,
-    revision_id: str,
-    directed_by: str,
-) -> dict[str, object]:
-    if not needs_legislation:
-        return {"action": "not_required"}
-    return lifecycle_legislate_role(
-        state_service,
-        LegislateRoleRequest(
-            name=role_name,
-            role_class=role_class,
-            unit_id=unit_id,
-            revision_id=revision_id,
-            directed_by=directed_by,
-        ),
-    )
 
 
 # A single running operation and FIFO async turn reservations preserve ordering.
@@ -807,6 +655,16 @@ def _bearer_hmac_key_vault_name() -> str:
 
 
 _BEARER_HMAC_KEY_VAULT_NAME = _bearer_hmac_key_vault_name()
+
+
+def _aa_api_key_vault_name() -> str:
+    name = os.environ.get("SOLET_NAME", "").strip()
+    if not name:
+        raise RuntimeError("agent_messaging_plugin: SOLET_NAME is required for the Artificial Analysis API key")
+    return f"{name}.agent_messaging_plugin.artificial_analysis_api_key"
+
+
+_AA_API_KEY_VAULT_NAME = _aa_api_key_vault_name()
 
 
 class VaultEnvelopeError(RuntimeError):
@@ -1037,25 +895,14 @@ class _SessionLifecyclePolicyConfig:
     the L1 verb surface) reads its own settings without forcing the
     core agent-messaging service config to grow fields it doesn't use.
 
-    ``work_class_defaults`` is operator-editable policy DATA (``plugin.yaml``'s
-    ``config:`` block), not a code default: "cheapest capable model per
-    work_class" is a values-laden business call this module does not make
-    unilaterally (the same posture ``FLEET_HEADLESS_PERMISSION_MODE`` already
-    takes for permission mode). Empty (the shipped default) means
-    ``spawn_session`` behaves exactly as it did before this config existed —
-    an unconfigured work_class leaves ``model``/``effort`` at whatever the
-    caller passed (usually empty).
-
-    ``work_class_tool_allowlists`` is the §6 permission-mode design's
-    (2026-08-03) spawn-time tool allowlist, consumed by
-    ``headless_adapter.py``'s PreToolUse gate
-    (``.claude/hooks/headless_tool_allowlist_gate.py``). Operator ruling,
-    same day, effective now ("we don't have any restrictions now"): shipped
-    empty means the gate is UNARMED by default (``headless_adapter.py``'s
-    ``_spawn_env`` only sets the hook's env var when an allowlist is
-    actually non-empty) — the mechanism stays landed as shelf capability,
-    armed per-``work_class`` whenever usage data argues for it, not
-    exercised by default.
+    ``default_allowed_tools`` is the §6 permission-mode design's (2026-08-03)
+    spawn-time tool allowlist, consumed by ``headless_adapter.py``'s PreToolUse
+    gate (``.claude/hooks/headless_tool_allowlist_gate.py``) and used only when a
+    spawn names no ``allowed_tools`` of its own. Operator ruling, same day,
+    effective now ("we don't have any restrictions now"): shipped empty means the
+    gate is UNARMED by default (``headless_adapter.py``'s ``_spawn_env`` only sets
+    the hook's env var when an allowlist is actually non-empty) — the mechanism
+    stays landed as shelf capability, not exercised by default.
 
     ``headless_permission_mode`` is declared config (not a process env var —
     a config value is as declared as an env var, no LaunchAgent edit needed
@@ -1071,63 +918,16 @@ class _SessionLifecyclePolicyConfig:
 
     ``default_fleet_transport`` is the fleet-watch-transport-migration
     lane's single declared default-transport knob (phase 2 slice 2), the
-    ONE configuration point the operator's verbatim charter's "easy to
-    change later" clause names. Shipped default ``"watch"`` — the charter's
-    own instruction that non-MCP must be the fleet's PRIMARY transport now,
-    MCP retained as backup/chat-class only. Landed as shelf capability
-    ahead of its consumers (same posture ``work_class_tool_allowlists``
-    shipped in before ``headless_adapter.py`` read it): phase-2 slice 1
-    wires the host adapters to read this value when building spawn env: it
-    is not yet consumed by any spawn path as of this slice.
+    ONE configuration point the operator's verbatim "easy to change later"
+    instruction names. Shipped default ``"watch"`` — the operator's own
+    instruction that non-MCP must be the fleet's PRIMARY transport now,
+    MCP retained as backup/chat-class only.
     """
 
-    work_class_defaults: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
-    work_class_tool_allowlists: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    default_allowed_tools: tuple[str, ...] = ()
     headless_permission_mode: str = ""
     default_fleet_transport: str = ""
     historical_cancel_role: str = ""
-
-
-def _run_counted_leg(
-    legs: list[str],
-    label: str,
-    description: str,
-    run: Callable[[], int],
-    summarise: Callable[[int], str],
-    on_finding: Callable[[int], None],
-) -> None:
-    """Run one count-returning notice leg, fault-isolated, and record it.
-
-    ★ THE SHAPE THIS REMOVES, and why it is worth a helper rather than a
-    fourth copy. Each leg was try / except-log-FAULTED-and-append /
-    else-append-and-maybe-warn -- identical control flow, three different
-    strings. The duplication was not merely untidy: it put the rider's
-    fault-isolation contract in four places, so a leg added later could
-    silently omit the except clause and cost every leg after it that tick.
-    Here the contract exists once and a new leg cannot forget it.
-
-    BOTH INVARIANTS THE RIDER DEPENDS ON LIVE HERE:
-
-    * A FAULTED leg is still NAMED in ``legs``. An all-clear summary built
-      only from legs that succeeded shrinks silently, and a shrinking line
-      reads as a healthy one -- the failure the GAU-02 work exists to stop.
-    * ``on_finding`` fires only on a NON-ZERO count, so a healthy tick stays
-      quiet at WARNING while still reporting itself at INFO through the
-      summary.
-
-    The callables are passed rather than the sweep function plus arguments
-    so each leg keeps its own keyword shape and its own prose at the call
-    site, where a reader comparing legs can see them side by side.
-    """
-    try:
-        count = run()
-    except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
-        logger.exception("%s %s leg FAULTED; rider continues", label, description)
-        legs.append(f"{label}=FAULTED")
-        return
-    legs.append(f"{label}={summarise(count)}")
-    if count:
-        on_finding(count)
 
 
 _ALLOWANCE_READING_PROPERTIES: dict[str, ParameterMetadata] = {
@@ -1136,26 +936,47 @@ _ALLOWANCE_READING_PROPERTIES: dict[str, ParameterMetadata] = {
     "consumed": ParameterMetadata(type=ParameterType.FLOAT, description="Percent of the window consumed."),
     "remaining": ParameterMetadata(type=ParameterType.FLOAT, description="Percent of the window remaining."),
     "as_of": ParameterMetadata(type=ParameterType.STRING, description="When the reading was taken, ISO-8601 UTC."),
-    "next_reset_at": ParameterMetadata(type=ParameterType.STRING, description="Window reset instant; null when only expires_at was given."),
-    "expires_at": ParameterMetadata(type=ParameterType.STRING, description="Explicit expiry; null when only next_reset_at was given."),
-    "effective_expiry": ParameterMetadata(type=ParameterType.STRING, description="The earlier of next_reset_at and expires_at; the reading stops counting then."),
+    "next_reset_at": ParameterMetadata(
+        type=ParameterType.STRING,
+        description="Window reset instant; null when only expires_at was given.",
+    ),
+    "expires_at": ParameterMetadata(
+        type=ParameterType.STRING,
+        description="Explicit expiry; null when only next_reset_at was given.",
+    ),
+    "effective_expiry": ParameterMetadata(
+        type=ParameterType.STRING,
+        description="The earlier of next_reset_at and expires_at; the reading stops counting then.",
+    ),
     "state": ParameterMetadata(type=ParameterType.STRING, description="current or expired, judged at call time."),
     "source": ParameterMetadata(type=ParameterType.STRING),
     "recorded_by": ParameterMetadata(type=ParameterType.STRING),
     "recorded_at": ParameterMetadata(type=ParameterType.STRING),
-    "history_appended": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the immutable history snapshot was appended."),
-    "history_error": ParameterMetadata(type=ParameterType.STRING, description="History append failure; the current reading write stood."),
+    "history_appended": ParameterMetadata(
+        type=ParameterType.BOOLEAN,
+        description="Whether the immutable history snapshot was appended.",
+    ),
+    "history_error": ParameterMetadata(
+        type=ParameterType.STRING,
+        description="History append failure; the current reading write stood.",
+    ),
 }
 
 
-class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugin, EdgeProcessProvider, AgentMessagingServiceInterface):
+class AgentMessagingPlugin(
+    RegisteredOperations,
+    ServicePlugin,
+    IOInterfacePlugin,
+    EdgeProcessProvider,
+    AgentMessagingServiceInterface,
+):
     """Consolidated bridge plugin (IO + bridge + agent messaging).
 
     Implements ``AgentMessagingServiceInterface`` by delegating to an
     underlying :class:`AgentMessagingService`; implements
     :class:`IOInterfacePlugin` directly via ``start_interface`` /
     ``stop_interface`` / ``post_message`` / ``get_supported_capabilities``.
-    Exposes ``send_peer_message``, the session-lifecycle EDGE processes,
+    Exposes ``peer_send``, the session-lifecycle EDGE processes,
     and the bridge-delivery and IO EDGE_SINK processes through
     ``@platform_process`` decorators.
 
@@ -1192,24 +1013,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         self._bridge_manager: BridgeSessionManager | None = None
         self._peer_registry: PeerRegistry | None = None
         self._session_role_claim_pruner: SessionRoleClaimPruner | None = None
-        # L4 rotation-surface latches (one per notice kind, never shared: the
-        # same agent_instance_id can legitimately be rotation-due AND dark, and
-        # one latch would let whichever fired first suppress the other).
-        # Process-lifetime scope by design — see NoticeLatch's docstring for
-        # the bound that buys.
-        self._rotation_due_latch: NoticeLatch = NoticeLatch()
-        self._gauge_coverage_latch: NoticeLatch = NoticeLatch()
-        # L4d (GAU-01(b)) gets its OWN instance for the reason stated above, and
-        # it is the sharpest case yet: "no gauge row at all" and "a gauge row
-        # that stopped" are conditions the SAME session moves BETWEEN. A shared
-        # latch would let the missing-row episode suppress the arrest notice
-        # that follows it -- silencing the finding precisely when the session
-        # started reporting again but its gauge did not.
-        self._gauge_stale_latch: NoticeLatch = NoticeLatch()
-        # L4c keys on (session, BAND) rather than on the session alone, so a
-        # NoticeLatch cannot serve it -- see BandEdgeLatch's docstring for why
-        # the difference is a correctness one and not a refinement.
-        self._rotation_self_latch: BandEdgeLatch = BandEdgeLatch()
         self._platform_surface: PlatformSurface | None = None
         # D-IF7/D-IF8 sidecar: per-bridge SessionInferenceProvider keyed
         # by agent_instance_id. Populated post-success in the stdio
@@ -1266,6 +1069,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         # the durable reservation with public launch adapters.
         self._operation_jobs = AsyncJobs()
         self._async_job_manager: AsyncJobManager | None = None
+        self._start_record_check_pending = False
         self._launch_jobs = SessionLaunchJobs()
         self._choreography_stop_event: threading.Event = threading.Event()
         self._choreography_worker_thread: threading.Thread | None = None
@@ -1380,7 +1184,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         writes/reads under the scoped form built in
         ``_bearer_hmac_key_vault_name()``.
         """
-        return [_BEARER_HMAC_KEY_VAULT_NAME]
+        return [_BEARER_HMAC_KEY_VAULT_NAME, _AA_API_KEY_VAULT_NAME]
 
     # ------------------------------------------------------------------
     # ServicePlugin lifecycle (no background workers; lazy build)
@@ -1393,6 +1197,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         self._launch_jobs.start()
         self._services_started = True
         self._service_started_at = _now_iso()
+        self._start_record_check_pending = True
         self._start_choreography_worker()
         return ActionResult(
             action_status="completed",
@@ -1404,6 +1209,39 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             error=None,
             timestamp=_now_iso(),
         )
+
+    def _run_start_record_check(self) -> dict[str, Any]:
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="State service unavailable for start-time session record check",
+            )
+        return _success_result(data=check_session_records(state_service, directed_by="solet_start_check", sweep_session_files=True))
+
+    def _submit_start_record_check(self) -> None:
+        """Queue the start check once per ``start_services``, from the first worker
+        tick that finds the job manager (it is wired after ``start_service_plugins``)."""
+        if not self._start_record_check_pending:
+            return
+        self._start_record_check_pending = False
+        try:
+            receipt = self._operation_jobs.submit(
+                self,
+                "check_session_records_at_start",
+                {},
+                {"session_id": "solet-start", "flow_id": f"solet-start-{self._service_started_at}"},
+                lambda _values: self._run_start_record_check(),
+            )
+            if receipt.get("error") or receipt.get("action_status") != "completed":
+                logger.error("Start-time session record check could not be queued: %r", receipt)
+                return
+            logger.info(
+                "Start-time session record check queued as %s",
+                receipt.get("data", {}).get("job_id"),
+            )
+        except Exception:
+            logger.exception("Start-time session record check could not be queued")
 
     async def stop_services(self) -> ActionResult:
         return await _run_f5_blocking(self._f5_stop_services)
@@ -1513,6 +1351,8 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             try:
                 job_manager = self._try_acquire_async_job_manager()
                 state_service = self._get_state_service()
+                if job_manager is not None:
+                    self._submit_start_record_check()
                 if job_manager is not None and state_service is not None:
                     self._poll_and_process_one_choreography_job(job_manager, state_service)
             except Exception:
@@ -1832,50 +1672,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             {"turn_observed": True, "new_claude_session_ids": new_ids},
         )
 
-    def _build_restart_spawn_params(
-        self,
-        old_row: dict[str, Any],
-        role_class: str,
-        lane_id: str,
-        role_name: str,
-    ) -> dict[str, Any]:
-        """Carry the old ledger row's dispatch config forward into the fresh
-        spawn's raw params — split out of :func:`_run_restart_session_job` to
-        keep it a straight-line dispatcher (radon cc: each field extraction's
-        own truthiness check lives here, not stacked onto the caller's
-        count). Feeds :func:`_spawn_session_request_from_params`, the SAME
-        raw-params builder ``spawn_session()`` itself uses (2026-08-10 fix:
-        this path previously built a ``SpawnSessionRequest`` directly and
-        skipped every policy-resolution step spawn_session() runs —
-        permission_mode/allowed_tools/transport are not columns on
-        managed_session, so they were silently lost every restart; routing
-        through the shared params+policy path closes that class of drift for
-        good, not just this one field)."""
-        return {
-            "role_class": role_class,
-            "lane_id": lane_id,
-            "expected_revision_id": require_assignment(old_row).revision.revision_id,
-            "unit_id": _str_field(old_row.get("unit_id")),
-            "work_class": _str_field(old_row.get("work_class")),
-            "budget_line": _str_field(old_row.get("budget_line")),
-            # Runtime is restart-sticky for the same reason host/model/effort
-            # are: defaulting this fresh request would silently respawn a
-            # Codex worker as Claude.  Older rows have the compatibility floor.
-            "agent_runtime": _str_field(old_row.get("agent_runtime")) or "claude_code",
-            "role_name": role_name,
-            "host": _str_field(old_row.get("host")),
-            "visibility": _str_field(old_row.get("visibility")),
-            "model": _str_field(old_row.get("model")),
-            "effort": _str_field(old_row.get("effort")),
-            "dispatch_kind": _str_field(old_row.get("dispatch_kind")),
-            "reviewed_report_vendor": _str_field(old_row.get("reviewed_report_vendor")),
-            "pair_id": _str_field(old_row.get("pair_id")),
-            # Restart-sticky like model/effort: dropping the declared floor
-            # scope would let a restart respawn floored work on a cheaper pair.
-            "scope_tags": list(old_row.get("scope_tags") or []),
-            "spawned_by_role": self._CHOREOGRAPHY_DIRECTED_BY,
-        }
-
     def _run_restart_session_job(
         self,
         job_id: str,
@@ -2071,18 +1867,8 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         ``claude_code_channel_plugin`` for the same pattern).
         """
         return {
-            "preserve_lane_evidence": EdgeProcessDefinition(
-                name="preserve_lane_evidence",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
-            ),
-            "read_lane_evidence": EdgeProcessDefinition(
-                name="read_lane_evidence",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
-            ),
-            "send_peer_message": EdgeProcessDefinition(
-                name="send_peer_message",
+            "peer_send": EdgeProcessDefinition(
+                name="peer_send",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
@@ -2134,67 +1920,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                     retryable=False,
                 ),
             ),
-            "dispatch_managed_work": EdgeProcessDefinition(
-                name="dispatch_managed_work",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=False,
-                ),
-            ),
-            "provision_role_session": EdgeProcessDefinition(
-                name="provision_role_session",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=False,
-                ),
-            ),
-            "report_managed_dispatch": EdgeProcessDefinition(
-                name="report_managed_dispatch",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=False,
-                ),
-            ),
-            "resolve_managed_dispatch": EdgeProcessDefinition(
-                name="resolve_managed_dispatch",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=False,
-                ),
-            ),
-            "managed_dispatch_status": EdgeProcessDefinition(
-                name="managed_dispatch_status",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True,
-                ),
-            ),
-            "managed_dispatch_inventory": EdgeProcessDefinition(
-                name="managed_dispatch_inventory",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True,
-                ),
-            ),
-            "managed_dispatch_events": EdgeProcessDefinition(
-                name="managed_dispatch_events",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True,
-                ),
-            ),
-            "managed_dispatch_uptake_rate": EdgeProcessDefinition(
-                name="managed_dispatch_uptake_rate",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
-            ),
-            "legislate_role": EdgeProcessDefinition(
-                name="legislate_role",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=False,
-                ),
-            ),
             "retire_role": EdgeProcessDefinition(
                 name="retire_role",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
@@ -2209,24 +1934,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                     retryable=True,
                 ),
             ),
-            "capture_lane_charter": EdgeProcessDefinition(
-                name="capture_lane_charter",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    # A fresh INSERT, not idempotent on conflict -- an
-                    # automatic retry after an uncertain result would write
-                    # a SECOND charter row, which resolve_lane_charter would
-                    # then treat as the superseding one. Never safe to retry
-                    # blind.
-                    retryable=False,
-                ),
-            ),
             "arm_session_dependency": EdgeProcessDefinition(
                 name="arm_session_dependency",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    # A fresh INSERT, not idempotent on conflict (unlike
-                    # legislate_role's on_conflict=do_nothing) -- an
+                    # A fresh INSERT, not idempotent on conflict -- an
                     # automatic retry after an uncertain result would arm a
                     # SECOND edge for the same condition, never safe.
                     retryable=False,
@@ -2362,23 +2074,22 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                     retryable=False,
                 ),
             ),
-            "retire_session": EdgeProcessDefinition(
-                name="retire_session",
+            "session_host_closed": EdgeProcessDefinition(
+                name="session_host_closed",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
                 ),
             ),
-            # Composes ``retire_session`` once per row whose assigned Unit the
-            # register proves terminal.  Not retryable, matching the verb it
-            # composes: although driving it again is safe by construction (an
-            # already-retired row is that verb's own cheap no-op, and a row it
-            # could not prove was never touched), the effects it can cause are
-            # host termination and worktree removal, which are irreversible for
-            # a lane.  An automatic retry is the caller's decision to make
-            # explicitly, not the processor's to take on a transient fault.
-            "retire_completed_lane_sessions": EdgeProcessDefinition(
-                name="retire_completed_lane_sessions",
+            "session_ended": EdgeProcessDefinition(
+                name="session_ended",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=False,
+                ),
+            ),
+            "retire_session": EdgeProcessDefinition(
+                name="retire_session",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=False,
@@ -2434,6 +2145,15 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             # Read-only (issues no writes) -- always safe to retry.
             "session_inbox_consumption_status": EdgeProcessDefinition(
                 name="session_inbox_consumption_status",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            # prb_8989586c: what happened to a send, by message id. Read-only
+            # (it joins two existing records and writes nothing) -- always safe to retry.
+            "peer_send_outcome": EdgeProcessDefinition(
+                name="peer_send_outcome",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
@@ -2515,39 +2235,15 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
-            # iss_ebc1ce9c / iss_c4fbe548: the work-keyed stall sweep. Every
-            # one of these is a READ plus the sweep's own last-run publication;
-            # none acts on a session, so every one is safe to retry.
-            "sweep_fleet_stall": EdgeProcessDefinition(
-                name="sweep_fleet_stall",
+            "set_session_limit": EdgeProcessDefinition(
+                name="set_session_limit",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True,
-                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=False),
             ),
-            "read_fleet_stall_sweep_status": EdgeProcessDefinition(
-                name="read_fleet_stall_sweep_status",
+            "list_session_limits": EdgeProcessDefinition(
+                name="list_session_limits",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True,
-                ),
-            ),
-            # The terminal action on the published run row. Retryable: the row
-            # is a single latest-run record, so a repeat clears an already
-            # absent key and reports cleared=false rather than failing.
-            "clear_fleet_stall_sweep_run": EdgeProcessDefinition(
-                name="clear_fleet_stall_sweep_run",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True,
-                ),
-            ),
-            "ensure_fleet_stall_sweep_schedule": EdgeProcessDefinition(
-                name="ensure_fleet_stall_sweep_schedule",
-                result_processor_template_customizations=MergeResultProcessorCustomizations(),
-                error_processor_template_customizations=MergeErrorProcessorCustomizations(
-                    retryable=True,
-                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             "select_dispatch_tier": EdgeProcessDefinition(
                 name="select_dispatch_tier",
@@ -2555,6 +2251,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
                 ),
+            ),
+            "select_model_cell_for_kind": EdgeProcessDefinition(
+                name="select_model_cell_for_kind",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(retryable=True),
             ),
             # iss_d136ae29: the real crosscheck refresh. Not retryable -- it
             # opens and closes its own refresh_run row and reconciles cells
@@ -2632,8 +2333,8 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             ),
             # Read-only joins over managed-session metadata, the S1 usage
             # ledger projection, and S2's pure pricing helpers.
-            "read_unit_usage": EdgeProcessDefinition(
-                name="read_unit_usage",
+            "read_label_usage": EdgeProcessDefinition(
+                name="read_label_usage",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
@@ -2959,16 +2660,17 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             get_accepted_authorization_schema_definition(),
             get_model_catalog_policy_schema_definition(),
             get_session_launch_schema_definition(),
+            get_session_limit_schema_definition(),
             get_delivery_pickup_schema(),
         ]
 
     # ------------------------------------------------------------------
-    # Peer messaging — send_peer_message (scheduler-callable)
+    # Peer messaging — peer_send (scheduler-callable)
     # ------------------------------------------------------------------
 
     @platform_process(
         is_async=True,
-        name="send_peer_message",
+        name="peer_send",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "peer_id": ParameterMetadata(
@@ -3004,17 +2706,27 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 "drive_on_delivery": ParameterMetadata(type=ParameterType.STRING),
                 "send_status": ParameterMetadata(type=ParameterType.STRING),
                 "sender_notice": ParameterMetadata(type=ParameterType.STRING),
+                "outcome_read": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Present when send_status is stored_not_delivered_yet: the process and parameters of the follow-up read that states what happened to this message.",
+                ),
                 "delivered_to_agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "delivered_to_agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
             },
         ),
     )
-    def send_peer_message(
+    def peer_send_action(
         self,
         params: dict[str, Any],
         state: dict[str, Any],
     ) -> dict[str, Any]:
         """Instance-addressed peer send, stamped with the CALLER's identity.
+
+        Named ``peer_send_action``, not ``peer_send``: this plugin already
+        carries the typed ``AgentMessagingServiceInterface.peer_send``
+        delegation (the MCP tool's entry), so this is the same split-verb
+        shape as ``peer_inbox_action``; the process key stays
+        ``plugin::agent_messaging_plugin::peer_send``.
 
         §34.6: this verb used to hardcode the ``system`` / ``system:scheduler``
         / ``System (Scheduler)`` sentinel, so a message sent through it arrived
@@ -3125,6 +2837,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 "drive_on_delivery": ParameterMetadata(type=ParameterType.STRING),
                 "send_status": ParameterMetadata(type=ParameterType.STRING),
                 "sender_notice": ParameterMetadata(type=ParameterType.STRING),
+                "outcome_read": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Present when send_status is stored_not_delivered_yet: the process and parameters of the follow-up read that states what happened to this message.",
+                ),
                 "resolved_agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "resolved_agent_instance_id": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -3402,10 +3118,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         except PermissionError as exc:
             instance_id = str(state.get("inference_vertex_session_id") or state.get("caller_attribution_instance_id") or "").strip()
             if not instance_id:
-                raise DispatchError("dispatch_authentication_required", str(exc)) from exc
+                raise VerbError("dispatch_authentication_required", str(exc)) from exc
             session_id = self._claimant_session_id(instance_id)
             if not session_id:
-                raise DispatchError(
+                raise VerbError(
                     "dispatch_identity_unregistered",
                     "Registered local bridge identity has no live peer binding.",
                 ) from exc
@@ -3417,7 +3133,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         instance_id = principal.agent_instance_id.strip()
         session_id = self._claimant_session_id(instance_id)
         if not instance_id or not session_id:
-            raise DispatchError(
+            raise VerbError(
                 "dispatch_identity_unregistered",
                 "Authenticated caller has no registered durable session identity.",
             )
@@ -3616,97 +3332,35 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="spawn_session",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "expected_revision_id": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "role_class": ParameterMetadata(
-                description=("ephemeral | project | principal (§2 taxonomy; primary/chat are never spawn-assigned)."),
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "lane_id": ParameterMetadata(
-                description="The lane this session is spawned for (provenance).",
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "repository_root": ParameterMetadata(
-                description=("Optional absolute Git checkout for this lane. Required when the dispatched unit targets a repository other than the serving Solet's own checkout; validated before any worktree side effect."),
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "work_class": ParameterMetadata(
-                description="read_only | analysis_deliverable | production_mutation.",
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "budget_line": ParameterMetadata(
-                description="The token-budget ledger key this spawn rolls up to.",
-                required=True,
-                type=ParameterType.STRING,
-            ),
             "agent_runtime": ParameterMetadata(
-                description=("Worker runtime using the exact peer-registry agent_id vocabulary: claude_code | codex. Orthogonal to host; omitted defaults to claude_code for compatibility."),
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "role_name": ParameterMetadata(
-                description=("Named role to fill on boot (project: may mint; principal: fill-never-mint, must already be legislated). Empty for ephemeral."),
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "host": ParameterMetadata(
-                description=("Per-spawn host override (tmux | headless | operator). Empty falls to FLEET_SESSION_HOST env, then the platform default."),
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "visibility": ParameterMetadata(
-                description="visible | headless (spawn-time operator/primary parameter).",
-                required=False,
+                description="Worker runtime using the exact peer-registry agent_id vocabulary: claude_code | codex. Orthogonal to host.",
+                required=True,
                 type=ParameterType.STRING,
             ),
             "model": ParameterMetadata(
-                description="Dispatch model override.",
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "dispatch_kind": ParameterMetadata(
-                description="Required nonblank unit-kind provenance text; the value does not choose a model pair.",
+                description="Worker model. A model cell turned off by a policy rule is refused (model_cell_disabled).",
                 required=True,
                 type=ParameterType.STRING,
-            ),
-            "difficulty_score": ParameterMetadata(
-                description="Required capability score passed to select_dispatch_tier.",
-                required=True,
-                type=ParameterType.FLOAT,
-            ),
-            "selection_receipt": ParameterMetadata(
-                description="Required selection_receipt returned by select_dispatch_tier; replayed before spawn.",
-                required=True,
-                type=ParameterType.OBJECT,
-            ),
-            "reviewed_report_vendor": ParameterMetadata(
-                description="For review: vendor that authored the reviewed report (codex | claude_code).",
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "pair_id": ParameterMetadata(
-                description="For diagnose/design: shared cross-vendor producer pair identity.",
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "scope_tags": ParameterMetadata(
-                description='Caller-declared work scope tags, e.g. ["state_schema"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).',
-                required=False,
-                type=ParameterType.LIST,
             ),
             "effort": ParameterMetadata(
-                description="Dispatch effort override.",
-                required=False,
+                description="Worker effort.",
+                required=True,
                 type=ParameterType.STRING,
             ),
-            "allowed_tools": ParameterMetadata(
-                description=("Explicit tool-name allowlist override for the headless PreToolUse gate (§6 permission-mode ruling, 2026-08-03). Omitted -> resolved from plugin.yaml's per-work_class work_class_tool_allowlists; unconfigured -> empty (the spawn is still gated, just with nothing extra allowed)."),
+            "workspace": ParameterMetadata(
+                description="The absolute path of an existing directory, used verbatim as the session's working directory; nothing is created in it.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "first_message": ParameterMetadata(
+                description="Non-blank text delivered byte for byte as the session's first turn.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "label": ParameterMetadata(
+                description="Opaque text stored on the session and reported by list_sessions and session_status; never parsed. May be empty. The session's local name defaults to it.",
                 required=False,
-                type=ParameterType.LIST,
+                type=ParameterType.STRING,
             ),
             "permission_mode": ParameterMetadata(
                 description=(
@@ -3719,6 +3373,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 ),
                 required=False,
                 type=ParameterType.STRING,
+            ),
+            "allowed_tools": ParameterMetadata(
+                description=("Explicit tool-name allowlist override for the headless PreToolUse gate (§6 permission-mode ruling, 2026-08-03). Omitted -> plugin.yaml's default_allowed_tools; shipped empty (the spawn is still gated, just with nothing extra allowed)."),
+                required=False,
+                type=ParameterType.LIST,
             ),
             "allow_askuserquestion": ParameterMetadata(
                 description=(
@@ -3739,40 +3398,30 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 required=False,
                 type=ParameterType.BOOLEAN,
             ),
+            "host": ParameterMetadata(
+                description=("Per-spawn host override (tmux | headless | operator). Empty falls to FLEET_SESSION_HOST env, then the platform default."),
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "visibility": ParameterMetadata(
+                description="visible | headless (spawn-time operator/primary parameter).",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "local_name": ParameterMetadata(
+                description=("Exact name the worker answers to and registers locally. Omitted -> the label when one is given, else the instance id."),
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "report_by_seconds": ParameterMetadata(
                 description="Initial report-or-die deadline, in seconds from spawn.",
                 required=False,
                 type=ParameterType.INTEGER,
             ),
-            "spawned_by_instance_id": ParameterMetadata(
-                description="Lineage: the spawning session's own agent_instance_id.",
+            "transport": ParameterMetadata(
+                description="The worker's declared fleet transport (mcp | watch). Omitted -> plugin.yaml's default_fleet_transport.",
                 required=False,
                 type=ParameterType.STRING,
-            ),
-            "spawned_by_role": ParameterMetadata(
-                description="Lineage: the spawning session's role name at spawn time, if any.",
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "first_go": ParameterMetadata(
-                description=("Optional exact text durably queued to the new worker's inbox after ownership and before its first-turn release."),
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "dispatch_id": ParameterMetadata(
-                description=("Server-issued preparing managed_dispatch identity. Required for project-class work; ordinary callers use dispatch_managed_work."),
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "local_name": ParameterMetadata(
-                description=("Exact name the worker answers to and registers locally; explicit Git-Controller preserves the mutation guard identity."),
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "degraded_hooks_acknowledged": ParameterMetadata(
-                description="Explicit acknowledgement that required worker hooks are degraded.",
-                required=False,
-                type=ParameterType.BOOLEAN,
             ),
             "provider_env": ParameterMetadata(
                 description=(
@@ -3787,13 +3436,23 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 required=False,
                 type=ParameterType.OBJECT,
             ),
+            "degraded_hooks_acknowledged": ParameterMetadata(
+                description="Explicit acknowledgement that required worker hooks are degraded.",
+                required=False,
+                type=ParameterType.BOOLEAN,
+            ),
+            "spawned_by_instance_id": ParameterMetadata(
+                description=("Lineage only: the spawning session's own agent_instance_id. The call's own session identity wins; this value is recorded only when the call carries none, and lineage is empty when neither is present."),
+                required=False,
+                type=ParameterType.STRING,
+            ),
         },
         is_async=True,
         output_type="object",
         output_description="Accepted launch job receipt; read the job for the final operation result.",
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="Submission only; no session or dispatch is asserted by this receipt.",
+            description="Submission only; no session is asserted by this receipt.",
             properties={
                 "job_id": ParameterMetadata(type=ParameterType.STRING),
                 "status": ParameterMetadata(type=ParameterType.STRING),
@@ -3830,665 +3489,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 code="state_service_unavailable",
                 message="state_service is not bound on this solet.",
             )
-        req = _spawn_session_request_from_params(raw, format_directed_by(state.get("call_context")))
-        if req.role_class == "project":
-            return _failure_result(
-                code="managed_dispatch_required",
-                message=("Public spawn_session cannot create project work, even with a prepared ID; use dispatch_managed_work or resolve_managed_dispatch(request_retry)."),
-            )
-        req = _apply_spawn_session_policy(req, self._build_session_lifecycle_policy_config())
         try:
-            validate_spawn_admission(state_service, req)
-            req = bind_bare_assignment(self, req, raw, state)
-            result = lifecycle_spawn_session(
-                state_service,
-                req,
-                register=self._register_unit_client(),
-                actor=self._native_spawn_actor(state, req.lane_id, req.spawned_by_role),
-                messaging=self._require_service() if req.first_go else None,
-            )
-        except (VerbError, DispatchError) as exc:
-            return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
-
-    @platform_process(
-        name="dispatch_managed_work",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "expected_revision_id": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "role_class": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "lane_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "role_name": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "repository_root": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "repository_id": ParameterMetadata(
-                required=False,
-                type=ParameterType.STRING,
-                description="Expected register repository; must equal the one resolved from the lane root.",
-            ),
-            "expected_path": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "completion_contract": ParameterMetadata(required=True, type=ParameterType.OBJECT),
-            "work_class": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "budget_line": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "model": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "dispatch_kind": ParameterMetadata(
-                required=True,
-                type=ParameterType.STRING,
-                description="Required nonblank unit-kind provenance text; the value does not choose a model pair.",
-            ),
-            "difficulty_score": ParameterMetadata(required=True, type=ParameterType.FLOAT),
-            "selection_receipt": ParameterMetadata(required=True, type=ParameterType.OBJECT),
-            "reviewed_report_vendor": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "pair_id": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "scope_tags": ParameterMetadata(
-                required=False,
-                type=ParameterType.LIST,
-                description='Caller-declared work scope tags, e.g. ["state_schema"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).',
-            ),
-            "effort": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "agent_runtime": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "allowed_hosts": ParameterMetadata(required=True, type=ParameterType.LIST),
-            "host": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "spawned_by_role": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "visibility": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "local_name": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "report_by_seconds": ParameterMetadata(required=True, type=ParameterType.INTEGER),
-            "allowed_tools": ParameterMetadata(required=True, type=ParameterType.LIST),
-            "permission_mode": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "transport": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "allow_askuserquestion": ParameterMetadata(required=True, type=ParameterType.BOOLEAN),
-            "degraded_hooks_acknowledged": ParameterMetadata(
-                required=True,
-                type=ParameterType.BOOLEAN,
-            ),
-            "uptake_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "report_by": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "watchdog_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
-        },
-        is_async=True,
-        output_type="object",
-        output_description="Accepted launch job receipt; read the job for the final operation result.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Submission only; no session or dispatch is asserted by this receipt.",
-            properties={
-                "job_id": ParameterMetadata(type=ParameterType.STRING),
-                "status": ParameterMetadata(type=ParameterType.STRING),
-            },
-        ),
-    )
-    def dispatch_managed_work_action(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        return submit_launch(self, "dispatch_managed_work", params, state)
-
-    def dispatch_managed_work(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        raw = params.get("parameters", params)
-        try:
-            reject_retired_session_arguments("plugin::agent_messaging_plugin::dispatch_managed_work", raw)
-        except FrameworkError as exc:
-            return _failure_result(code=str(exc.error_code), message=str(exc))
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        directed_by = format_directed_by(state.get("call_context"))
-        spawn_req = _spawn_session_request_from_params(raw, directed_by)
-        spawn_req = _apply_spawn_session_policy(
-            spawn_req,
-            self._build_session_lifecycle_policy_config(),
-        )
-        try:
-            actor = self._dispatch_actor_from_state(state)
-            spawn_req = replace(
-                spawn_req,
-                spawned_by_instance_id=actor.agent_instance_id,
-            )
-            if not holds_role(state_service, spawn_req.spawned_by_role, actor.agent_session_id):
-                raise DispatchError(
-                    "coordinator_authority_denied",
-                    "Authenticated caller does not hold spawned_by_role.",
-                )
-            advisory = permission_mode_advisory(spawn_req.agent_runtime, spawn_req.permission_mode)
-            if advisory:
-                logger.warning("%s", advisory)
-            spec = _dispatch_spec_from_params(raw, spawn_req, directed_by)
-            result = lifecycle_dispatch_managed_work(
-                state_service,
-                spec,
-                register=self._register_unit_client(),
-                actor=actor,
-                spawn_attempt=lambda row: spawn_dispatch_attempt(
-                    state_service,
-                    row,
-                    register=self._register_unit_client(),
-                    actor=RegisterActor(actor.agent_instance_id, actor.agent_session_id, str(row["spawned_by_role"]), str(row["lane_id"])),
-                ),
-            )
-        except (DispatchError, VerbError) as exc:
-            return _failure_result(
-                code=exc.code,
-                message=exc.message,
-                data=exc.data if isinstance(exc, DispatchError) else None,
-            )
-        return _success_result(data=result)
-
-    @platform_process(
-        name="provision_role_session",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "expected_revision_id": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "repository_root": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "role_name": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "requested_role_class": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "lane_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "expected_path": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "completion_contract": ParameterMetadata(required=True, type=ParameterType.OBJECT),
-            "work_class": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "budget_line": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "model": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "dispatch_kind": ParameterMetadata(
-                required=True,
-                type=ParameterType.STRING,
-                description="Required nonblank unit-kind provenance text; the value does not choose a model pair.",
-            ),
-            "difficulty_score": ParameterMetadata(required=True, type=ParameterType.FLOAT),
-            "selection_receipt": ParameterMetadata(required=True, type=ParameterType.OBJECT),
-            "reviewed_report_vendor": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "pair_id": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "scope_tags": ParameterMetadata(
-                required=False,
-                type=ParameterType.LIST,
-                description='Caller-declared work scope tags, e.g. ["state_schema"] for a state-service table change. Tags preserve provenance and do not by themselves restrict the model; the state_schema model floor is retired (rul_0c6ec7c7).',
-            ),
-            "effort": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "agent_runtime": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "allowed_hosts": ParameterMetadata(required=True, type=ParameterType.LIST),
-            "host": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "spawned_by_role": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "visibility": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "report_by_seconds": ParameterMetadata(required=True, type=ParameterType.INTEGER),
-            "allowed_tools": ParameterMetadata(required=True, type=ParameterType.LIST),
-            "permission_mode": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "transport": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "allow_askuserquestion": ParameterMetadata(required=True, type=ParameterType.BOOLEAN),
-            "degraded_hooks_acknowledged": ParameterMetadata(
-                required=True,
-                type=ParameterType.BOOLEAN,
-            ),
-            "uptake_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "report_by": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "watchdog_due_at": ParameterMetadata(required=True, type=ParameterType.STRING),
-        },
-        is_async=True,
-        output_type="object",
-        output_description="Accepted launch job receipt; read the job for the final operation result.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Submission only; no session or dispatch is asserted by this receipt.",
-            properties={
-                "job_id": ParameterMetadata(type=ParameterType.STRING),
-                "status": ParameterMetadata(type=ParameterType.STRING),
-            },
-        ),
-    )
-    def provision_role_session_action(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        return submit_launch(self, "provision_role_session", params, state)
-
-    def provision_role_session(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Provision a routable project role without making callers guess its class.
-
-        The worker, not this composing verb, claims the durable binding: the
-        shared first-turn frame always tells named workers to claim first.
-        """
-        raw = params.get("parameters", params)
-        try:
-            reject_retired_session_arguments("plugin::agent_messaging_plugin::provision_role_session", raw)
-        except FrameworkError as exc:
-            return _failure_result(code=str(exc.error_code), message=str(exc))
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        try:
-            data = self._provision_role_session_data(state_service, raw, state)
-        except (DispatchError, VerbError) as exc:
-            return _failure_result(
-                code=exc.code,
-                message=exc.message,
-                data=exc.data if isinstance(exc, DispatchError) else None,
-            )
-        return _success_result(data=data)
-
-    def _provision_role_session_data(
-        self,
-        state_service: Any,
-        raw: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, object]:
-        directed_by = format_directed_by(state.get("call_context"))
-        role_name = str(raw.get("role_name") or "").strip()
-        resolved_role_class, needs_legislation = lifecycle_resolve_provisioned_role_class(
-            state_service,
-            role_name=role_name,
-            requested_role_class=str(raw.get("requested_role_class") or ""),
-        )
-        actor = self._dispatch_actor_from_state(state)
-        _require_provisioner_authority(
-            state_service,
-            str(raw.get("spawned_by_role") or ""),
-            actor,
-        )
-        existing_holder = _provisioned_live_role_holder(self, state_service, role_name)
-        if existing_holder is not None:
-            return {
-                "provisioning_action": "existing_live_holder",
-                "resolved_role_class": resolved_role_class,
-                "legislation": {"action": "not_required"},
-                "existing_holder": existing_holder,
-                "dispatch": {},
-                "attempt": {},
-            }
-        legislation: dict[str, object] = {"action": "not_required"}
-        spawn_raw = dict(raw)
-        spawn_raw["role_class"] = resolved_role_class
-        spawn_raw["local_name"] = lifecycle_resolve_local_name(
-            role_class=resolved_role_class,
-            role_name=role_name,
-            lane_id=str(raw.get("lane_id") or ""),
-        )
-        spawn_req = _spawn_session_request_from_params(spawn_raw, directed_by)
-        spawn_req = _apply_spawn_session_policy(
-            spawn_req,
-            self._build_session_lifecycle_policy_config(),
-        )
-        spawn_req = replace(spawn_req, spawned_by_instance_id=actor.agent_instance_id)
-
-        def launch(row: Mapping[str, Any]) -> Mapping[str, Any]:
-            assignment = require_assignment(row)
-            legislation.update(
-                _provision_legislation(
-                    state_service,
-                    needs_legislation=needs_legislation,
-                    role_name=role_name,
-                    role_class=resolved_role_class,
-                    unit_id=assignment.unit_id,
-                    revision_id=assignment.revision.revision_id,
-                    directed_by=directed_by,
-                )
-            )
-            return spawn_dispatch_attempt(
-                state_service,
-                row,
-                register=self._register_unit_client(),
-                actor=RegisterActor(actor.agent_instance_id, actor.agent_session_id, str(row["spawned_by_role"]), str(row["lane_id"])),
-            )
-
-        result = lifecycle_dispatch_managed_work(
-            state_service,
-            _dispatch_spec_from_params(spawn_raw, spawn_req, directed_by),
-            register=self._register_unit_client(),
-            actor=actor,
-            spawn_attempt=launch,
-        )
-        return {
-            "provisioning_action": "spawned",
-            "resolved_role_class": resolved_role_class,
-            "legislation": legislation,
-            "existing_holder": {},
-            "dispatch": result["dispatch"],
-            "attempt": result["attempt"],
-        }
-
-    @platform_process(
-        is_async=True,
-        name="report_managed_dispatch",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "event_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "event_kind": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "attempt_agent_instance_id": ParameterMetadata(
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "prior_version": ParameterMetadata(required=True, type=ParameterType.INTEGER),
-            "payload": ParameterMetadata(required=True, type=ParameterType.OBJECT),
-        },
-        output_type="object",
-        output_description="Validated worker event and resulting dispatch projection.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Validated worker event projection.",
-        ),
-    )
-    def report_managed_dispatch(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        raw = params.get("parameters", params)
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        try:
-            actor = self._dispatch_actor_from_state(state)
-            result = lifecycle_report_managed_dispatch(
-                state_service,
-                dispatch_id=str(raw.get("dispatch_id") or ""),
-                event_id=str(raw.get("event_id") or ""),
-                event_kind=str(raw.get("event_kind") or ""),
-                attempt_agent_instance_id=str(raw.get("attempt_agent_instance_id") or ""),
-                actor=actor,
-                prior_version=int(raw.get("prior_version") or 0),
-                payload=_as_object(raw.get("payload")),
-                observed_at=datetime.now(UTC),
-            )
-        except DispatchError as exc:
-            return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
-
-    @platform_process(
-        name="resolve_managed_dispatch",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "event_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "action": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "prior_version": ParameterMetadata(required=True, type=ParameterType.INTEGER),
-            "payload": ParameterMetadata(required=True, type=ParameterType.OBJECT),
-        },
-        is_async=True,
-        output_type="object",
-        output_description="Accepted launch job receipt; read the job for the final operation result.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Submission only; no session or dispatch is asserted by this receipt.",
-            properties={
-                "job_id": ParameterMetadata(type=ParameterType.STRING),
-                "status": ParameterMetadata(type=ParameterType.STRING),
-            },
-        ),
-    )
-    def resolve_managed_dispatch_action(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        return submit_launch(self, "resolve_managed_dispatch", params, state)
-
-    def resolve_managed_dispatch(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],
-    ) -> dict[str, Any]:
-        raw = params.get("parameters", params)
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        try:
-            actor = self._dispatch_actor_from_state(state)
-            result = lifecycle_resolve_managed_dispatch(
-                state_service,
-                dispatch_id=str(raw.get("dispatch_id") or ""),
-                event_id=str(raw.get("event_id") or ""),
-                action=str(raw.get("action") or ""),
-                actor=actor,
-                prior_version=int(raw.get("prior_version") or 0),
-                payload=_as_object(raw.get("payload")),
-                observed_at=datetime.now(UTC),
-                register=self._register_unit_client(),
-                spawn_attempt=lambda row: spawn_dispatch_attempt(
-                    state_service,
-                    row,
-                    register=self._register_unit_client(),
-                    actor=RegisterActor(actor.agent_instance_id, actor.agent_session_id, str(row["spawned_by_role"]), str(row["lane_id"])),
-                ),
-                historical_cancel_role=self._build_session_lifecycle_policy_config().historical_cancel_role,
-            )
-        except DispatchError as exc:
-            return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
-
-    @platform_process(
-        is_async=True,
-        name="managed_dispatch_status",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "dispatch_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "milestone_claim": ParameterMetadata(
-                required=False,
-                type=ParameterType.OBJECT,
-                description="Optional baseline, requested_at and exact event_id for read-only milestone verification.",
-            ),
-        },
-        output_type="object",
-        output_description="Decision-oriented aggregate managed-dispatch status.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Decision-oriented dispatch aggregate.",
-        ),
-    )
-    def managed_dispatch_status(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002
-    ) -> dict[str, Any]:
-        raw = params.get("parameters", params)
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        try:
-            result = lifecycle_managed_dispatch_status(
-                state_service,
-                str(raw.get("dispatch_id") or ""),
-                milestone_claim=raw.get("milestone_claim"),
-            )
-        except DispatchError as exc:
-            return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
-
-    @platform_process(
-        name="managed_dispatch_inventory",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "state": ParameterMetadata(
-                required=False,
-                type=ParameterType.STRING,
-                description="Optional exact managed-dispatch state filter.",
-            ),
-            "limit": ParameterMetadata(
-                required=False,
-                type=ParameterType.INTEGER,
-                description="Page size from 1 through 250; defaults to 100.",
-            ),
-            "after_created_at": ParameterMetadata(
-                required=False,
-                type=ParameterType.STRING,
-                description="Echo next_cursor.created_at with after_id.",
-            ),
-            "after_id": ParameterMetadata(
-                required=False,
-                type=ParameterType.STRING,
-                description="Echo next_cursor.id with after_created_at.",
-            ),
-        },
-        output_type="object",
-        output_description="Tie-safe page of managed-dispatch inventory rows.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Managed-dispatch inventory page.",
-            properties={
-                "dispatches": ParameterMetadata(type=ParameterType.LIST),
-                "returned": ParameterMetadata(type=ParameterType.INTEGER),
-                "truncated": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "next_cursor": ParameterMetadata(type=ParameterType.OBJECT),
-            },
-        ),
-    )
-    def managed_dispatch_inventory(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002
-    ) -> dict[str, Any]:
-        raw = params.get("parameters", params)
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        try:
-            result = lifecycle_managed_dispatch_inventory(
-                state_service,
-                state_name=str(raw.get("state") or ""),
-                limit=raw.get("limit", 100),
-                after_created_at=raw.get("after_created_at"),
-                after_id=raw.get("after_id"),
-            )
-        except DispatchError as exc:
-            return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
-
-    @platform_process(
-        name="managed_dispatch_events",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "dispatch_id": ParameterMetadata(
-                required=False,
-                type=ParameterType.STRING,
-                description="Optional owning dispatch filter; omit to enumerate all events.",
-            ),
-            "event_kind": ParameterMetadata(
-                required=False,
-                type=ParameterType.STRING,
-                description="Optional exact event-kind filter.",
-            ),
-            "accepted": ParameterMetadata(
-                required=False,
-                type=ParameterType.BOOLEAN,
-                description="Optional accepted/rejected filter.",
-            ),
-            "limit": ParameterMetadata(
-                required=False,
-                type=ParameterType.INTEGER,
-                description="Page size from 1 through 250; defaults to 100.",
-            ),
-            "after_event_at": ParameterMetadata(
-                required=False,
-                type=ParameterType.STRING,
-                description="Echo next_cursor.event_at with after_id.",
-            ),
-            "after_id": ParameterMetadata(
-                required=False,
-                type=ParameterType.STRING,
-                description="Echo next_cursor.id with after_event_at.",
-            ),
-        },
-        output_type="object",
-        output_description="Tie-safe page of append-only managed-dispatch events.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Managed-dispatch event page.",
-            properties={
-                "events": ParameterMetadata(type=ParameterType.LIST),
-                "returned": ParameterMetadata(type=ParameterType.INTEGER),
-                "truncated": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "next_cursor": ParameterMetadata(type=ParameterType.OBJECT),
-            },
-        ),
-    )
-    def managed_dispatch_events(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002
-    ) -> dict[str, Any]:
-        raw = params.get("parameters", params)
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        try:
-            result = lifecycle_managed_dispatch_events(
-                state_service,
-                dispatch_id=str(raw.get("dispatch_id") or ""),
-                event_kind=str(raw.get("event_kind") or ""),
-                accepted=raw["accepted"] if "accepted" in raw else None,
-                limit=raw.get("limit", 100),
-                after_event_at=raw.get("after_event_at"),
-                after_id=raw.get("after_id"),
-            )
-        except DispatchError as exc:
-            return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
-
-    @platform_process(
-        name="managed_dispatch_uptake_rate",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "since": ParameterMetadata(required=True, type=ParameterType.STRING, description="Inclusive contract creation cutoff, aware ISO timestamp."),
-            "as_of": ParameterMetadata(required=False, type=ParameterType.STRING, description="Inclusive receipt observation cutoff; defaults to now."),
-            "window_seconds": ParameterMetadata(required=False, type=ParameterType.INTEGER, description="Uptake window, 1..86400 seconds; default 300."),
-            "sample_size": ParameterMetadata(required=False, type=ParameterType.INTEGER, description="Earliest consecutive eligible contracts, 1..500; default 50."),
-            "runtime": ParameterMetadata(required=False, type=ParameterType.STRING, description="Original first-turn runtime filter; unknown eligibility is retained."),
-            "transport": ParameterMetadata(required=False, type=ParameterType.STRING, description="Original first-turn host transport filter, e.g. tmux."),
-        },
-        output_type="object",
-        output_description="Read-only initial-attempt worker ACK uptake evidence and cohort conversion.",
-        return_value_schema=ReturnValueSchema(type=ParameterType.OBJECT, description="Receipt-time cohort, per-dispatch evidence and SLO advisory."),
-    )
-    def managed_dispatch_uptake_rate(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002
-    ) -> dict[str, Any]:
-        raw = params.get("parameters", params)
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _success_result(data={"slo_status": "UNMEASURABLE", "reads_complete": False, "advisories": ["state_service is not bound on this solet."]})
-        try:
-            result = lifecycle_managed_dispatch_uptake_rate(
-                state_service,
-                since=raw.get("since", ""),
-                as_of=raw.get("as_of"),
-                window_seconds=raw.get("window_seconds", 300),
-                sample_size=raw.get("sample_size", 50),
-                runtime=str(raw.get("runtime") or ""),
-                transport=str(raw.get("transport") or ""),
-            )
-        except DispatchError as exc:
+            req = _spawn_session_request_from_params(raw, state, self._build_session_lifecycle_policy_config())
+            result = lifecycle_spawn_session(state_service, req)
+        except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -4508,7 +3512,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 type=ParameterType.STRING,
             ),
             "authority": ParameterMetadata(
-                description=("The ruling, issue or brief that authorizes this retirement (provenance, stored in retired_by with the caller's seat)."),
+                description=("The ruling, issue or brief the caller cites for this retirement. Required, and recorded as written in retired_by after the calling session's instance id; it is not checked as a permission."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -4536,8 +3540,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
     def retire_role(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Retire a role in the authoritative registry (iss_d9c955a2).
 
-        Only a caller holding a primary- or principal-class role may retire, and a
-        role a LIVE session holds is refused until that holder releases it.
+        Any registered caller may retire a role; the appended row records the
+        caller's instance id and the authority. A call carrying no caller identity
+        is refused (``retire_role_caller_unattributed``) because the row would have
+        no actor, and a role a LIVE session holds is refused (``role_held_live``)
+        until that holder releases it.
         """
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
@@ -4597,148 +3604,21 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         return _success_result(data=registry.to_public())
 
     @platform_process(
-        name="legislate_role",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "revision_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "name": ParameterMetadata(
-                description=("The role name to legislate (e.g. 'Coordinator-Main' for a role_class='primary' seat)."),
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "role_class": ParameterMetadata(
-                description=("primary | principal — the ONE two-value taxonomy this governance act may assign; project/ephemeral/chat are minted, never legislated."),
-                required=True,
-                type=ParameterType.STRING,
-            ),
-        },
-        output_type="object",
-        output_description="legislate_role outcome: the legislated name + role_class.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="legislate_role outcome (D4 Part B item 1)",
-            properties={
-                "action": ParameterMetadata(type=ParameterType.STRING),
-                "name": ParameterMetadata(type=ParameterType.STRING),
-                "role_class": ParameterMetadata(type=ParameterType.STRING),
-            },
-        ),
-    )
-    def legislate_role(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """D4 Part B item 1 — governance-act creation of a ``role`` row with
-        an authority-carrying ``role_class`` (``primary``/``principal``)
-        stamped at birth. The ONE sanctioned path outside ``peer_claim_role``
-        (§3.1 Q1: claim-time is enforce-by-class, never class-assignment).
-
-        ``directed_by`` is server-built from ``call_context`` via
-        ``format_directed_by`` — the SAME provenance convention
-        ``spawn_session`` uses, never caller-supplied.
-        """
-        raw = params.get("parameters", params)
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        req = LegislateRoleRequest(
-            name=str(raw.get("name") or ""),
-            role_class=str(raw.get("role_class") or ""),
-            unit_id=str(raw.get("unit_id") or ""),
-            revision_id=str(raw.get("revision_id") or ""),
-            directed_by=format_directed_by(state.get("call_context")),
-        )
-        try:
-            result = lifecycle_legislate_role(state_service, req)
-        except VerbError as exc:
-            return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
-
-    @platform_process(
-        name="capture_lane_charter",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "revision_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "lane_id": ParameterMetadata(
-                description="The lane this charter founds.",
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "charter_text": ParameterMetadata(
-                description=("The operator's verbatim founding words, captured byte-exact. Driven unmodified as a spawned worker's literal first turn (spawn_session resolves the LATEST captured row for the worker's lane_id)."),
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "captured_at": ParameterMetadata(
-                description=("ISO-8601 timestamp of when the operator spoke these words in the seat conversation — NOT the row-write time."),
-                required=True,
-                type=ParameterType.STRING,
-            ),
-        },
-        output_type="object",
-        output_description="capture_lane_charter outcome: the newly written charter row.",
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="capture_lane_charter outcome (phase 2 slice 6)",
-            properties={
-                "lane_id": ParameterMetadata(type=ParameterType.STRING),
-                "charter_text": ParameterMetadata(type=ParameterType.STRING),
-                "unit_id": ParameterMetadata(type=ParameterType.STRING),
-                "revision_id": ParameterMetadata(type=ParameterType.STRING),
-                "captured_at": ParameterMetadata(type=ParameterType.STRING),
-                "directed_by": ParameterMetadata(type=ParameterType.STRING),
-            },
-        ),
-    )
-    def capture_lane_charter(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """Phase 2 slice 6, design check-in ruling item 3(a) — the seat-
-        invoked governance act that writes a ``lane_charter`` row.
-        Insert-only: calling this again for the same ``lane_id`` supersedes
-        by recency, it never edits a prior charter's text in place.
-
-        ``directed_by`` is server-built from ``call_context`` via
-        ``format_directed_by`` — the SAME provenance convention
-        ``spawn_session``/``legislate_role`` use, never caller-supplied.
-        """
-        raw = params.get("parameters", params)
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(
-                code="state_service_unavailable",
-                message="state_service is not bound on this solet.",
-            )
-        req = CaptureLaneCharterRequest(
-            lane_id=str(raw.get("lane_id") or ""),
-            charter_text=str(raw.get("charter_text") or ""),
-            captured_at=str(raw.get("captured_at") or ""),
-            unit_id=str(raw.get("unit_id") or ""),
-            revision_id=str(raw.get("revision_id") or ""),
-            directed_by=format_directed_by(state.get("call_context")),
-        )
-        try:
-            result = lifecycle_capture_lane_charter(state_service, req)
-        except VerbError as exc:
-            return _failure_result(code=exc.code, message=exc.message)
-        return _success_result(data=result)
-
-    @platform_process(
         name="arm_session_dependency",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "waiter_instance_id": ParameterMetadata(
-                description=("The waiting session's agent_instance_id. Required — v1 is session-scoped ONLY; lane-scoped arming is unsupported by construction (there is no waiter_lane_id parameter)."),
+                description=("The waiting session's agent_instance_id. Required — v1 is session-scoped ONLY."),
                 required=True,
                 type=ParameterType.STRING,
             ),
             "condition_kind": ParameterMetadata(
-                description="lane_closed | session_terminal | deadline.",
+                description="session_terminal | deadline.",
                 required=True,
                 type=ParameterType.STRING,
             ),
             "condition_ref": ParameterMetadata(
-                description=("The condition_kind's referent: a lane_id (lane_closed), an agent_instance_id (session_terminal), or an ISO-8601 timestamp (deadline). Shape-checked per kind."),
+                description=("The condition_kind's referent: an agent_instance_id (session_terminal) or an ISO-8601 timestamp (deadline). Shape-checked per kind."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -4825,13 +3705,8 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="list_sessions",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "lane_id": ParameterMetadata(
-                description="Filter to one lane_id.",
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "work_class": ParameterMetadata(
-                description="Filter to one work_class.",
+            "label": ParameterMetadata(
+                description="Filter to the sessions started with this label.",
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -4892,7 +3767,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 code="state_service_unavailable",
                 message="state_service is not bound on this solet.",
             )
-        filters = {key: str(raw[key]) for key in ("lane_id", "work_class", "host", "lifecycle_state") if raw.get(key)}
+        filters = {key: str(raw[key]) for key in ("label", "host", "lifecycle_state") if raw.get(key)}
         raw_limit = raw.get("limit", LIST_SESSIONS_DEFAULT_LIMIT)
         try:
             result = lifecycle_list_sessions(
@@ -4975,7 +3850,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = lifecycle_record_fleet_liveness_run(
                 state_service,
@@ -5023,7 +3901,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = lifecycle_record_fleet_progress_run(
                 state_service,
@@ -5062,7 +3943,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = lifecycle_recent_fleet_liveness_runs(
                 state_service,
@@ -5095,7 +3979,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = lifecycle_recent_fleet_progress_runs(
                 state_service,
@@ -5112,28 +3999,24 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="budget_report",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "lane_id": ParameterMetadata(
-                description="Filter to one lane_id.",
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "budget_line": ParameterMetadata(
-                description="Filter to one budget_line.",
+            "label": ParameterMetadata(
+                description="Filter to one label, matched exactly as stored; omit it to report every label.",
                 required=False,
                 type=ParameterType.STRING,
             ),
         },
         output_type="object",
-        output_description=("T1 S3 -- per-budget_line token-usage rollup, joining managed_session/session_claude_mapping against session_ledger's session/event tables."),
+        output_description=("T1 S3 -- per-label token-usage rollup, joining managed_session/session_claude_mapping against session_ledger's session/event tables."),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="budget_report outcome",
             properties={
-                "budget_lines": ParameterMetadata(
+                "labels": ParameterMetadata(
                     type=ParameterType.LIST,
                     description=(
-                        "One entry per distinct budget_line among matching "
-                        "managed_session rows. Each entry: budget_line (str), "
+                        "One entry per distinct label among matching "
+                        "managed_session rows; rows with an empty or missing "
+                        "label are one entry with label ''. Each entry: label (str), "
                         "sessions_covered (int, contributed >=1 usage-bearing "
                         "session_ledger event), sessions_uncovered (int, no "
                         "mapping row or no ledger usage events -- the S2c "
@@ -5153,7 +4036,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         ),
     )
     def budget_report(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
-        """T1 S3 -- read-only token-usage rollup per budget_line. See
+        """T1 S3 -- read-only token-usage rollup per label. See
         ``budget_report.py``'s module docstring for the join mechanism (the
         first cross-plugin state read against session_ledger's own tables)
         and the seat's three S3 design rails (staleness marker, coverage
@@ -5167,8 +4050,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             )
         result = lifecycle_build_budget_report(
             state_service,
-            lane_id=str(raw.get("lane_id") or ""),
-            budget_line=str(raw.get("budget_line") or ""),
+            label=str(raw.get("label") or ""),
         )
         return _success_result(data=result)
 
@@ -5261,19 +4143,31 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 "agent_id": ParameterMetadata(type=ParameterType.STRING),
                 "spawned_by_instance_id": ParameterMetadata(type=ParameterType.STRING),
                 "spawned_by_role": ParameterMetadata(type=ParameterType.STRING),
-                "lane_id": ParameterMetadata(type=ParameterType.STRING),
-                "unit_id": ParameterMetadata(type=ParameterType.STRING),
-                "revision_id": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
                 "effort": ParameterMetadata(type=ParameterType.STRING),
-                "work_class": ParameterMetadata(type=ParameterType.STRING),
-                "budget_line": ParameterMetadata(type=ParameterType.STRING),
+                "label": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Opaque caller text stored at spawn; empty when none was stored.",
+                ),
+                "workspace": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="A generic spawn's working directory; empty for every other session.",
+                ),
                 "visibility": ParameterMetadata(type=ParameterType.STRING),
                 "host": ParameterMetadata(type=ParameterType.STRING),
                 "host_ref": ParameterMetadata(type=ParameterType.STRING),
-                "prior_host_outcome": ParameterMetadata(type=ParameterType.OBJECT, description="Latest persisted termination attempt for terminal rows; null means unknown."),
-                "prior_host_reason": ParameterMetadata(type=ParameterType.STRING, description="Raw append-only termination rationale for terminal rows."),
-                "prior_host_advisory": ParameterMetadata(type=ParameterType.STRING, description="Explicit missing, malformed or unreadable prior evidence advisory."),
+                "prior_host_outcome": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Latest persisted termination attempt for terminal rows; null means unknown.",
+                ),
+                "prior_host_reason": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Raw append-only termination rationale for terminal rows.",
+                ),
+                "prior_host_advisory": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Explicit missing, malformed or unreadable prior evidence advisory.",
+                ),
                 "delivery_pickup": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description="Bounded recent pickup evidence; scan/history continuation is explicit.",
@@ -5314,7 +4208,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             )
         except Exception:  # noqa: BLE001 -- optional evidence cannot block ledger readback
             logger.exception("Codex pickup readback unavailable; managed session read succeeded")
-            row["delivery_pickup"] = {"unavailable": True, "reason": "pickup evidence unavailable; mail retained"}
+            row["delivery_pickup"] = {
+                "unavailable": True,
+                "reason": "pickup evidence unavailable; mail retained",
+            }
         row["permission_prompt_state"] = permission_prompt_state(row)
         return _success_result(data=row)
 
@@ -5404,7 +4301,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         """Enqueue metadata collection under existing process authorization."""
         job_manager = self._try_acquire_async_job_manager()
         if job_manager is None:
-            return _failure_result(code="async_job_manager_unavailable", message="AsyncJobManager is not available on this solet.")
+            return _failure_result(
+                code="async_job_manager_unavailable",
+                message="AsyncJobManager is not available on this solet.",
+            )
         try:
             receipt = dispatch_reconcile_ledger_tmux(job_manager, state)
         except VerbError as exc:
@@ -5426,7 +4326,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         except Exception as exc:
             outcome = _create_error_response(exc)
         failed = bool(outcome.get("error")) or outcome.get("action_status") == JOB_STATUS_ERROR
-        updates: dict[str, Any] = {"status": JOB_STATUS_ERROR if failed else JOB_STATUS_COMPLETED, "result": outcome}
+        updates: dict[str, Any] = {
+            "status": JOB_STATUS_ERROR if failed else JOB_STATUS_COMPLETED,
+            "result": outcome,
+        }
         if failed:
             error = outcome.get("error")
             updates["error"] = error if isinstance(error, dict) else outcome
@@ -5619,22 +4522,40 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 "lifecycle_state": ParameterMetadata(type=ParameterType.STRING),
                 "session_terminal_edges_fired": ParameterMetadata(type=ParameterType.INTEGER),
                 "host": ParameterMetadata(type=ParameterType.STRING),
-                "host_ref": ParameterMetadata(type=ParameterType.STRING, description="Exact native host reference observed by this call."),
+                "host_ref": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Exact native host reference observed by this call.",
+                ),
                 "host_action": ParameterMetadata(
                     type=ParameterType.STRING,
                     description=("Current invocation: terminated means driver return, none_available means no supported action, not_attempted means no invocation. Observe host_liveness separately."),
                 ),
                 "host_remedy": ParameterMetadata(type=ParameterType.STRING),
-                "prior_host_outcome": ParameterMetadata(type=ParameterType.OBJECT, description="Latest versioned termination attempt with exact identity and transition provenance; null means unknown."),
+                "prior_host_outcome": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Latest versioned termination attempt with exact identity and transition provenance; null means unknown.",
+                ),
                 "prior_host_reason": ParameterMetadata(type=ParameterType.STRING, description="Raw immutable transition rationale."),
-                "prior_host_advisory": ParameterMetadata(type=ParameterType.STRING, description="Named missing, malformed or unreadable history advisory."),
-                "host_liveness": ParameterMetadata(type=ParameterType.STRING, description="Fresh native alive/dead/unknown observation, independent of driver invocation."),
+                "prior_host_advisory": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Named missing, malformed or unreadable history advisory.",
+                ),
+                "host_liveness": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Fresh native alive/dead/unknown observation, independent of driver invocation.",
+                ),
                 "host_liveness_detail": ParameterMetadata(type=ParameterType.STRING),
                 "host_liveness_observed_at": ParameterMetadata(type=ParameterType.STRING),
                 "registry_checked": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "peer_registration": ParameterMetadata(type=ParameterType.OBJECT),
-                "teardown_complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="True only for exact host observed dead and peer registry checked absent."),
-                "not_done": ParameterMetadata(type=ParameterType.LIST, description="Unresolved host and registration facts; completed describes the ledger operation."),
+                "teardown_complete": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True only for exact host observed dead and peer registry checked absent.",
+                ),
+                "not_done": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Unresolved host and registration facts; completed describes the ledger operation.",
+                ),
             },
         ),
     )
@@ -5669,62 +4590,131 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         return _success_result(data=result)
 
     @platform_process(
-        is_async=True,
-        name="preserve_lane_evidence",
+        name="session_host_closed",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "agent_instance_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Managed lane instance."),
-            "unit_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Exact managed Unit."),
-            "repository_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Frozen assignment repository."),
-            "assignment_sha256": ParameterMetadata(type=ParameterType.STRING, required=True, description="Frozen managed assignment digest."),
-            "expected_fingerprint": ParameterMetadata(type=ParameterType.STRING, required=True, description="Fingerprint from snapshot-only read_lane_evidence."),
-            "disposition": ParameterMetadata(type=ParameterType.STRING, required=True, description="preserved or superseded; neither permits deletion."),
-            "rationale": ParameterMetadata(type=ParameterType.STRING, required=True, description="Why the bytes are retained or superseded."),
-            "predecessor_packet_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Verified same-binding predecessor; omission begins no lineage."),
+            "host": ParameterMetadata(
+                description="The kind of host that reported the close: tmux or headless.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "host_ref": ParameterMetadata(
+                description="The exact reference of the host session that closed (for tmux, the exact session name).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
-        output_description="Verified immutable custody packet, provenance, bounded summary and audit advisories; no termination or removal.",
+        output_description="A host's notice that its session closed. Each live record naming that host session is ended only if the exact host check agrees it is gone; present records are left, and records whose host cannot be checked are left unchanged and listed with the reason.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="session_host_closed outcome",
+            properties={
+                "host": ParameterMetadata(type=ParameterType.STRING),
+                "host_ref": ParameterMetadata(type=ParameterType.STRING),
+                "checked": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Live records that named this host session.",
+                ),
+                "ended": ParameterMetadata(type=ParameterType.LIST, description="agent_instance_ids ended by this call."),
+                "present": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="agent_instance_ids left live because the host session exists.",
+                ),
+                "unknown": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Records left unchanged because the host could not be checked: agent_instance_id and detail.",
+                ),
+                "changed_meanwhile": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="agent_instance_ids that changed between the read and the write; nothing was written for them.",
+                ),
+            },
+        ),
     )
-    def preserve_lane_evidence(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """Preserve a verified managed lane without any retirement side effect."""
+    def session_host_closed(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """A host notice is a trigger, never proof: the record ends only after
+        the exact host check says gone. Any caller may send it."""
+        raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
-            actor = self._dispatch_actor_from_state(state)
-            try:
-                register = self._register_unit_client()
-            except (RegisterUnitError, KeyError):
-                register = None
-            result = lifecycle_preserve_lane_evidence(state_service, params.get("parameters", params), actor=actor, register=register)
-        except (VerbError, DispatchError) as exc:
+            result = on_host_session_closed(
+                state_service,
+                host=raw.get("host"),
+                host_ref=raw.get("host_ref"),
+                directed_by=format_directed_by(state.get("call_context")) or "session_host_closed",
+            )
+        except SessionEndError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
     @platform_process(
-        is_async=True,
-        name="read_lane_evidence",
+        name="session_ended",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "agent_instance_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Managed lane instance."),
-            "unit_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Exact managed Unit."),
-            "repository_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Frozen assignment repository."),
-            "assignment_sha256": ParameterMetadata(type=ParameterType.STRING, required=True, description="Frozen managed assignment digest."),
-            "packet_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Explicit immutable packet; omit for snapshot-only fingerprint and inventory."),
-            "payload_path": ParameterMetadata(type=ParameterType.STRING, required=False, description="One packet-relative payload path; requires packet_id and layer."),
-            "payload_layer": ParameterMetadata(type=ParameterType.STRING, required=False, description="index or worktree for selected payload; requires packet_id and path."),
+            "agent_instance_id": ParameterMetadata(
+                description="The managed session that is reporting its own end.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "reason": ParameterMetadata(
+                description="Why the session ended, as the session states it (for example prompt_input_exit). Optional.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "outcome": ParameterMetadata(
+                description="The session's own typed result: finished or failed. Optional; none given records the end with the reason unknown, and any other value is refused.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
-        output_description="Bound snapshot-only fingerprint or verified historical packet, bounded inventory/provenance and one selected payload up to 65536 bytes.",
+        output_description="A session's own report that it ended. A live record is ended with the stated reason and no host check; an already-ended record is left and reported as such. The result carries the record's typed end_reason.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="session_ended outcome",
+            properties={
+                "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
+                "ended": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when this call ended the record."),
+                "already_ended": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True when the record was not live and was left as it is.",
+                ),
+                "lifecycle_state": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="The record's lifecycle state after the call.",
+                ),
+                "end_reason": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Why the record ended, as stored: finished, failed, stopped_by_asker, stopped_by_solet, refused_by_provider or unknown. Null while the record has not ended.",
+                ),
+            },
+        ),
     )
-    def read_lane_evidence(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """Read the bound lane snapshot or one immutable packet; no latest selector."""
+    def session_ended(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """The session is the authority on its own end: no host check, and the
+        report never acts on the host. Any caller may send it."""
+        raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
-            result = lifecycle_read_lane_evidence(state_service, params.get("parameters", params), actor=self._dispatch_actor_from_state(state))
-        except (VerbError, DispatchError) as exc:
+            result = end_reported_session(
+                state_service,
+                agent_instance_id=raw.get("agent_instance_id"),
+                reason=raw.get("reason"),
+                directed_by=format_directed_by(state.get("call_context")) or "session_ended",
+                outcome=raw.get("outcome"),
+            )
+        except SessionEndError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -5738,15 +4728,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 required=True,
                 type=ParameterType.STRING,
             ),
-            "unit_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Exact managed Unit; required with a pinned custody packet."),
-            "repository_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Frozen assignment repository; required with a pinned custody packet."),
-            "assignment_sha256": ParameterMetadata(type=ParameterType.STRING, required=False, description="Frozen managed assignment digest; required with a pinned custody packet."),
-            "packet_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Existing immutable custody packet pinned for this call only; never with preserve_evidence."),
-            "expected_fingerprint": ParameterMetadata(type=ParameterType.STRING, required=False, description="Snapshot fingerprint the packet and the whole current lane must both equal."),
-            "preserve_evidence": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="Preserve and read-verify a packet in this call before retiring; needs disposition, rationale and fingerprint."),
-            "disposition": ParameterMetadata(type=ParameterType.STRING, required=False, description="preserved or superseded, for preserve_evidence; neither permits deletion without verified custody."),
-            "rationale": ParameterMetadata(type=ParameterType.STRING, required=False, description="Why the bytes are preserved or superseded, for preserve_evidence."),
-            "predecessor_packet_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Verified same-binding predecessor for preserve_evidence; omission begins no lineage."),
         },
         output_type="object",
         output_description=("§4 retire_session — terminate + release + fire dependency edges + retired."),
@@ -5757,20 +4738,32 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 "already_retired": ParameterMetadata(type=ParameterType.BOOLEAN),
                 "dependencies_fired": ParameterMetadata(type=ParameterType.INTEGER),
                 "host": ParameterMetadata(type=ParameterType.STRING),
-                "host_ref": ParameterMetadata(type=ParameterType.STRING, description="Exact native host reference observed by this call."),
+                "host_ref": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Exact native host reference observed by this call.",
+                ),
                 "host_action": ParameterMetadata(
                     type=ParameterType.STRING,
                     description=("Current invocation only: terminated is driver return, none_available is no supported action, not_attempted is no new invocation."),
                 ),
                 "host_remedy": ParameterMetadata(type=ParameterType.STRING),
-                "prior_host_outcome": ParameterMetadata(type=ParameterType.OBJECT, description="Latest persisted attempt, distinct from the current action; null means unknown."),
+                "prior_host_outcome": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Latest persisted attempt, distinct from the current action; null means unknown.",
+                ),
                 "prior_host_reason": ParameterMetadata(type=ParameterType.STRING),
                 "prior_host_advisory": ParameterMetadata(type=ParameterType.STRING),
-                "host_liveness": ParameterMetadata(type=ParameterType.STRING, description="Fresh exact native alive/dead/unknown observation."),
+                "host_liveness": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Fresh exact native alive/dead/unknown observation.",
+                ),
                 "host_liveness_detail": ParameterMetadata(type=ParameterType.STRING),
                 "host_liveness_observed_at": ParameterMetadata(type=ParameterType.STRING),
                 "registry_checked": ParameterMetadata(type=ParameterType.BOOLEAN),
-                "teardown_complete": ParameterMetadata(type=ParameterType.BOOLEAN, description="True only for observed dead plus independently checked absent registration."),
+                "teardown_complete": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="True only for observed dead plus independently checked absent registration.",
+                ),
                 "peer_registration": ParameterMetadata(
                     type=ParameterType.OBJECT,
                     description=("{bridge_id, parent_pid} of the live peer binding still held by this instance after the retire, else null."),
@@ -5778,10 +4771,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 "not_done": ParameterMetadata(
                     type=ParameterType.LIST,
                     description=("Unresolved host and registration facts, including prior none_available and unknown history. completed alone describes the ledger operation."),
-                ),
-                "custody_packet": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description=("Present only with a pinned packet: {packet_id, fingerprint, captured, worktree_disposition}; retained_not_disposable means the lane changed after consent and was kept."),
                 ),
             },
         ),
@@ -5799,82 +4788,18 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             )
         agent_instance_id = str(raw.get("agent_instance_id", ""))
         try:
-            selection = lifecycle_retire_packet_selection(raw)
-            packet = None
-            if selection is not None:
-                try:
-                    audit = self._register_unit_client()
-                except (RegisterUnitError, KeyError):
-                    audit = None
-                packet = functools.partial(lifecycle_resolve_retire_packet, state_service, selection, actor=self._dispatch_actor_from_state(state), register=audit)
             result = lifecycle_retire_session(
                 state_service,
                 agent_instance_id=agent_instance_id,
                 directed_by=format_directed_by(state.get("call_context")),
-                register=self._retirement_evidence_reader(),
-                packet=packet,
             )
-        except (VerbError, DispatchError) as exc:
+        except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         # The ledger says "retired"; the registry says whether the lane is still
         # listed. Read it AFTER the retire so the answer is the post-state.
         registry = getattr(self, "_peer_registry", None)
         registration = registry.resolve_by_agent_instance_id(agent_instance_id) if registry is not None else None
         report_teardown(result, registration, registry_checked=registry is not None)
-        return _success_result(data=result)
-
-    @platform_process(
-        name="retire_completed_lane_sessions",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "agent_instance_ids": ParameterMetadata(
-                type=ParameterType.LIST,
-                required=True,
-                description="The managed_session instances to consider; each is retired only where its own assigned Unit is proved terminal in the register.",
-            ),
-        },
-        output_type="object",
-        output_description=("Which considered lanes reached retired through retire_session, and one advisory for every row left exactly as it was."),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="retire_completed_lane_sessions outcome",
-            properties={
-                "considered": ParameterMetadata(type=ParameterType.INTEGER, description="How many of the given rows were read."),
-                "retired": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("One {agent_instance_id, unit_id, unit_state, already_retired, lifecycle_state, worktree_disposition} per row driven through retire_session; unit_state is empty when no register read was made."),
-                ),
-                "advisories": ParameterMetadata(
-                    type=ParameterType.LIST,
-                    description=("One string per row left untouched, naming the row and the reason: no assignment, an incomplete register read, a Unit still in flight, or a retire_session that declined it. Never a refusal."),
-                ),
-            },
-        ),
-    )
-    def retire_completed_lane_sessions(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """Retire each named lane whose assigned Unit is provably finished.
-
-        Transport only: it resolves the named instances to their managed_session
-        rows and hands them to the verb, which composes the existing
-        ``retire_session`` and never retires on unproved data.
-        """
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
-        requested = params.get("parameters", params).get("agent_instance_ids")
-        if not isinstance(requested, list):
-            return _failure_result(code="agent_instance_ids_required", message="agent_instance_ids must be a list of managed_session instances.")
-        try:
-            result = lifecycle_retire_completed_lane_sessions(
-                state_service,
-                [read_managed_session(state_service, str(instance)) for instance in requested],
-                directed_by=format_directed_by(state.get("call_context")),
-                register=self._retirement_evidence_reader(),
-            )
-        except SessionNotFoundError as exc:
-            return _failure_result(code="session_not_found", message=str(exc))
-        except (VerbError, DispatchError) as exc:
-            return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
     @platform_process(
@@ -6032,11 +4957,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 required=True,
                 type=ParameterType.STRING,
             ),
-            "role_class": ParameterMetadata(
-                description="Retained request field for the target role class; automatic restart refuses without spawning or reclaiming a successor.",
-                required=True,
-                type=ParameterType.STRING,
-            ),
             "grace_seconds": ParameterMetadata(
                 description="Retained request field; refusal occurs before termination.",
                 required=False,
@@ -6068,7 +4988,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         req = RestartSessionDispatchRequest(
             agent_instance_id=str(raw.get("agent_instance_id", "")),
             role_name=str(raw.get("role_name", "")),
-            role_class=str(raw.get("role_class", "")),
             grace_seconds=int(raw.get("grace_seconds", 30) or 30),
         )
         try:
@@ -6223,7 +5142,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         export file — this plugin calls the injected ``memory_service``
         directly, the same dependency-injection seam ``store_interaction``
         already uses elsewhere in this file), then reinforces it. This verb
-        IS the wiring the charter asks for; WHEN to call it (citation
+        IS the wiring the operator asked for; WHEN to call it (citation
         detection) stays a human/agent judgment call this slice, not an
         automated hook — disclosed, not silently assumed."""
         raw = params.get("parameters", params)
@@ -6749,6 +5668,55 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         return _success_result(data=result)
 
     @platform_process(
+        name="peer_send_outcome",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "message_id": ParameterMetadata(
+                description="The message_id the send returned (the peer_send or peer_send_by_name result).",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+        },
+        output_type="object",
+        output_description=(
+            "What happened to one sent message: delivery_state (read_by_recipient, wake_typed, wake_attempt_running, not_delivered, no_driver_wake or not_confirmed), "
+            "the wake attempt's outcome and detail, which record said so, the durable pickup row, and a fixed explanation. A missing record is the not_confirmed state, never an error."
+        ),
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="peer_send_outcome result",
+            properties={
+                "message_id": ParameterMetadata(type=ParameterType.STRING),
+                "delivery_state": ParameterMetadata(type=ParameterType.STRING),
+                "wake_attempt_outcome": ParameterMetadata(type=ParameterType.STRING),
+                "wake_attempt_detail": ParameterMetadata(type=ParameterType.STRING),
+                "evidence_source": ParameterMetadata(type=ParameterType.STRING),
+                "pickup": ParameterMetadata(type=ParameterType.OBJECT),
+                "pickup_unavailable": ParameterMetadata(type=ParameterType.BOOLEAN),
+                "explanation": ParameterMetadata(type=ParameterType.STRING),
+            },
+        ),
+    )
+    def peer_send_outcome(
+        self,
+        params: dict[str, Any],
+        state: dict[str, Any],  # noqa: ARG002
+    ) -> dict[str, Any]:
+        """prb_8989586c — one read by message id of what happened to a send.
+
+        Joins the finished wake attempt (in this process) and the durable
+        pickup row; writes nothing and never waits for a drive. Only an empty
+        message_id fails."""
+        raw = params.get("parameters", params)
+        message_id = str(raw.get("message_id") or "")
+        if not message_id:
+            return _failure_result(
+                code="missing_message_id",
+                message="message_id is required: the message_id the send returned.",
+            )
+        return _success_result(data=read_peer_send_outcome(self._get_state_service(), message_id))
+
+    @platform_process(
         name="gauge_notice_records",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
@@ -7031,8 +5999,8 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 required=True,
                 type=ParameterType.STRING,
             ),
-            "lane_id": ParameterMetadata(
-                description=("The lane label the row carries. Must be ordinary-looking: the staleness alarm quotes it verbatim, so a lane named for the canary announces it in every alarm."),
+            "label": ParameterMetadata(
+                description=("The label the row carries. Must be ordinary-looking: the staleness alarm quotes it verbatim, so a label named for the canary announces it in every alarm."),
                 required=True,
                 type=ParameterType.STRING,
             ),
@@ -7050,11 +6018,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 description=("The lifecycle reporting window, in seconds. Must be positive: with no window the derived last report_alive is None, which means NO EVIDENCE rather than 'not advancing', and the staleness leg skips the row."),
                 required=True,
                 type=ParameterType.INTEGER,
-            ),
-            "budget_line": ParameterMetadata(
-                description="Optional budget line recorded on the row.",
-                required=False,
-                type=ParameterType.STRING,
             ),
             "model": ParameterMetadata(
                 description="Optional model label recorded on the row.",
@@ -7083,7 +6046,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             description="register_synthetic_session outcome",
             properties={
                 "agent_instance_id": ParameterMetadata(type=ParameterType.STRING),
-                "lane_id": ParameterMetadata(type=ParameterType.STRING),
+                "label": ParameterMetadata(type=ParameterType.STRING),
                 "host": ParameterMetadata(
                     description=("Always 'synthetic' — a degenerate, no-op host driver (GAU-24): it refuses spawn/terminate loudly rather than touching anything, so retire_gauge_canary can reach this row without a real process behind it."),
                     type=ParameterType.STRING,
@@ -7120,11 +6083,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             result = canary_register_synthetic_session(
                 state_service,
                 agent_instance_id=str(raw.get("agent_instance_id", "")),
-                lane_id=str(raw.get("lane_id", "")),
+                label=str(raw.get("label", "")),
                 spawned_by_instance_id=str(raw.get("spawned_by_instance_id", "")),
                 directed_by=str(raw.get("directed_by", "")),
                 report_by_seconds=int(window) if str(window).strip().lstrip("-").isdigit() else 0,
-                budget_line=str(raw.get("budget_line", "")),
                 model=str(raw.get("model", "")),
             )
         except CanaryError as exc:
@@ -7315,7 +6277,13 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
     def seed_model_capability_catalog(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Persist a job; job_service.get_job returns the complete original outcome."""
         request = dict(params.get("parameters", params))
-        return self._operation_jobs.submit(self, "seed_model_capability_catalog", request, state, lambda values: self.seed_model_capability_catalog_sync(values, state))
+        return self._operation_jobs.submit(
+            self,
+            "seed_model_capability_catalog",
+            request,
+            state,
+            lambda values: self.seed_model_capability_catalog_sync(values, state),
+        )
 
     def seed_model_capability_catalog_sync(
         self,
@@ -7326,7 +6294,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         window = raw.get("staleness_window_hours")
         try:
             result = catalog_seed(
@@ -7342,7 +6313,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="read_model_capability_catalog",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "runtime": ParameterMetadata(description="Filter: claude_code | codex.", required=False, type=ParameterType.STRING),
+            "runtime": ParameterMetadata(
+                description="Filter: claude_code | codex.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "model": ParameterMetadata(description="Filter: canonical model id.", required=False, type=ParameterType.STRING),
             "include_unaccepted": ParameterMetadata(
                 description="Also return pending_crosscheck / crosscheck_conflict / withdrawn cells. Default false.",
@@ -7356,12 +6331,24 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             type=ParameterType.OBJECT,
             description="read_model_capability_catalog outcome",
             properties={
-                "warnings": ParameterMetadata(type=ParameterType.LIST, description="Optional policy/freshness and truncation advisories; surface their text."),
-                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
+                "warnings": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Optional policy/freshness and truncation advisories; surface their text.",
+                ),
+                "freshness_window": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call.",
+                ),
                 "cells": ParameterMetadata(type=ParameterType.LIST, description="Catalog rows plus is_fresh and servable."),
-                "total_cells": ParameterMetadata(type=ParameterType.INTEGER, description="Rows matching the filters before the acceptance filter."),
+                "total_cells": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Rows matching the filters before the acceptance filter.",
+                ),
                 "servable_cells": ParameterMetadata(type=ParameterType.INTEGER, description="Rows dispatch may use right now."),
-                "as_of": ParameterMetadata(type=ParameterType.STRING, description="The freshness reference instant, ISO-8601."),
+                "as_of": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="The freshness reference instant, ISO-8601.",
+                ),
             },
         ),
     )
@@ -7374,7 +6361,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         runtime = raw.get("runtime")
         model = raw.get("model")
         try:
@@ -7393,12 +6383,36 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="set_model_catalog_policy",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "stable_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Stable configuration identity, retained across all revisions."),
-            "action": ParameterMetadata(type=ParameterType.STRING, required=True, description="set creates; correct patches values; clear nulls optional clear_fields; retire/reopen reverse lifecycle state."),
-            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="Current readback revision; explicitly null for initial set of an absent record."),
-            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="Nonblank reason retained with server-derived current Operator identity."),
-            "values": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Declared configuration fields for set/correct; no secret values. Empty maps clear source aliases or metric_units."),
-            "clear_fields": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional field names to null on clear; no numerical defaults."),
+            "stable_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Stable configuration identity, retained across all revisions.",
+            ),
+            "action": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="set creates; correct patches values; clear nulls optional clear_fields; retire/reopen reverse lifecycle state.",
+            ),
+            "expected_revision": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=True,
+                description="Current readback revision; explicitly null for initial set of an absent record.",
+            ),
+            "reason": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Nonblank reason retained with the server-derived calling session in the immutable history.",
+            ),
+            "values": ParameterMetadata(
+                type=ParameterType.OBJECT,
+                required=False,
+                description="Declared configuration fields for set/correct; no secret values. Empty maps clear source aliases or metric_units.",
+            ),
+            "clear_fields": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description="Optional field names to null on clear; no numerical defaults.",
+            ),
         },
         output_type="object",
         output_description="New current snapshot with revision, predecessor and derived actor; immutable history commits in the same transaction.",
@@ -7406,16 +6420,20 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
     def set_model_catalog_policy(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             actor = self._dispatch_actor_from_state(state)
-            if not holds_role(state_service, "Operator", actor.agent_session_id):
-                return _failure_result(code="operator_required", message="The derived session must currently hold Operator.")
             raw = params.get("parameters", params)
             if {"actor", "agent_session_id", "agent_instance_id"}.intersection(raw):
-                return _failure_result(code="operator_identity_spoofed", message="Operator identity is server-derived; do not supply actor identity.")
+                return _failure_result(
+                    code="operator_identity_spoofed",
+                    message="Operator identity is server-derived; do not supply actor identity.",
+                )
             result = set_catalog_configuration(state_service, raw, actor=actor.agent_session_id, source=False)
-        except (CatalogError, DispatchError) as exc:
+        except (CatalogError, VerbError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -7423,12 +6441,36 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="set_model_catalog_source",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "stable_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Stable configuration identity, retained across all revisions."),
-            "action": ParameterMetadata(type=ParameterType.STRING, required=True, description="set creates; correct patches values; clear nulls optional clear_fields; retire/reopen reverse lifecycle state."),
-            "expected_revision": ParameterMetadata(type=ParameterType.INTEGER, required=True, description="Current readback revision; explicitly null for initial set of an absent record."),
-            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="Nonblank reason retained with server-derived current Operator identity."),
-            "values": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="Declared configuration fields for set/correct; no secret values. Empty maps clear source aliases or metric_units."),
-            "clear_fields": ParameterMetadata(type=ParameterType.LIST, required=False, description="Optional field names to null on clear; no numerical defaults."),
+            "stable_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Stable configuration identity, retained across all revisions.",
+            ),
+            "action": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="set creates; correct patches values; clear nulls optional clear_fields; retire/reopen reverse lifecycle state.",
+            ),
+            "expected_revision": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=True,
+                description="Current readback revision; explicitly null for initial set of an absent record.",
+            ),
+            "reason": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Nonblank reason retained with the server-derived calling session in the immutable history.",
+            ),
+            "values": ParameterMetadata(
+                type=ParameterType.OBJECT,
+                required=False,
+                description="Declared configuration fields for set/correct; no secret values. Empty maps clear source aliases or metric_units.",
+            ),
+            "clear_fields": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description="Optional field names to null on clear; no numerical defaults.",
+            ),
         },
         output_type="object",
         output_description="New current snapshot with revision, predecessor and derived actor; immutable history commits in the same transaction.",
@@ -7436,16 +6478,20 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
     def set_model_catalog_source(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             actor = self._dispatch_actor_from_state(state)
-            if not holds_role(state_service, "Operator", actor.agent_session_id):
-                return _failure_result(code="operator_required", message="The derived session must currently hold Operator.")
             raw = params.get("parameters", params)
             if {"actor", "agent_session_id", "agent_instance_id"}.intersection(raw):
-                return _failure_result(code="operator_identity_spoofed", message="Operator identity is server-derived; do not supply actor identity.")
+                return _failure_result(
+                    code="operator_identity_spoofed",
+                    message="Operator identity is server-derived; do not supply actor identity.",
+                )
             result = set_catalog_configuration(state_service, raw, actor=actor.agent_session_id, source=True)
-        except (CatalogError, DispatchError) as exc:
+        except (CatalogError, VerbError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -7453,10 +6499,26 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="read_model_catalog_policy",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "kind": ParameterMetadata(type=ParameterType.STRING, required=True, description="policy or source; ordinary reads require no Operator role."),
-            "stable_id": ParameterMetadata(type=ParameterType.STRING, required=True, description="Stable configuration identity."),
-            "history_limit": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="Explicit positive history page size; omit to read current only."),
-            "after": ParameterMetadata(type=ParameterType.LIST, required=False, description="Exact next_after [revision, id] from the previous history page."),
+            "kind": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="policy or source; ordinary reads require no Operator role.",
+            ),
+            "stable_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Stable configuration identity.",
+            ),
+            "history_limit": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description="Explicit positive history page size; omit to read current only.",
+            ),
+            "after": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description="Exact next_after [revision, id] from the previous history page.",
+            ),
         },
         output_type="object",
         output_description="Current snapshot including retired state; requested immutable history page and next_after frontier, or null history when not requested. Absent configuration is advisory.",
@@ -7464,7 +6526,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
     def read_model_catalog_policy(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = read_catalog_configuration(state_service, params.get("parameters", params))
         except CatalogError as exc:
@@ -7476,48 +6541,198 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="set_model_cells_enabled",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "action": ParameterMetadata(type=ParameterType.STRING, required=False, description="set (default), correct, retire or clear; clear without rule_id restores all-on."),
-            "selector": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="AND of provider, runtime, model_family_prefix, model and effort; absent dimensions are wildcards."),
-            "enabled": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="Required for set/correct. Independent of catalog acceptance."),
-            "only": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="With set/enabled=true, atomically replace policy with default-off and matching-on."),
-            "rule_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Existing identifier for correction, retire or clear."),
-            "expected_updated_at": ParameterMetadata(type=ParameterType.STRING, required=False, description="Policy readback premise; explicitly null only for uninitialized create."),
-            "reason": ParameterMetadata(type=ParameterType.STRING, required=True, description="Operator reason retained with derived identity in immutable history."),
+            "action": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="set (default), correct, retire or clear; clear without rule_id restores all-on.",
+            ),
+            "selector": ParameterMetadata(
+                type=ParameterType.OBJECT,
+                required=False,
+                description="AND of provider, runtime, model_family_prefix, model and effort; absent dimensions are wildcards.",
+            ),
+            "enabled": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description="Whether matching cells are on. set/correct need enabled, weight or both; null or omitted means the rule has no opinion on enablement. Independent of catalog acceptance.",
+            ),
+            "weight": ParameterMetadata(
+                type=ParameterType.FLOAT,
+                required=False,
+                description="Preference weight for matching cells: a positive finite number that scales their cost when select_dispatch_tier chooses, under every billing objective (below 1 favors them, above 1 disfavors them, absent means 1.0). It orders the choice only: it never enables a disabled cell and never changes a reported cost. Last matching weight rule wins. correct replaces the rule with exactly what is supplied, so omitting weight (or null) clears it; retire removes the rule.",
+            ),
+            "kind": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Optional exact work kind; absent applies to every kind.",
+            ),
+            "words": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Nonblank user words; defaults to reason.",
+            ),
+            "ends_at": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Optional offset-bearing ISO end time; lapsed rules have no opinion.",
+            ),
+            "only": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description="With set/enabled=true, atomically replace policy (weight rules included) with default-off and matching-on.",
+            ),
+            "rule_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Existing identifier for correction, retire or clear.",
+            ),
+            "expected_updated_at": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Policy readback premise; explicitly null only for uninitialized create.",
+            ),
+            "reason": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Nonblank reason retained with the server-derived calling session in the immutable history.",
+            ),
         },
         output_type="object",
-        output_description="Current policy, cells, history and allocated rule/run ids. Current Operator binding is checked against the server-derived session.",
+        output_description="Current policy, cells, history and allocated rule/run ids. The calling session is derived by the server and recorded with the reason as advisory history, not as an authority check.",
     )
     def set_model_cells_enabled(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             actor = self._dispatch_actor_from_state(state)
-            if not holds_role(state_service, "Operator", actor.agent_session_id):
-                return _failure_result(code="operator_required", message="The derived session must currently hold Operator.")
             raw = params.get("parameters", params)
             if "actor" in raw or "agent_session_id" in raw or "agent_instance_id" in raw:
-                return _failure_result(code="operator_identity_spoofed", message="Operator identity is server-derived; do not supply actor identity.")
+                return _failure_result(
+                    code="operator_identity_spoofed",
+                    message="Operator identity is server-derived; do not supply actor identity.",
+                )
             result = set_model_cells_enabled(state_service, raw, actor=actor.agent_session_id)
-        except (CatalogError, DispatchError) as exc:
+        except (CatalogError, VerbError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
     @platform_process(
         name="read_model_cell_policy",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={"history_limit": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="Latest immutable policy_change runs, 1..100; default 20.")},
+        parameters={
+            "history_limit": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description="Latest immutable policy_change runs, 1..100; default 20.",
+            )
+        },
         output_type="object",
-        output_description="Current ordered rule ids, updated_at premise, visible cell flags/provenance and bounded policy history. Uninitialized means explicit default all-on.",
+        output_description="Current ordered rules include kind, words, ends_at and lapsed. Cells show effective enabled and its provenance at read time, stored_enabled separately, and preference weights. Includes updated_at premise and bounded history.",
     )
     def read_model_cell_policy(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             raw = params.get("parameters", params)
             result = read_model_cell_policy(state_service, history_limit=raw.get("history_limit", 20))
         except CatalogError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="set_session_limit",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "action": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="set (default), correct or retire.",
+            ),
+            "selector": ParameterMetadata(
+                type=ParameterType.OBJECT,
+                required=False,
+                description="Which sessions the limit counts: AND of provider, runtime, model_family_prefix, model and effort, the same selector a model cell rule uses; {} means every session. Required for set and correct.",
+            ),
+            "sessions": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description="How many matching sessions the solet started may run at once, a whole number of 0 or more; 0 starts nothing new while running work finishes. Required for set and correct.",
+            ),
+            "words": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="The user's words for the limit, kept as given. Required for set and correct.",
+            ),
+            "ends_at": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="ISO-8601 time with a UTC offset from which the limit no longer applies; omit for no end time. correct replaces the whole limit, so omitting it clears the end time.",
+            ),
+            "limit_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="The limit to correct or retire, as returned by set or listed.",
+            ),
+            "expected_revision": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description="The revision of the limit you read; correct and retire write nothing and fail with stale_limit when it is no longer the active one.",
+            ),
+            "reason": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Nonblank reason retained with the revision.",
+            ),
+        },
+        output_type="object",
+        output_description="limit (the revision written, with lapsed and set_at), limits (every active limit, oldest first) and warnings (for example an ends_at already past). Who called is recorded as set_by from the call context, empty when the call has none; no identity is checked.",
+    )
+    def set_session_limit(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        raw = params.get("parameters", params)
+        try:
+            result = set_limit(state_service, raw, actor=format_directed_by(state.get("call_context")))
+        except LimitError as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        return _success_result(data=result)
+
+    @platform_process(
+        name="list_session_limits",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "history_limit": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description="Newest revisions of every state to return, 1..100; default 20.",
+            )
+        },
+        output_type="object",
+        output_description="limits (every active limit, oldest first, each with lapsed), history (the newest revisions of every state, newest first) and now (the time lapsed was read against).",
+    )
+    def list_session_limits(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        state_service = self._get_state_service()
+        if state_service is None:
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
+        raw = params.get("parameters", params)
+        try:
+            result = list_limits(state_service, history_limit=raw.get("history_limit", 20))
+        except LimitError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
 
@@ -7530,31 +6745,16 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 required=True,
                 type=ParameterType.FLOAT,
             ),
-            "dispatch_kind": ParameterMetadata(
-                description="Optional nonblank unit-kind provenance text; it never filters the cheapest capability-clearing candidates.",
-                required=False,
-                type=ParameterType.STRING,
-            ),
-            "scope_tags": ParameterMetadata(
-                description='Caller-declared work scope tags (e.g. ["state_schema"]), preserved as provenance. The retired state_schema floor does not restrict candidates; numeric score and catalog acceptance still govern selection. Same vocabulary as spawn_session/dispatch_managed_work.',
-                required=False,
-                type=ParameterType.LIST,
-            ),
-            "billing_objective": ParameterMetadata(
-                description="metered_usd (real dollars), relative (cost over the cheapest cell, the flat-rate quota proxy) or allowance_weighted (relative cost times the plan's declared dispatch weight; needs a runtime covered by a current flat-rate plan that declares dispatch_weights). Default: allowance_weighted for such a runtime constraint; otherwise relative when usage_economics declares a current flat-rate plan, else metered_usd.",
-                required=False,
-                type=ParameterType.STRING,
-            ),
             "score_margin": ParameterMetadata(description="Headroom added to required_score. Default 0.", required=False, type=ParameterType.FLOAT),
             "cost_tolerance": ParameterMetadata(description="Near-tie band within which the lower effort wins. Default 0.05.", required=False, type=ParameterType.FLOAT),
             "max_staleness_hours": ParameterMetadata(description="Explicit positive freshness window takes precedence over active catalog policy and observed cell windows; absent may remain null with advisory. Never excludes a cell.", required=False, type=ParameterType.INTEGER),
-            "pin": ParameterMetadata(description="Optional exact {runtime, model, effort} accepted scored cell; overrides threshold, constraints and floor with advisories; operator-disabled cells are unavailable. Null clears; requires pin_basis.", required=False, type=ParameterType.OBJECT),
+            "pin": ParameterMetadata(description="Optional exact {runtime, model, effort} accepted scored cell; overrides threshold and constraints with advisories; operator-disabled cells are unavailable. Null clears; requires pin_basis.", required=False, type=ParameterType.OBJECT),
             "pin_basis": ParameterMetadata(description="Nonempty caller provenance required with pin; clear both to null for cheapest selection.", required=False, type=ParameterType.STRING),
             "effort_ceiling": ParameterMetadata(description="Inclusive maximum effort in EFFORT_ORDER; null clears the ceiling. Filtered before feasibility.", required=False, type=ParameterType.STRING),
             "exclude_model_prefixes": ParameterMetadata(description="List of non-empty model prefixes excluded before feasibility; empty clears.", required=False, type=ParameterType.LIST),
             "exclude_runtimes": ParameterMetadata(description="List of non-empty runtime names excluded before feasibility; empty clears.", required=False, type=ParameterType.LIST),
             "runtime": ParameterMetadata(
-                description="Optional runtime (claude_code or codex). Pass it when the coordinator has chosen the runtime, so a cheaper cell of the other runtime cannot dominate it out; cheapest-clearing is then chosen within that runtime only and the selection_receipt carries it as runtime_constraint. Absent: all runtimes compete.",
+                description="Optional runtime (claude_code or codex). Pass it when the coordinator has chosen the runtime, so a cheaper cell of the other runtime cannot dominate it out; cheapest-clearing is then chosen within that runtime only. Absent: all runtimes compete.",
                 required=False,
                 type=ParameterType.STRING,
             ),
@@ -7562,10 +6762,13 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         output_type="object",
         output_description=(
             "iss_48ea8171 -- the cheapest accepted, policy-allowed (model, "
-            "effort) cell clearing the required score, with the evidence: the "
+            "effort) cell clearing the required score, cheapest by cost scaled by the "
+            "operator's preference weight for each cell (reported costs stay unweighted), with the evidence: the "
             "selected model's effort ladder (marginal points per cost unit), the "
-            "Pareto frontier, and every dominated pair. Refuses only when nothing is "
-            "accepted or nothing clears. A reading past its staleness window is used "
+            "Pareto frontier, and every dominated pair. If nothing clears, returns the "
+            "strongest eligible enabled cell with structured shortfall and loud warnings; "
+            "equal strongest scores resolve lexically by runtime, model and effort. "
+            "Refuses when no enabled eligible cell remains. A reading past its staleness window is used "
             "and reported in stale_readings and warnings (rul_becb4bed), and queues a "
             "catalog refresh. An exact accepted scored pin takes precedence and reports its provenance, cost delta and overrides."
         ),
@@ -7575,35 +6778,49 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             properties={
                 "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
                 "selected": ParameterMetadata(type=ParameterType.OBJECT, description="runtime, model, effort, capability_score, cost_per_task_usd, relative_cost_multiplier, measured_at, acceptance; plus plan_weight when the objective is allowance_weighted."),
-                "selection_mode": ParameterMetadata(type=ParameterType.STRING, description="cheapest or pinned."),
+                "selection_mode": ParameterMetadata(type=ParameterType.STRING, description="cheapest, strongest_available or pinned."),
+                "shortfall": ParameterMetadata(type=ParameterType.OBJECT, description="Present only for strongest_available: required_score, effective_required_score, capability_score and positive gap (effective threshold minus selected measured score). Surface warnings; preserve the original difficulty score."),
                 "pin_basis": ParameterMetadata(type=ParameterType.STRING, description="Caller provenance; null without pin."),
-                "pin_cost_delta": ParameterMetadata(type=ParameterType.FLOAT, description="Pinned objective cost minus cheapest feasible cost; null without pin, price or feasible alternative."),
-                "pin_overrides_constraints": ParameterMetadata(type=ParameterType.BOOLEAN, description="The pin bypassed an effort/runtime/model-prefix constraint."),
-                "pin_below_threshold": ParameterMetadata(type=ParameterType.BOOLEAN, description="Accepted pin is below required_score + score_margin."),
+                "pin_cost_delta": ParameterMetadata(
+                    type=ParameterType.FLOAT,
+                    description="Pinned objective cost minus cheapest feasible cost; null without pin, price or feasible alternative.",
+                ),
+                "pin_overrides_constraints": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="The pin bypassed an effort/runtime/model-prefix constraint.",
+                ),
+                "pin_below_threshold": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="Accepted pin is below required_score + score_margin.",
+                ),
                 "billing_objective": ParameterMetadata(type=ParameterType.STRING),
                 "required_score": ParameterMetadata(type=ParameterType.FLOAT),
                 "effective_required_score": ParameterMetadata(type=ParameterType.FLOAT, description="required_score + score_margin."),
-                "frontier": ParameterMetadata(type=ParameterType.LIST, description="Feasible cells no other beats on both axes, cheapest first."),
-                "dominated": ParameterMetadata(type=ParameterType.LIST, description="{weaker, stronger} pairs where another model's cell wins on both axes."),
-                "ladder": ParameterMetadata(type=ParameterType.LIST, description="The selected model's effort steps with score_gain, cost_delta, points_per_cost_unit."),
+                "frontier": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Feasible cells no other beats on both axes, cheapest first.",
+                ),
+                "dominated": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="{weaker, stronger} pairs where another model's cell wins on both axes.",
+                ),
+                "ladder": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="The selected model's effort steps with score_gain, cost_delta, points_per_cost_unit.",
+                ),
                 "excluded": ParameterMetadata(
                     type=ParameterType.OBJECT,
-                    description="Counts: operator_disabled, not_accepted, capability_floor_disallowed, unpriced, below_threshold. Active constraints add constraint_runtime, constraint_model_prefix, constraint_effort_ceiling counts (runtime first, prefix second, ceiling last). Age never excludes; quota telemetry is independent.",
+                    description="Counts: operator_disabled, not_accepted, unpriced, below_threshold. Active constraints add constraint_runtime, constraint_model_prefix, constraint_effort_ceiling counts (runtime first, prefix second, ceiling last). Age never excludes; quota telemetry is independent.",
                 ),
-                "advisories": ParameterMetadata(type=ParameterType.OBJECT, description="Count of feasible cells used despite a reading past its window (stale_reading_used)."),
-                "stale_readings": ParameterMetadata(type=ParameterType.LIST, description="Feasible cells and any selected pin read past the staleness window, oldest first: runtime, model, effort, measured_at, age_hours, window_hours, selected. Not part of selection_receipt."),
+                "advisories": ParameterMetadata(type=ParameterType.OBJECT, description="stale_reading_used counts used readings past their window; strongest_score_tie, when present, counts equal strongest eligible cells, resolved lexically by runtime/model/effort."),
+                "stale_readings": ParameterMetadata(type=ParameterType.LIST, description="Feasible cells and any selected pin read past the staleness window, oldest first: runtime, model, effort, measured_at, age_hours, window_hours, selected."),
                 "catalog_run_id": ParameterMetadata(type=ParameterType.STRING, description="Newest refresh run among the accepted cells; null when none."),
-                "policy_version": ParameterMetadata(type=ParameterType.STRING, description="model_dispatch_policy version consulted; null when neither dispatch_kind nor scope_tags was given."),
-                "capability_floors": ParameterMetadata(type=ParameterType.LIST, description="Capability floors applied from scope_tags (tag, source, detail); empty when none."),
                 "unscored_cells": ParameterMetadata(type=ParameterType.INTEGER, description="Stored rows with no capability score, dropped before selection."),
                 "cost_basis": ParameterMetadata(type=ParameterType.OBJECT, description="Present only for allowance_weighted: the plan, its dispatch_weights table (basis, ruling_id or evidence_ref, default and per-prefix weights) and selected_weight."),
+                "preference": ParameterMetadata(type=ParameterType.OBJECT, description="Present only when a policy weight rule applied to the selected cell: {weight, rule_id}. Advisory: the weight scaled the cost that ordered the choice and is never part of any reported cost."),
                 "warnings": ParameterMetadata(
                     type=ParameterType.LIST,
-                    description="Present only when non-empty: operator notices to surface. A covering flat-rate plan declares no dispatch_weights (ranking equals metered dollars); stale readings were used, and whether a refresh was requested or suppressed by a recent refresh run.",
-                ),
-                "selection_receipt": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Exact input/result receipt required by spawn_session to replay this selection; always includes pin, pin_basis and effort_ceiling (null defaults), exclude_model_prefixes and exclude_runtimes (empty list defaults). Predeploy receipts replay with absent defaults without mutation.",
+                    description="Present only when non-empty: operator notices to surface, including CAPABILITY SHORTFALL with threshold, selected score and gap, and STRONGEST SCORE TIE. Also plan weight, stale/refresh, census and unreadable policy notices.",
                 ),
             },
         ),
@@ -7617,10 +6834,13 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = catalog_select_tier(state_service, dict(raw))
-        except (CatalogError, TierSelectionError, DispatchPolicyError) as exc:
+        except (CatalogError, TierSelectionError) as exc:
             return _failure_result(code=exc.code, message=exc.message)
         # A selection made from stale readings carries its own refresh request (rul_becb4bed);
         # the verb is a pure read, so the request rides out as a returned action (Pattern 6a).
@@ -7628,236 +6848,44 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         return _success_result(data=result, actions=None if refresh_request is None else [refresh_request])
 
     @platform_process(
-        is_async=True,
-        name="sweep_fleet_stall",
+        name="select_model_cell_for_kind",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "trigger": ParameterMetadata(
-                description="manual | cron -- how this run was started.",
-                required=True,
-                type=ParameterType.STRING,
-            ),
-            "window_seconds": ParameterMetadata(
-                description=(f"Positive integer window the produced-work read covers. Default {FLEET_STALL_WINDOW_SECONDS} (30 minutes)."),
-                required=False,
-                type=ParameterType.INTEGER,
-            ),
+            "kind": ParameterMetadata(type=ParameterType.STRING, description="Optional exact work-kind word. Omit it to apply global rules only."),
+            "required_score": ParameterMetadata(type=ParameterType.FLOAT, required=True, description="The caller's measured capability requirement on the Intelligence Index scale."),
+            "runtime": ParameterMetadata(type=ParameterType.STRING, description="Limit the selection to claude_code or codex."),
+            "pin": ParameterMetadata(type=ParameterType.OBJECT, description="Exact runtime, model and effort of an enabled, accepted scored cell. Supply pin_basis with it."),
+            "pin_basis": ParameterMetadata(type=ParameterType.STRING, description="Caller provenance for the requested pin."),
+            "effort_ceiling": ParameterMetadata(type=ParameterType.STRING, description="Inclusive maximum effort for unpinned selection."),
+            "exclude_model_prefixes": ParameterMetadata(type=ParameterType.LIST, description="Model prefixes to exclude from unpinned selection."),
+            "exclude_runtimes": ParameterMetadata(type=ParameterType.LIST, description="Runtimes to exclude from unpinned selection."),
         },
         output_type="object",
-        output_description=(
-            "iss_ebc1ce9c, iss_c4fbe548 -- the runtime-neutral stall sweep. Reports a stall when the "
-            "register holds work that is ready and owned while the actors that own it produced nothing "
-            "in the window. Sessions are enumerated from the managed_session ledger, so a Codex-only "
-            "fleet is covered identically to a Claude one; nothing here keys on a liveness signal, on "
-            "~/.claude/sessions or on a session count. REPORT ONLY: it never drives, clears, compacts, "
-            "terminates or spawns anything. A read that did not complete yields an explicit advisory "
-            "and the verdict 'unmeasured', never a manufactured stall. Every completed run publishes "
-            "itself, so read_fleet_stall_sweep_status can tell when the sweep has stopped running."
+        output_description="Capability selection and its kind-specific grant. If an enablement rule removes the last eligible cell, no_rule_serves carries its id and words. A later generic spawn checks global enablement.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Capability selector evidence plus the enablement grant.",
+            properties={
+                "selected": ParameterMetadata(type=ParameterType.OBJECT, description="Selected runtime, model, effort and catalog measurements."),
+                "required_score": ParameterMetadata(type=ParameterType.FLOAT, description="The original requested capability score."),
+                "shortfall": ParameterMetadata(type=ParameterType.OBJECT, description="Gap to the requested threshold when only a lower-scoring cell is eligible."),
+                "grant": ParameterMetadata(type=ParameterType.OBJECT, description="kind, rule_id and words for the selected cell. Default enablement has null rule_id and words."),
+            },
         ),
-        return_value_schema=JOB_RETURN_SCHEMA,
     )
-    def sweep_fleet_stall(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """Persist a job; job_service.get_job returns the complete original outcome."""
-        request = dict(params.get("parameters", params))
-        return self._operation_jobs.submit(self, "sweep_fleet_stall", request, state, lambda values: self.sweep_fleet_stall_sync(values, state))
-
-    def sweep_fleet_stall_sync(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
-    ) -> dict[str, Any]:
-        """iss_ebc1ce9c -- detect a stalled fleet by what it produced, for any runtime."""
-        raw = params.get("parameters", params)
+    def select_model_cell_for_kind(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+        """Apply the rules for the supplied kind and return a selection through the shared kernel."""
         state_service = self._get_state_service()
         if state_service is None:
             return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
         try:
-            report = run_fleet_stall_sweep(
-                state_service,
-                self._fleet_stall_register_reader(),
-                now=datetime.now(UTC),
-                trigger=str(raw.get("trigger") or ""),
-                window_seconds=raw.get("window_seconds"),
-            )
-        except FleetStallSweepError as exc:
-            return _failure_result(code="parameter_invalid", message=str(exc))
-        return _success_result(data=report)
-
-    # Literal ``name=``: the whole-tree gate resolves a cron target's
-    # processor_policy_category from the literal decorator name.
-    @platform_process(
-        is_async=True,
-        name="sweep_fleet_stall_cron",
-        is_discoverable=False,
-        context_handling=ContextHandling.NONE,
-        parameters={},
-        output_type="object",
-        output_description="One scheduled fleet-stall sweep fire, reporting its own verdict.",
-        return_value_schema=JOB_RETURN_SCHEMA,
-        processor_policy_category=ProcessorPolicyCategory.EDGE_SINK,
-    )
-    def sweep_fleet_stall_cron(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        """Persist a job; job_service.get_job returns the complete original outcome."""
-        request = dict(params.get("parameters", params))
-        return self._operation_jobs.submit(self, "sweep_fleet_stall_cron", request, state, lambda values: self.sweep_fleet_stall_cron_sync(values, state))
-
-    def sweep_fleet_stall_cron_sync(
-        self,
-        params: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
-        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
-    ) -> dict[str, Any]:
-        """The scheduled fire. EDGE_SINK so a report-only detector never
-        reaches the inference path on a tick, and so the cron action may omit
-        ``result_processor_kind`` (its canonical shape)."""
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
-        report = run_fleet_stall_sweep(
-            state_service,
-            self._fleet_stall_register_reader(),
-            now=datetime.now(UTC),
-            trigger="cron",
-        )
-        self.logger.info(
-            "%s fleet stall sweep (cron): verdict=%s ready_and_owned=%s produced=%s advisories=%s",
-            self.name,
-            report["verdict"],
-            report["ready_and_owned_count"],
-            report["produced_count"],
-            report["advisories"],
-        )
-        return _success_result(data={key: report[key] for key in ("verdict", "ready_and_owned_count", "produced_count", "advisories")})
-
-    @platform_process(
-        name="read_fleet_stall_sweep_status",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={},
-        output_type="object",
-        output_description=(
-            "iss_c4fbe548 -- the stall sweep's OWN last completed run, its age, and an explicit "
-            "silence advisory once that age passes three scheduled intervals. This is how a reader "
-            "tells that the sweep has stopped running: the predecessor net was dead for about 25 days "
-            "unnoticed because nothing published its last run. A pure read; it records nothing."
-        ),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="The sweep's own liveness, read from its published last completed run.",
-            properties={
-                "last_completed_run": ParameterMetadata(type=ParameterType.DICT, description="The whole published run record (verdict, window, counts, advisories), or null when none has ever been recorded."),
-                "seconds_since_last_completed_run": ParameterMetadata(type=ParameterType.FLOAT, description="Age of that run, or null when there is none or its stamp is unreadable."),
-                "silent": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when the age passed the silence threshold: the sweep is not running."),
-                "silence_threshold_seconds": ParameterMetadata(type=ParameterType.INTEGER, description="Three scheduled intervals. One missed fire is a restart; three is the sweep being dead."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Named notices: never recorded, silent past the threshold, or an unreadable stamp."),
-            },
-        ),
-    )
-    def read_fleet_stall_sweep_status(
-        self,
-        params: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
-        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
-    ) -> dict[str, Any]:
-        """iss_c4fbe548 -- make the sweep's own silence readable."""
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
-        return _success_result(data=read_sweep_status(state_service, now=datetime.now(UTC)))
-
-    @platform_process(
-        name="clear_fleet_stall_sweep_run",
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={},
-        output_type="object",
-        output_description=(
-            "Retire the fleet stall sweep's published last-completed-run record, returning what was "
-            "retired. This is that row's terminal action, completing its lifecycle beside the create "
-            "and correct the sweep itself performs and the read read_fleet_stall_sweep_status "
-            "performs. Retention is bounded at one latest-run row, so there is no history to prune "
-            "and no earlier run to lose; the next scheduled fire publishes a fresh record, which is "
-            "the only sense in which this is reversible. Clearing a record that was never there is "
-            "reported as cleared=false with an advisory, not as an error: a terminal action on an "
-            "absent row has already reached the state it was asked for. Touches no session and no "
-            "register row."
-        ),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="What the clear removed.",
-            properties={
-                "cleared": ParameterMetadata(type=ParameterType.BOOLEAN, description="True when a record was present and has been removed; false when none was recorded."),
-                "cleared_run": ParameterMetadata(type=ParameterType.DICT, description="The whole run record that was removed, or null when none was recorded."),
-                "advisories": ParameterMetadata(type=ParameterType.LIST, description="Named notices; non-empty when there was nothing to clear."),
-            },
-        ),
-    )
-    def clear_fleet_stall_sweep_run(
-        self,
-        params: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
-        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
-    ) -> dict[str, Any]:
-        """The published run record's terminal action, completing its lifecycle."""
-        state_service = self._get_state_service()
-        if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
-        return _success_result(data=clear_fleet_stall_sweep_completed_run(state_service))
-
-    @platform_process(
-        name="ensure_fleet_stall_sweep_schedule",
-        context_handling=ContextHandling.NONE,
-        is_discoverable=False,
-        parameters={
-            "cron_expression": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=False,
-                description=f"Cron expression (UTC). Default '{FLEET_STALL_SWEEP_CRON}' (every 15 minutes).",
-            ),
-            "tag": ParameterMetadata(
-                type=ParameterType.STRING,
-                required=False,
-                description=f"Schedule tag, used for the idempotent lookup. Default '{FLEET_STALL_SWEEP_TAG}'.",
-            ),
-        },
-        output_type="object",
-        output_description=(
-            "Idempotently install the fleet-stall sweep's cron on the platform's own scheduler. Run it "
-            "as a starting action (it is in the shipped local profile) or later; never from a plugin "
-            "lifecycle method, because scheduling_service exists only after startup's "
-            "init_service_manager step. Nothing here refuses: the sweep needs no configured target, so "
-            "there is no configuration under which the installed cron would be inert."
-        ),
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Whether the cron was created or was already present.",
-            properties={
-                "status": ParameterMetadata(type=ParameterType.STRING, description="created | already_present."),
-                "tag": ParameterMetadata(type=ParameterType.STRING, description="Schedule tag the lookup used."),
-                "cron_expression": ParameterMetadata(type=ParameterType.STRING, description="The expression the schedule carries."),
-                "schedule_id": ParameterMetadata(type=ParameterType.STRING, description="The created schedule's id; absent when one was already present."),
-            },
-        ),
-        processor_policy_category=ProcessorPolicyCategory.EDGE,
-    )
-    def ensure_fleet_stall_sweep_schedule(
-        self,
-        params: dict[str, Any],
-        state: dict[str, Any],  # noqa: ARG002 -- required by @platform_process signature
-    ) -> dict[str, Any]:
-        """Install the sweep's cron on the platform scheduler, once."""
-        raw = params.get("parameters", params)
-        orchestrator = getattr(self, "orchestrator_ref", None)
-        service = None if orchestrator is None else orchestrator.get_service("scheduling_service")
-        if service is None:
-            return _failure_result(
-                code="scheduling_service_unavailable",
-                message=("scheduling_service is not available yet -- it exists only after startup's init_service_manager step; run ensure_fleet_stall_sweep_schedule as a starting action or later, never from a plugin lifecycle method."),
-            )
-        keywords: dict[str, str] = {}
-        for key in ("cron_expression", "tag"):
-            value = raw.get(key)
-            if isinstance(value, str) and value.strip():
-                keywords[key] = value.strip()
-        try:
-            return _success_result(data=ensure_sweep_schedule(service, **keywords))
-        except FleetStallSweepError as exc:
-            return _failure_result(code="schedule_ensure_failed", message=str(exc))
+            result = select_kind_cell(state_service, params.get("parameters", params))
+        except NoRuleServesError as exc:
+            return _failure_result(code=exc.code, message=exc.message, data=exc.evidence)
+        except (CatalogError, TierSelectionError) as exc:
+            return _failure_result(code=exc.code, message=exc.message)
+        refresh_request = result.pop("refresh_request", None)
+        return _success_result(data=result, actions=None if refresh_request is None else [refresh_request])
 
     @platform_process(
         is_async=True,
@@ -7889,7 +6917,13 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
     def refresh_model_capability_catalog(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Persist a job; job_service.get_job returns the complete original outcome."""
         request = dict(params.get("parameters", params))
-        return self._operation_jobs.submit(self, "refresh_model_capability_catalog", request, state, lambda values: self.refresh_model_capability_catalog_sync(values, state))
+        return self._operation_jobs.submit(
+            self,
+            "refresh_model_capability_catalog",
+            request,
+            state,
+            lambda values: self.refresh_model_capability_catalog_sync(values, state),
+        )
 
     def refresh_model_capability_catalog_sync(
         self,
@@ -7900,10 +6934,19 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         trigger = raw.get("trigger")
+        api_key: str | None = None
+        if self._vault_service is not None:
+            try:
+                api_key = _vault_retrieve_value(self._vault_service, _AA_API_KEY_VAULT_NAME)
+            except Exception as exc:  # noqa: BLE001 -- credential outage is an advisory, not a catalog refusal
+                logger.warning("Artificial Analysis API credential unavailable: %s", type(exc).__name__)
         try:
-            result = catalog_refresh(state_service, trigger=str(trigger) if trigger else "")
+            result = catalog_refresh(state_service, trigger=str(trigger) if trigger else "", api_key=api_key)
         except CatalogError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         return _success_result(data=result)
@@ -7913,7 +6956,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "runtime": ParameterMetadata(description="claude_code | codex.", required=True, type=ParameterType.STRING),
-            "model": ParameterMetadata(description="Canonical model id as the runtime names it, e.g. gpt-6-sol or claude-opus-5-5.", required=True, type=ParameterType.STRING),
+            "model": ParameterMetadata(
+                description="Canonical model id as the runtime names it, e.g. gpt-6-sol or claude-opus-5-5.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
             "effort": ParameterMetadata(
                 description="non_reasoning | none | low | medium | high | xhigh | max.",
                 required=True,
@@ -7934,7 +6981,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 required=True,
                 type=ParameterType.STRING,
             ),
-            "note": ParameterMetadata(description="Optional free text kept with the evidence.", required=False, type=ParameterType.STRING),
+            "note": ParameterMetadata(
+                description="Optional free text kept with the evidence.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
             "staleness_window_hours": ParameterMetadata(
                 description="Explicit positive integer freshness window; absent reads active catalog policy then observed windows, else null with advisory. Age never excludes accepted cells.",
                 required=False,
@@ -7947,16 +6998,28 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             type=ParameterType.OBJECT,
             description="record_model_capability_cell outcome",
             properties={
-                "freshness_window": ParameterMetadata(type=ParameterType.OBJECT, description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call."),
-                "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row (trigger=manual) this call wrote."),
+                "freshness_window": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="Resolved hours (null when unknown), exact integer cell_hours or null, request/policy/observed_catalog/unknown source, policy_revision_id and advisories; read on each call.",
+                ),
+                "run_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="The model_capability_refresh_run row (trigger=manual) this call wrote.",
+                ),
                 "runtime": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
                 "effort": ParameterMetadata(type=ParameterType.STRING),
                 "capability_score": ParameterMetadata(type=ParameterType.FLOAT),
                 "cost_per_task_usd": ParameterMetadata(type=ParameterType.FLOAT, description="Null when the caller gave no cost."),
                 "acceptance": ParameterMetadata(type=ParameterType.STRING, description="Always accepted."),
-                "observation_ids": ParameterMetadata(type=ParameterType.LIST, description="The observation rows holding this reading's evidence."),
-                "previous": ParameterMetadata(type=ParameterType.OBJECT, description="The cell's prior capability_score, cost_per_task_usd, acceptance and measured_at; null when the cell is new."),
+                "observation_ids": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="The observation rows holding this reading's evidence.",
+                ),
+                "previous": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="The cell's prior capability_score, cost_per_task_usd, acceptance and measured_at; null when the cell is new.",
+                ),
             },
         ),
     )
@@ -7969,7 +7032,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = catalog_record_cell(state_service, dict(raw))
         except CatalogError as exc:
@@ -7981,19 +7047,31 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "runtime": ParameterMetadata(description="claude_code | codex.", required=True, type=ParameterType.STRING),
-            "model": ParameterMetadata(description="Canonical model id as the catalog holds it.", required=True, type=ParameterType.STRING),
+            "model": ParameterMetadata(
+                description="Canonical model id as the catalog holds it.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
             "effort": ParameterMetadata(
                 description="The one effort to withdraw. Omit to withdraw every effort of the model on that runtime.",
                 required=False,
                 type=ParameterType.STRING,
             ),
-            "reason": ParameterMetadata(description="Why the cell is leaving dispatch, at most 512 characters. Required.", required=True, type=ParameterType.STRING),
+            "reason": ParameterMetadata(
+                description="Why the cell is leaving dispatch, at most 512 characters. Required.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
             "expected_acceptance": ParameterMetadata(
                 description="The acceptance you read on the cell (accepted | pending_crosscheck | crosscheck_conflict). The call is refused with stale_cell_state when any target cell no longer holds it.",
                 required=True,
                 type=ParameterType.STRING,
             ),
-            "actor": ParameterMetadata(description="The session or role making the change, kept as evidence. Required.", required=True, type=ParameterType.STRING),
+            "actor": ParameterMetadata(
+                description="The session or role making the change, kept as evidence. Required.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
         output_description=("Operator ruling rul_2bff72b8 -- retire one catalog cell, or every effort of one model, from dispatch. The score, cost and measured_at are kept and select_dispatch_tier excludes the cell as not_accepted; reinstate_model_capability_cell reverses it."),
@@ -8001,11 +7079,17 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             type=ParameterType.OBJECT,
             description="withdraw_model_capability_cell outcome",
             properties={
-                "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row (trigger=manual) this call wrote."),
+                "run_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="The model_capability_refresh_run row (trigger=manual) this call wrote.",
+                ),
                 "runtime": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
                 "acceptance": ParameterMetadata(type=ParameterType.STRING, description="Always withdrawn."),
-                "cells": ParameterMetadata(type=ParameterType.LIST, description="Per cell: effort, from_acceptance, to_acceptance, the retained capability_score, cost_per_task_usd and measured_at, and the acceptance_change observation_id."),
+                "cells": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Per cell: effort, from_acceptance, to_acceptance, the retained capability_score, cost_per_task_usd and measured_at, and the acceptance_change observation_id.",
+                ),
                 "reason": ParameterMetadata(type=ParameterType.STRING),
                 "actor": ParameterMetadata(type=ParameterType.STRING),
                 "reversal": ParameterMetadata(type=ParameterType.STRING, description="The verb that reopens these cells."),
@@ -8021,7 +7105,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = catalog_withdraw_cell(state_service, dict(raw))
         except CatalogError as exc:
@@ -8033,19 +7120,31 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "runtime": ParameterMetadata(description="claude_code | codex.", required=True, type=ParameterType.STRING),
-            "model": ParameterMetadata(description="Canonical model id as the catalog holds it.", required=True, type=ParameterType.STRING),
+            "model": ParameterMetadata(
+                description="Canonical model id as the catalog holds it.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
             "effort": ParameterMetadata(
                 description="The one effort to reinstate. Omit to reinstate every effort of the model on that runtime.",
                 required=False,
                 type=ParameterType.STRING,
             ),
-            "reason": ParameterMetadata(description="Why the cell is returning to dispatch, at most 512 characters. Required.", required=True, type=ParameterType.STRING),
+            "reason": ParameterMetadata(
+                description="Why the cell is returning to dispatch, at most 512 characters. Required.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
             "expected_acceptance": ParameterMetadata(
                 description="Must be withdrawn: the acceptance you read on the cell. The call is refused with stale_cell_state when any target cell is no longer withdrawn.",
                 required=True,
                 type=ParameterType.STRING,
             ),
-            "actor": ParameterMetadata(description="The session or role making the change, kept as evidence. Required.", required=True, type=ParameterType.STRING),
+            "actor": ParameterMetadata(
+                description="The session or role making the change, kept as evidence. Required.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
         output_description=("Operator ruling rul_2bff72b8 -- reopen a withdrawn catalog cell (or every withdrawn effort of a model) as accepted with the score, cost and measured_at it kept. Refused when a cell kept no score; each cell reports whether the next refresh would withdraw it again."),
@@ -8053,14 +7152,23 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             type=ParameterType.OBJECT,
             description="reinstate_model_capability_cell outcome",
             properties={
-                "run_id": ParameterMetadata(type=ParameterType.STRING, description="The model_capability_refresh_run row (trigger=manual) this call wrote."),
+                "run_id": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="The model_capability_refresh_run row (trigger=manual) this call wrote.",
+                ),
                 "runtime": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
                 "acceptance": ParameterMetadata(type=ParameterType.STRING, description="Always accepted."),
-                "cells": ParameterMetadata(type=ParameterType.LIST, description="Per cell: effort, from_acceptance, to_acceptance, the retained values, the acceptance_change observation_id and refresh_outlook (undone_by_next_refresh true, false or null when unknown, plus a detail sentence)."),
+                "cells": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Per cell: effort, from_acceptance, to_acceptance, the retained values, the acceptance_change observation_id and refresh_outlook (undone_by_next_refresh true, false or null when unknown, plus a detail sentence).",
+                ),
                 "reason": ParameterMetadata(type=ParameterType.STRING),
                 "actor": ParameterMetadata(type=ParameterType.STRING),
-                "reversal": ParameterMetadata(type=ParameterType.STRING, description="The verb that withdraws these cells again."),
+                "reversal": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="The verb that withdraws these cells again.",
+                ),
             },
         ),
     )
@@ -8073,7 +7181,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = catalog_reinstate_cell(state_service, dict(raw))
         except CatalogError as exc:
@@ -8085,9 +7196,21 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
             "runtime": ParameterMetadata(description="claude_code | codex.", required=True, type=ParameterType.STRING),
-            "model": ParameterMetadata(description="Canonical model id as the catalog holds it.", required=True, type=ParameterType.STRING),
-            "effort": ParameterMetadata(description="The effort whose history to read.", required=True, type=ParameterType.STRING),
-            "limit": ParameterMetadata(description="Observations per page, 1 to 100. Default 100.", required=False, type=ParameterType.INTEGER),
+            "model": ParameterMetadata(
+                description="Canonical model id as the catalog holds it.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "effort": ParameterMetadata(
+                description="The effort whose history to read.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "limit": ParameterMetadata(
+                description="Observations per page, 1 to 100. Default 100.",
+                required=False,
+                type=ParameterType.INTEGER,
+            ),
             "after": ParameterMetadata(
                 description="The next_after list of the previous page, to read the page that follows it.",
                 required=False,
@@ -8103,9 +7226,18 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                 "runtime": ParameterMetadata(type=ParameterType.STRING),
                 "model": ParameterMetadata(type=ParameterType.STRING),
                 "effort": ParameterMetadata(type=ParameterType.STRING),
-                "current": ParameterMetadata(type=ParameterType.OBJECT, description="The cell now: acceptance, capability_score, cost_per_task_usd, measured_at, accepted_at, disagreement_note, staleness_window_hours, last_refresh_run_id, updated_at. Null when no cell exists."),
-                "observations": ParameterMetadata(type=ParameterType.LIST, description="One page of observation rows ordered by fetched_at, then id."),
-                "next_after": ParameterMetadata(type=ParameterType.LIST, description="Pass as after to read the next page; null when the page was short and the history is exhausted."),
+                "current": ParameterMetadata(
+                    type=ParameterType.OBJECT,
+                    description="The cell now: acceptance, capability_score, cost_per_task_usd, measured_at, accepted_at, disagreement_note, staleness_window_hours, last_refresh_run_id, updated_at. Null when no cell exists.",
+                ),
+                "observations": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="One page of observation rows ordered by fetched_at, then id.",
+                ),
+                "next_after": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Pass as after to read the next page; null when the page was short and the history is exhausted.",
+                ),
             },
         ),
     )
@@ -8118,7 +7250,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = catalog_history(state_service, dict(raw))
         except CatalogError as exc:
@@ -8129,15 +7264,51 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="record_allowance_pool_reading",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "profile_id": ParameterMetadata(description="The flat-rate quota profile_id, e.g. anthropic-max-20x-2026-08-22.", required=True, type=ParameterType.STRING),
-            "pool_id": ParameterMetadata(description="The allowance pool within that profile, e.g. rolling-five-hour, weekly-all-model or weekly-model-family.", required=True, type=ParameterType.STRING),
-            "consumed": ParameterMetadata(description="Percent of the pool's window already used, 0-100, as the provider's usage page reports it. Give consumed or remaining.", required=False, type=ParameterType.FLOAT),
-            "remaining": ParameterMetadata(description="Percent of the pool's window still available, 0-100. Give consumed or remaining; both must sum to 100.", required=False, type=ParameterType.FLOAT),
-            "as_of": ParameterMetadata(description="ISO-8601 instant with timezone at which the reading was taken; not in the future.", required=True, type=ParameterType.STRING),
-            "next_reset_at": ParameterMetadata(description="ISO-8601 instant the window resets. Give this or expires_at; the reading stops counting at the earlier one.", required=False, type=ParameterType.STRING),
-            "expires_at": ParameterMetadata(description="ISO-8601 instant after which the reading is no longer trusted. Give this or next_reset_at.", required=False, type=ParameterType.STRING),
-            "source": ParameterMetadata(description="Where the reading came from: an operator reading or a ruling id such as rul_1edbcfc7-c2a4-4176-96ae-c51c90df3a21. Required.", required=True, type=ParameterType.STRING),
-            "recorded_by": ParameterMetadata(description="The actor recording it, e.g. a role name or session label. Required.", required=True, type=ParameterType.STRING),
+            "profile_id": ParameterMetadata(
+                description="The flat-rate quota profile_id, e.g. anthropic-max-20x-2026-08-22.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "pool_id": ParameterMetadata(
+                description="The allowance pool within that profile, e.g. rolling-five-hour, weekly-all-model or weekly-model-family.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "consumed": ParameterMetadata(
+                description="Percent of the pool's window already used, 0-100, as the provider's usage page reports it. Give consumed or remaining.",
+                required=False,
+                type=ParameterType.FLOAT,
+            ),
+            "remaining": ParameterMetadata(
+                description="Percent of the pool's window still available, 0-100. Give consumed or remaining; both must sum to 100.",
+                required=False,
+                type=ParameterType.FLOAT,
+            ),
+            "as_of": ParameterMetadata(
+                description="ISO-8601 instant with timezone at which the reading was taken; not in the future.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "next_reset_at": ParameterMetadata(
+                description="ISO-8601 instant the window resets. Give this or expires_at; the reading stops counting at the earlier one.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "expires_at": ParameterMetadata(
+                description="ISO-8601 instant after which the reading is no longer trusted. Give this or next_reset_at.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
+            "source": ParameterMetadata(
+                description="Where the reading came from: an operator reading or a ruling id such as rul_1edbcfc7-c2a4-4176-96ae-c51c90df3a21. Required.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "recorded_by": ParameterMetadata(
+                description="The actor recording it, e.g. a role name or session label. Required.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
         output_description=("iss_c6fbf9ae -- records one explicit current reading of a flat-rate allowance pool, replacing any earlier reading of that pool. A recorded, unexpired reading that shows the pool exhausted excludes its cells; an absent or expired one excludes nothing, and nothing infers one."),
@@ -8156,7 +7327,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = pool_reading_record(state_service, dict(raw))
         except CatalogError as exc:
@@ -8167,10 +7341,26 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="read_allowance_pool_readings",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "history": ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="Read immutable snapshots oldest first; default false."),
-            "after_id": ParameterMetadata(type=ParameterType.STRING, required=False, description="Previous history next_cursor."),
-            "limit": ParameterMetadata(type=ParameterType.INTEGER, required=False, description="History page size 1..200, default 50."),
-            "profile_id": ParameterMetadata(description="Only readings of this flat-rate profile. Default: all.", required=False, type=ParameterType.STRING),
+            "history": ParameterMetadata(
+                type=ParameterType.BOOLEAN,
+                required=False,
+                description="Read immutable snapshots oldest first; default false.",
+            ),
+            "after_id": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="Previous history next_cursor.",
+            ),
+            "limit": ParameterMetadata(
+                type=ParameterType.INTEGER,
+                required=False,
+                description="History page size 1..200, default 50.",
+            ),
+            "profile_id": ParameterMetadata(
+                description="Only readings of this flat-rate profile. Default: all.",
+                required=False,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
         output_description=("iss_c6fbf9ae -- the recorded allowance-pool readings, each marked current or expired against now, so a coordinator can see which readings the selector will still apply."),
@@ -8179,10 +7369,19 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             description="read_allowance_pool_readings outcome",
             properties={
                 "history": ParameterMetadata(type=ParameterType.LIST, description="Immutable record/retract snapshots."),
-                "next_cursor": ParameterMetadata(type=ParameterType.STRING, description="Last history id when more rows exist, otherwise null."),
-                "readings": ParameterMetadata(type=ParameterType.LIST, description="Recorded readings, each with state current or expired."),
+                "next_cursor": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Last history id when more rows exist, otherwise null.",
+                ),
+                "readings": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Recorded readings, each with state current or expired.",
+                ),
                 "current_readings": ParameterMetadata(type=ParameterType.INTEGER, description="How many are current right now."),
-                "as_of": ParameterMetadata(type=ParameterType.STRING, description="The instant states were judged, ISO-8601."),
+                "as_of": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="The instant states were judged, ISO-8601.",
+                ),
             },
         ),
     )
@@ -8195,7 +7394,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = pool_reading_read(state_service, dict(raw))
         except CatalogError as exc:
@@ -8206,8 +7408,16 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="retract_allowance_pool_reading",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "profile_id": ParameterMetadata(description="The flat-rate quota profile_id of the reading to remove.", required=True, type=ParameterType.STRING),
-            "pool_id": ParameterMetadata(description="The allowance pool whose reading to remove.", required=True, type=ParameterType.STRING),
+            "profile_id": ParameterMetadata(
+                description="The flat-rate quota profile_id of the reading to remove.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
+            "pool_id": ParameterMetadata(
+                description="The allowance pool whose reading to remove.",
+                required=True,
+                type=ParameterType.STRING,
+            ),
         },
         output_type="object",
         output_description=("iss_c6fbf9ae -- deletes the recorded reading of one allowance pool so that pool reads unknown again, which excludes nothing."),
@@ -8215,10 +7425,16 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             type=ParameterType.OBJECT,
             description="retract_allowance_pool_reading outcome",
             properties={
-                "history_appended": ParameterMetadata(type=ParameterType.BOOLEAN, description="Whether the immutable retraction snapshot was appended."),
+                "history_appended": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="Whether the immutable retraction snapshot was appended.",
+                ),
                 "profile_id": ParameterMetadata(type=ParameterType.STRING),
                 "pool_id": ParameterMetadata(type=ParameterType.STRING),
-                "retracted": ParameterMetadata(type=ParameterType.INTEGER, description="Rows deleted; a missing reading is the reading_not_found error."),
+                "retracted": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="Rows deleted; a missing reading is the reading_not_found error.",
+                ),
             },
         ),
     )
@@ -8231,7 +7447,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         raw = params.get("parameters", params)
         state_service = self._get_state_service()
         if state_service is None:
-            return _failure_result(code="state_service_unavailable", message="state_service is not bound on this solet.")
+            return _failure_result(
+                code="state_service_unavailable",
+                message="state_service is not bound on this solet.",
+            )
         try:
             result = pool_reading_retract(state_service, dict(raw))
         except CatalogError as exc:
@@ -8239,15 +7458,15 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         return _success_result(data=result)
 
     @platform_process(
-        name="read_unit_usage",
+        name="read_label_usage",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "unit_id": ParameterMetadata(
-                description="Registered Unit id. Supply this or agent_instance_id, but not both.",
+            "label": ParameterMetadata(
+                description="Session label, matched exactly as stored at spawn. Supply this or agent_instance_id, but not both.",
                 type=ParameterType.STRING,
             ),
             "agent_instance_id": ParameterMetadata(
-                description="Managed worker instance id. Supply this or unit_id, but not both.",
+                description="Managed worker instance id. Supply this or label, but not both.",
                 type=ParameterType.STRING,
             ),
         },
@@ -8260,20 +7479,31 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         ),
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
-            description="read_unit_usage outcome",
+            description="read_label_usage outcome",
             properties={
                 "coverage": ParameterMetadata(type=ParameterType.STRING, description="none, partial, or full."),
-                "sessions": ParameterMetadata(type=ParameterType.LIST, description="Workers with agent_instance_id, runtime_session_ids, provider, runtime, dispatch_model, dispatch_effort, observed tuples, and executor_mismatch."),
-                "estimate": ParameterMetadata(type=ParameterType.DICT, description="usd, basis (receipt, catalog_lookup, or none), and selected cell."),
-                "difficulty_score": ParameterMetadata(type=ParameterType.FLOAT, description="Selection difficulty score, when present."),
-                "as_of": ParameterMetadata(type=ParameterType.STRING, description="Oldest available last-poll/event observation time."),
+                "sessions": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Workers with agent_instance_id, runtime_session_ids, provider, runtime, dispatch_model, dispatch_effort, observed tuples, and executor_mismatch.",
+                ),
+                "estimate": ParameterMetadata(
+                    type=ParameterType.DICT,
+                    description="usd, basis (catalog_lookup or none), and the observed cell it priced.",
+                ),
+                "as_of": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="Oldest available last-poll/event observation time.",
+                ),
                 "lag_seconds": ParameterMetadata(type=ParameterType.FLOAT, description="Seconds between as_of and this read."),
-                "notes": ParameterMetadata(type=ParameterType.DICT, description="Join counts, per-id completeness counts, and advisories."),
+                "notes": ParameterMetadata(
+                    type=ParameterType.DICT,
+                    description="Join counts, per-id completeness counts, and advisories.",
+                ),
             },
-            error_conditions={"parameter_invalid": "Supply exactly one of unit_id or agent_instance_id."},
+            error_conditions={"parameter_invalid": "Supply exactly one of label or agent_instance_id."},
         ),
     )
-    def read_unit_usage(
+    def read_label_usage(
         self,
         params: dict[str, Any],
         state: dict[str, Any],  # noqa: ARG002
@@ -8287,7 +7517,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             ledger_service = None
         totals_reader = getattr(ledger_service, "session_usage_totals", None)
         try:
-            result = lifecycle_read_unit_usage(
+            result = lifecycle_read_label_usage(
                 state_service,
                 dict(raw),
                 totals_reader=totals_reader if callable(totals_reader) else None,
@@ -8301,10 +7531,23 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="read_session_usage_window",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "since": ParameterMetadata(description="Inclusive ISO-8601 window start passed unchanged to S1.", type=ParameterType.STRING),
-            "until": ParameterMetadata(description="Inclusive ISO-8601 window end passed unchanged to S1.", type=ParameterType.STRING),
-            "vendor": ParameterMetadata(description="S1 harness vendor; required with since and until when no session ids are supplied.", type=ParameterType.STRING),
-            "priced": ParameterMetadata(description="When true, add S2 pricing_by_model and unpriced token/model totals; defaults to false.", type=ParameterType.BOOLEAN, default=False),
+            "since": ParameterMetadata(
+                description="Inclusive ISO-8601 window start passed unchanged to S1.",
+                type=ParameterType.STRING,
+            ),
+            "until": ParameterMetadata(
+                description="Inclusive ISO-8601 window end passed unchanged to S1.",
+                type=ParameterType.STRING,
+            ),
+            "vendor": ParameterMetadata(
+                description="S1 harness vendor; required with since and until when no session ids are supplied.",
+                type=ParameterType.STRING,
+            ),
+            "priced": ParameterMetadata(
+                description="When true, add S2 pricing_by_model and unpriced token/model totals; defaults to false.",
+                type=ParameterType.BOOLEAN,
+                default=False,
+            ),
         },
         output_type="object",
         output_description=("Read-only S1 session usage window. Without priced=true, returns the exact S1 dictionary. With priced=true, preserves every S1 field and adds pricing_by_model, unpriced_token_count, and unpriced_models. No session-id argument is accepted."),
@@ -8312,17 +7555,38 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             type=ParameterType.OBJECT,
             description="read_session_usage_window outcome; raw mode keeps S1 keys unchanged.",
             properties={
-                "status": ParameterMetadata(type=ParameterType.STRING, description="S1 completeness: complete, partial, or unknown:bounded."),
-                "sessions": ParameterMetadata(type=ParameterType.LIST, description="Windowed per-runtime-session S1 usage and event bounds."),
-                "not_found": ParameterMetadata(type=ParameterType.LIST, description="S1 runtime ids not resolved, when applicable."),
+                "status": ParameterMetadata(
+                    type=ParameterType.STRING,
+                    description="S1 completeness: complete, partial, or unknown:bounded.",
+                ),
+                "sessions": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Windowed per-runtime-session S1 usage and event bounds.",
+                ),
+                "not_found": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="S1 runtime ids not resolved, when applicable.",
+                ),
                 "advisories": ParameterMetadata(type=ParameterType.LIST, description="S1 and pricing advisories."),
-                "overflow": ParameterMetadata(type=ParameterType.BOOLEAN, description="S1 bounded-enumeration overflow marker, when present."),
-                "sessions_at_least": ParameterMetadata(type=ParameterType.INTEGER, description="S1 lower bound for overflowed session enumeration, when present."),
+                "overflow": ParameterMetadata(
+                    type=ParameterType.BOOLEAN,
+                    description="S1 bounded-enumeration overflow marker, when present.",
+                ),
+                "sessions_at_least": ParameterMetadata(
+                    type=ParameterType.INTEGER,
+                    description="S1 lower bound for overflowed session enumeration, when present.",
+                ),
                 "pricing_by_model": ParameterMetadata(type=ParameterType.DICT, description="Priced mode only: model to {usd, basis}."),
-                "unpriced_token_count": ParameterMetadata(type=ParameterType.FLOAT, description="Priced mode only: known unpriced token count, with lower-bound advisories when necessary."),
-                "unpriced_models": ParameterMetadata(type=ParameterType.LIST, description="Priced mode only: sorted unique models with unpriced usage."),
+                "unpriced_token_count": ParameterMetadata(
+                    type=ParameterType.FLOAT,
+                    description="Priced mode only: known unpriced token count, with lower-bound advisories when necessary.",
+                ),
+                "unpriced_models": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="Priced mode only: sorted unique models with unpriced usage.",
+                ),
             },
-            error_conditions={"parameter_invalid": "S1 caller errors pass through; runtime_session_ids, unit_id, and agent_instance_id are not accepted."},
+            error_conditions={"parameter_invalid": "S1 caller errors pass through; runtime_session_ids and agent_instance_id are not accepted."},
         ),
     )
     def read_session_usage_window(
@@ -8794,10 +8058,16 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             type=ParameterType.OBJECT,
             description="get_authorization_history outcome",
             properties={
-                "selector": ParameterMetadata(type=ParameterType.DICT, description="The entry_id or authorizing_message_id read."),
+                "selector": ParameterMetadata(
+                    type=ParameterType.DICT,
+                    description="The entry_id or authorizing_message_id read.",
+                ),
                 "entry_ids": ParameterMetadata(type=ParameterType.LIST),
                 "current": ParameterMetadata(type=ParameterType.LIST, description="Each entry's current projection."),
-                "events": ParameterMetadata(type=ParameterType.LIST, description="This page of events, by entry then revision."),
+                "events": ParameterMetadata(
+                    type=ParameterType.LIST,
+                    description="This page of events, by entry then revision.",
+                ),
                 "count": ParameterMetadata(type=ParameterType.INTEGER),
                 "next_cursor": ParameterMetadata(
                     type=ParameterType.STRING,
@@ -9228,8 +8498,16 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="peer_ack_role_read_page",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "agent_session_id": ParameterMetadata(required=True, type=ParameterType.STRING, description="The acknowledging caller's own stable session id."),
-            "page_token": ParameterMetadata(required=True, type=ParameterType.STRING, description="Opaque token returned by peer_inbox after role rows were output."),
+            "agent_session_id": ParameterMetadata(
+                required=True,
+                type=ParameterType.STRING,
+                description="The acknowledging caller's own stable session id.",
+            ),
+            "page_token": ParameterMetadata(
+                required=True,
+                type=ParameterType.STRING,
+                description="Opaque token returned by peer_inbox after role rows were output.",
+            ),
         },
         output_type="object",
         output_description="Acknowledge a successfully rendered role inbox page.",
@@ -9252,7 +8530,14 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                     "action_status": "failed",
                     "data": {},
                     "actions": [],
-                    "error": {"type": "agent_messaging_error", "code": "role_read_page_rejected", "message": "receipt page rejected", "details": {}, "severity": "error", "timestamp": "<ISO-8601>"},
+                    "error": {
+                        "type": "agent_messaging_error",
+                        "code": "role_read_page_rejected",
+                        "message": "receipt page rejected",
+                        "details": {},
+                        "severity": "error",
+                        "timestamp": "<ISO-8601>",
+                    },
                     "timestamp": "<ISO-8601>",
                 },
             ],
@@ -9274,7 +8559,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         session_id = str(raw.get("agent_session_id", "")).strip()
         token = str(raw.get("page_token", "")).strip()
         if not session_id or not token:
-            return _failure_result(code="missing_argument", message="peer_ack_role_read_page requires agent_session_id and page_token.")
+            return _failure_result(
+                code="missing_argument",
+                message="peer_ack_role_read_page requires agent_session_id and page_token.",
+            )
         if self._peer_registry is None:
             return _failure_result(code="bridge.not_running", message="agent messaging bridge is not active.")
         try:
@@ -9297,8 +8585,16 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="peer_role_read_receipts",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
-            "agent_session_id": ParameterMetadata(required=True, type=ParameterType.STRING, description="The querying caller's own stable session id."),
-            "candidates": ParameterMetadata(required=True, type=ParameterType.LIST, description="Exact recipient_key/role_row_id pairs from a wake spool record."),
+            "agent_session_id": ParameterMetadata(
+                required=True,
+                type=ParameterType.STRING,
+                description="The querying caller's own stable session id.",
+            ),
+            "candidates": ParameterMetadata(
+                required=True,
+                type=ParameterType.LIST,
+                description="Exact recipient_key/role_row_id pairs from a wake spool record.",
+            ),
         },
         output_type="object",
         output_description="Read exact acknowledged role display receipts for the caller's held roles.",
@@ -9312,7 +8608,16 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             examples=[
                 {
                     "action_status": "completed",
-                    "data": {"agent_instance_id": "agi-example", "results": [{"recipient_key": "Coordinator-Main", "role_row_id": "arr-example", "served": True}]},
+                    "data": {
+                        "agent_instance_id": "agi-example",
+                        "results": [
+                            {
+                                "recipient_key": "Coordinator-Main",
+                                "role_row_id": "arr-example",
+                                "served": True,
+                            }
+                        ],
+                    },
                     "actions": [],
                     "error": None,
                     "timestamp": "<ISO-8601>",
@@ -9321,7 +8626,14 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
                     "action_status": "failed",
                     "data": {},
                     "actions": [],
-                    "error": {"type": "agent_messaging_error", "code": "role_read_receipts_rejected", "message": "receipt lookup rejected", "details": {}, "severity": "error", "timestamp": "<ISO-8601>"},
+                    "error": {
+                        "type": "agent_messaging_error",
+                        "code": "role_read_receipts_rejected",
+                        "message": "receipt lookup rejected",
+                        "details": {},
+                        "severity": "error",
+                        "timestamp": "<ISO-8601>",
+                    },
                     "timestamp": "<ISO-8601>",
                 },
             ],
@@ -9344,7 +8656,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         session_id = str(raw.get("agent_session_id", "")).strip()
         raw_candidates = raw.get("candidates")
         if not session_id or not isinstance(raw_candidates, list):
-            return _failure_result(code="missing_argument", message="peer_role_read_receipts requires agent_session_id and candidates.")
+            return _failure_result(
+                code="missing_argument",
+                message="peer_role_read_receipts requires agent_session_id and candidates.",
+            )
         try:
             candidates = _coerce_role_receipt_candidates(raw_candidates)
         except ValueError as exc:
@@ -9367,7 +8682,14 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         return _success_result(
             data={
                 "agent_instance_id": binding.agent_instance_id,
-                "results": [{"recipient_key": item.recipient_key, "role_row_id": item.role_row_id, "served": item.served} for item in results],
+                "results": [
+                    {
+                        "recipient_key": item.recipient_key,
+                        "role_row_id": item.role_row_id,
+                        "served": item.served,
+                    }
+                    for item in results
+                ],
             }
         )
 
@@ -9495,12 +8817,7 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         name="qualify_fleet",
         is_async=True,
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={
-            "unit_id": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "expected_revision_id": ParameterMetadata(required=False, type=ParameterType.STRING),
-            "spawned_by_role": ParameterMetadata(required=True, type=ParameterType.STRING),
-            "repository_root": ParameterMetadata(required=False, type=ParameterType.STRING),
-        },
+        parameters={},
         output_type="object",
         output_description="Accept a fleet qualification job; read its terminal outcome by job_id.",
         return_value_schema=ReturnValueSchema(
@@ -9517,23 +8834,20 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
 
     def qualify_fleet(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         """Exercise the entire bounded no-worktree fleet lifecycle."""
-        raw = params.get("parameters", params)
+        del params
         state_service = self._get_state_service()
         if state_service is None:
             return _failure_result(
                 code="state_service_unavailable",
                 message="state service is not bound",
             )
-        request = qualification_request(raw, state)
+        request = qualification_request(
+            spawned_by_instance_id=_caller_instance_id(state),
+            directed_by=format_directed_by(state.get("call_context")),
+        )
         try:
-            request = bind_bare_assignment(self, request, raw, state)
-            spawned = lifecycle_spawn_session(
-                state_service,
-                request,
-                register=self._register_unit_client(),
-                actor=self._native_spawn_actor(state, request.lane_id, request.spawned_by_role),
-            )
-        except (VerbError, DispatchError) as exc:
+            spawned = lifecycle_spawn_session(state_service, request)
+        except VerbError as exc:
             return _failure_result(code=exc.code, message=exc.message)
         agent_instance_id = str(spawned.get("agent_instance_id") or "")
         agent_session_id = f"ases-{agent_instance_id}"
@@ -9776,19 +9090,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             consumed.get("status"),
             len(consumed_updated) if isinstance(consumed_updated, list) else 0,
         )
-        # Fleet session-management Phase B, D1 (§3.1): stamp role_class on
-        # pre-Phase-B role rows + report (never auto-fix) any pre-existing
-        # >1-named-role holder for the operator cleanup pass (Dawn ruling).
-        role_class = backfill_role_class(state_service)
-        role_class_stamped = role_class.get("stamped")
-        role_class_violations = role_class.get("cardinality_violations")
-        logger.info(
-            "%s: role_class backfill status=%s (%d row(s) stamped, %d cardinality violation(s) reported)",
-            self.name,
-            role_class.get("status"),
-            len(role_class_stamped) if isinstance(role_class_stamped, list) else 0,
-            len(role_class_violations) if isinstance(role_class_violations, list) else 0,
-        )
         # iss_d9c955a2: the retired-role registry's migration seed (Register-Lead).
         # Idempotent; a failure propagates so the bridge never serves sends with
         # an unseeded registry.
@@ -9797,6 +9098,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             self.name,
             seed_retired_role_registry(state_service),
         )
+        origins = backfill_session_origins(state_service)
+        if origins["status"] == "live_unknown":
+            logger.warning("%s: session origin backfill incomplete at live managed_session %s (%s rows updated)", self.name, origins["row_id"], origins["updated"])
+        else:
+            logger.info("%s: session origin backfill %s (%s rows updated)", self.name, origins["status"], origins["updated"])
 
     # ------------------------------------------------------------------
     # IO interface lifecycle — start_interface / stop_interface
@@ -10260,9 +9566,10 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
         every tick.
 
         A4 (2026-08-04): the REL-05 deaf-wake escalation rider (DirectWakeReconciler)
-        retired here — sweep_overdue_sessions + _notify_steward_of_overdue
-        (session_sweep.py, D1) is its sole successor, keyed off the recipient's
-        own report_by promise instead of a message-level heuristic.
+        retired here; its report_by-keyed successor was removed in turn, so no
+        timer here checks on a session or tells another session about its
+        silence. The context-band self-notice rider is gone too: a session reads
+        its own gauge when it chooses, through ``session_context_status``.
         """
         try:
             sweep_codex_pickups(self._get_state_service())
@@ -10284,328 +9591,15 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             self._run_session_lifecycle_sweep()
         except Exception:  # noqa: BLE001 — one rider's fault must not skip the others
             logger.exception("D1 session-lifecycle sweep FAULTED; sweeper continues")
-        try:
-            self._run_rotation_surface_sweep()
-        except Exception:  # noqa: BLE001 — one rider's fault must not skip the others
-            logger.exception("L4 rotation-surface sweep FAULTED; sweeper continues")
-
-    def _run_rotation_surface_sweep(self) -> None:
-        """L4 rotation-surface rider — the two notice legs that watch the
-        context gauge rather than the lifecycle ledger.
-
-        Separate from :meth:`_run_session_lifecycle_sweep` and separately
-        fault-isolated, because they answer a different question from a
-        different table: the D1 sweep reads ``managed_session`` deadlines and
-        MUTATES state (marking rows overdue, firing dependency edges), while
-        these two only READ (``session_context_status`` beside the lifecycle
-        row) and notify. A fault in a read-only notice leg must not cost the
-        tick its overdue marking, and vice versa.
-
-        ★ Composition is what makes L4 LIVE. Both legs landed unreachable
-        (a0a517afb / merge e883d3158): tested, and invoked by nothing, so they
-        ran never in production. Until this rider existed, "L4a delivers
-        notices" was a statement about capability, not about behaviour.
-
-        Both legs are latched (see :class:`NoticeLatch`) because neither
-        condition is an edge — a rotation-due session stays rotation-due until
-        it rotates, and a dark session stays dark until someone fixes it, so
-        unlatched they would re-deliver every tick for the duration.
-
-        ★ THE SEAT IS NOW REACHED — BY THE THIRD LEG, AND ONLY BY IT. This
-        paragraph used to say the seat was not reachable from this rider at
-        all, and until 2026-08-17 that was true: the first two legs enumerate
-        ``managed_session``, which structurally has no row for an
-        operator-launched seat, and they notify a STEWARD resolved from
-        ``spawned_by_instance_id``, which a seat does not have either. Both
-        remain true OF THOSE TWO LEGS — do not read this correction as making
-        them seat-capable.
-
-        What changed is that ``sweep_rotation_self_notice`` scans
-        ``session_context_status`` directly (no FK to the lifecycle ledger, so
-        ``host=operator`` rows are representable) and appends to the measured
-        session's OWN bridge instead of a steward's. The seat's
-        ``UserPromptSubmit`` marker path still exists and is still the right
-        surface for a session an operator is actively typing at; it is not a
-        second detection, and it is not a substitute for this leg. It fires on
-        the operator's prompt, so it is silent during exactly the autonomous
-        runs in which context grows — which is the gap the third leg closes and
-        the reason it delivers on the tick instead.
-        """
-        state_service = self._get_state_service()
-        if state_service is None:
-            return
-        # ★ PER-LEG FAULT ISOLATION (added 2026-08-17 with the third leg).
-        # Until then the three legs shared one fault domain: the rider as a
-        # whole is wrapped by `_on_sweep_tick`, but nothing stood between one
-        # leg and the next, so a fault in the FIRST leg skipped every leg after
-        # it for that tick — silently, since the tick's handler logs the rider
-        # and not the leg. Found by the third leg's own reachability guard,
-        # which drives this method with the steward legs raising and asserts
-        # the self-notice leg still runs; it did not.
-        #
-        # This widens isolation for the two pre-existing legs as well as the
-        # new one. That is deliberate rather than incidental: these are three
-        # independent read-only notices about three different conditions, and
-        # there is no reading of this rider's purpose on which one leg's fault
-        # should cost another leg its delivery.
-        # ★ GAU-02: every leg records its own outcome here, healthy or not, so
-        # the rider can emit ONE all-clear line at the end naming which legs
-        # actually ran. Before this the rider logged only on faults and only on
-        # non-zero results, which made a healthy quiet tick byte-identical to a
-        # rider that never ran — and "never ran" is the reading a reader
-        # defaults to. Collected as text rather than counts because a FAULTED
-        # leg has no count to report and must still appear in the line; a leg
-        # missing from it would otherwise read as healthy-and-quiet.
-        legs: list[str] = []
-        # ★ GAU-25, 2026-08-19: EVERY LEG BELOW REPORTS DETECTIONS AND
-        # DELIVERIES AS SEPARATE NUMBERS, and none of them may collapse back
-        # into one. Until this change each leg printed a single count, and that
-        # count was DELIVERIES -- so the tick that caught a real arrested gauge
-        # printed "L4d=0" while a durable gauge_notice_record for the same tick
-        # carried delivery_outcome=no_steward_binding. An operator reading
-        # "L4d=0" could not distinguish "the detector found nothing" from "the
-        # detector found something and nobody could be told", which are opposite
-        # situations with opposite remedies. The sink each leg is handed here is
-        # what makes the difference printable; see StewardNoticeCounts.
-        #
-        # THE LAMBDAS BELOW RETURN `actionable` (delivered + undelivered), NOT
-        # the sweep's int return. That is deliberate and it fixes the SAME
-        # defect one level up: _run_counted_leg gates its on_finding warning on
-        # the value returned here, so returning the delivered count would leave
-        # a tick with detections and zero deliveries emitting no warning at all.
-        # Returning `detected` instead would warn every tick for the whole of a
-        # long outage, which is what each leg's latch exists to prevent.
-        # TRACKED DEBT (GAU-25): the helper itself still carries the defect for
-        # any FUTURE leg whose author does not read this comment. Not fixed here
-        # -- _run_counted_leg is shared code and this landed mid-wave with three
-        # lanes holding surgical leases on this file.
-        due_counts = StewardNoticeCounts()
-        _run_counted_leg(
-            legs,
-            "L4a",
-            "rotation-due",
-            lambda: (
-                sweep_rotation_due_sessions(
-                    state_service,
-                    peer_registry=self._peer_registry,
-                    bridge_manager=self._bridge_manager,
-                    latch=self._rotation_due_latch,
-                    counts=due_counts,
-                ),
-                due_counts.actionable,
-            )[1],
-            lambda _n: f"{due_counts.detected} detected({due_counts.delivered} delivered/{due_counts.undelivered} undelivered) session(s) due to rotate",
-            lambda _n: logger.warning(
-                "L4 sweep: %d session(s) due to rotate; %d steward(s) notified, %d NOT reached — an undelivered rotation notice is an alarm nobody received, not a quiet tick",
-                due_counts.detected,
-                due_counts.delivered,
-                due_counts.undelivered,
-            ),
-        )
-        dark_counts = StewardNoticeCounts()
-        _run_counted_leg(
-            legs,
-            "L4b",
-            "gauge-coverage",
-            lambda: (
-                sweep_gauge_coverage(
-                    state_service,
-                    peer_registry=self._peer_registry,
-                    bridge_manager=self._bridge_manager,
-                    latch=self._gauge_coverage_latch,
-                    counts=dark_counts,
-                ),
-                dark_counts.actionable,
-            )[1],
-            lambda _n: f"{dark_counts.detected} detected({dark_counts.delivered} delivered/{dark_counts.undelivered} undelivered) session(s) with no gauge row",
-            # ★ GAU-13(b), the SAME overclaim one level up. This line used
-            # to name a "likeliest cause" the sweep never measured, exactly
-            # as the per-session notice did. The notice now states what it
-            # measured and diagnoses only as far as the report_alive
-            # evidence carries; a rider summary that kept asserting the
-            # cause would have re-introduced the inference the notice just
-            # dropped, on the surface a reader hits FIRST.
-            lambda _n: logger.warning(
-                "L4 sweep: %d LIVE session(s) past the startup grace have no context-gauge row; %d steward(s) notified, %d NOT reached; each notice names what was measured for that session and how far the evidence identifies the cause",
-                dark_counts.detected,
-                dark_counts.delivered,
-                dark_counts.undelivered,
-            ),
-        )
-        # L4c is fault-isolated INSIDE the rider rather than promoted to a
-        # fourth rider. Its axis is this rider's axis exactly — same table,
-        # read-only, same question ("is this session getting expensive") — so a
-        # separate rider would force this docstring to explain why one question
-        # lives in two places, which is the rationale-rot the R4 rider's
-        # docstring warns about. What a shared rider does NOT give away for
-        # free is isolation, so it is taken explicitly here: a self-notice
-        # fault must not cost the two steward legs their tick, or vice versa.
-        try:
-            counts = sweep_rotation_self_notice(
-                state_service,
-                peer_registry=self._peer_registry,
-                bridge_manager=self._bridge_manager,
-                # GAU-06 (G2): the leg's DURABLE half. This one argument is
-                # what the whole item waited on -- nothing else in this rider
-                # or in session_sweep holds a messaging-service reference, so
-                # the self-notice could not persist anything until the supplier
-                # was wired from here.
-                agent_messaging_service=self._require_service(),
-                latch=self._rotation_self_latch,
-            )
-        except Exception:  # noqa: BLE001 — one leg's fault must not skip the others
-            logger.exception("L4c self-notice leg FAULTED; rider continues")
-            legs.append("L4c=FAULTED")
-        else:
-            legs.append(
-                f"L4c={counts.appended} appended({counts.watcher_held} watcher-held)/{counts.unroutable} unroutable/{counts.undeliverable} undeliverable/{counts.gauge_silent} gauge-silent",
-            )
-            self._log_self_notice_counts(counts)
-        # L4d (GAU-01(b)): the gauge row that STOPPED, as distinct from the one
-        # never written. Fault-isolated like every sibling. It is a FOURTH leg
-        # rather than a branch inside L4b because the two produce different
-        # counts and different remedies -- folding them would leave the reader
-        # unable to tell "N sessions never reported" from "N sessions stopped
-        # reporting", which are opposite operational situations.
-        # ★ GAU-25's FILED SPECIMEN IS THIS LEG. On 2026-08-19 17:47:33Z this
-        # line printed "L4d=0 session(s) with an arrested gauge row" on the tick
-        # that emitted a gauge_stale_notice with observed_s 1031.8 against
-        # threshold_s 900.0 and delivery_outcome=no_steward_binding. The
-        # detection was real, the delivery failed, and the count that reached
-        # the operator was the DELIVERY count. Both numbers now print.
-        stale_counts = StewardNoticeCounts()
-        _run_counted_leg(
-            legs,
-            "L4d",
-            "gauge-staleness",
-            lambda: (
-                sweep_gauge_staleness(
-                    state_service,
-                    peer_registry=self._peer_registry,
-                    bridge_manager=self._bridge_manager,
-                    latch=self._gauge_stale_latch,
-                    counts=stale_counts,
-                ),
-                stale_counts.actionable,
-            )[1],
-            lambda _n: f"{stale_counts.detected} detected({stale_counts.delivered} delivered/{stale_counts.undelivered} undelivered) session(s) with an arrested gauge row",
-            lambda _n: logger.warning(
-                "L4 sweep: %d LIVE session(s) are still reporting while their context-gauge row has stopped advancing; %d steward(s) notified, %d NOT reached; each notice carries the two timestamps it compared and the gap between them",
-                stale_counts.detected,
-                stale_counts.delivered,
-                stale_counts.undelivered,
-            ),
-        )
-        # ★ The rider's REACHABLE ALL-CLEAR. Emitted unconditionally, after
-        # every leg, INCLUDING the all-zero tick that is the normal overnight
-        # case — that is the whole point. "Did the rotation surface sweep?" was
-        # unanswerable from the logs for twenty minutes during the 2026-08-18
-        # post-deploy verification, because a rider that never ran, one that ran
-        # and found nobody, and one whose every leg was healthy all produced
-        # byte-identical silence, and the discriminator had to be found outside
-        # the instrument entirely. INFO, not DEBUG: a signal only reachable by
-        # raising the log level is not reachable on the tick a reader is
-        # actually asking about.
-        logger.info("rotation surface swept: %s", "; ".join(legs))
-
-    @staticmethod
-    def _log_self_notice_counts(counts: SelfNoticeCounts) -> None:
-        """ALL FIVE counts, always, and never one without the others.
-
-        ``appended`` replaced ``notified`` on 2026-08-19 (GAU-06 G1) because the
-        old word claimed something this leg cannot observe: whether anybody read
-        it. What it can assert is that the durable row was accepted.
-        ``watcher_held`` is a SUBSET of ``appended``, printed beside it because
-        the two have different delivery stories and one averaged number
-        supported neither.
-
-        A count of failures alone reads identically to a healthy run, and a
-        count of successes alone hides the leg's own blind spot. A zero that
-        prints its denominator is the only kind a reader can trust.
-
-        The two failure counts are reported SEPARATELY because they have
-        different causes and different owners: `unroutable` is the known
-        watch-id join gap (a worker's gauge row is keyed on its ledger id while
-        its binding is keyed on its watch id), while `undeliverable` is a live
-        binding whose append raised — a transport fault, already logged at
-        WARNING with a traceback. Naming only the first, as an earlier draft
-        did, would have attributed every delivery fault to the join gap.
-        """
-        if not (counts.appended or counts.unroutable or counts.undeliverable or counts.gauge_silent):
-            # ★ GAU-02, the half found first. This used to `return` and log
-            # NOTHING, which made a healthy leg that found nobody identical in
-            # the log to a leg that never ran. All-zero is not an edge case
-            # here: SELF_NOTICE_STALENESS_S excludes any session quiet for an
-            # hour, so it is the normal overnight state of a small fleet. The
-            # line states the denominators rather than merely asserting health,
-            # for the same reason the non-zero line below names all three
-            # counts — a zero that prints what it counted is the only kind a
-            # reader can trust.
-            logger.info(
-                "L4c sweep: 0 session(s) appended (0 watcher-held), 0 unroutable, 0 undeliverable, 0 gauge-silent — the leg RAN and had no eligible subject (every gauge row was stale, below band, or already latched for this episode); this is the expected quiet-fleet result, not a failure",
-            )
-            return
-        logger.info(
-            "L4c sweep: %d session(s) had a durable notice of their own context "
-            "band APPENDED to their inbox, %d of them watcher-held (a subset, "
-            "not an extra population — those surface when the session next "
-            "looks, and no turn starts either way); "
-            "%d unroutable (gauge row present, and neither its own key nor its "
-            "stored agent_session_id join resolves to a live binding — since "
-            "2026-08-18 this means a row written by a reporter predating the "
-            "join column, and it should decay to 0 as reporters upgrade); "
-            "%d undeliverable (binding resolved, the durable write raised — see "
-            "the WARNING above for each); %d gauge-silent since registration "
-            "(detected before their first context-gauge row landed)",
-            counts.appended,
-            counts.watcher_held,
-            counts.unroutable,
-            counts.undeliverable,
-            counts.gauge_silent,
-        )
 
     def _run_session_lifecycle_sweep(self) -> None:
         """D1 platform sweep rider (§3.4/§6 rule 3, Architect ratification #3):
-        marks overdue sessions (+ best-effort steward notice, D2-lane-tail
-        follow-up #3), fires+delivers armed 'deadline'/'lane_closed'
-        dependency edges, and prunes stale session_role_claim rows. See
+        fires+delivers armed 'deadline' dependency edges and
+        prunes stale session_role_claim rows. Nothing here marks a session
+        overdue or tells a steward about its silence. See
         ``session_sweep.py``'s module docstring for the exact scope boundary
         ('session_terminal' firing stays retire_session's job)."""
         state_service = self._get_state_service()
-        # peer_registry/bridge_manager are OPTIONAL on this call (unlike the
-        # two dependency sweeps below, which require them and are gated by
-        # the `if` below) -- sweep_overdue_sessions must still mark overdue
-        # rows on an early-boot tick before the bridge service is up; it
-        # just skips the notify step internally when either is None.
-        _run_ledger_tmux_rider(state_service)
-        overdue = sweep_overdue_sessions(
-            state_service,
-            peer_registry=self._peer_registry,
-            bridge_manager=self._bridge_manager,
-        )
-        if overdue:
-            logger.info("D1 sweep: marked %d session(s) overdue", overdue)
-        managed = sweep_managed_dispatches(
-            state_service,
-            register=self._register_unit_client(),
-            peer_registry=self._peer_registry,
-            bridge_manager=self._bridge_manager,
-        )
-        _log_managed_dispatch_sweep(managed)
-        # W4A registration watchdog — same optional-collaborator contract as
-        # sweep_overdue_sessions above (mark always, notify when possible).
-        # Runs BEFORE the mapping riders so a row that is about to register
-        # this tick is not marked on the strength of a stale read.
-        unregistered = sweep_unregistered_spawning_sessions(
-            state_service,
-            peer_registry=self._peer_registry,
-            bridge_manager=self._bridge_manager,
-        )
-        if unregistered:
-            logger.warning(
-                "D1 sweep: marked %d session(s) registration-overdue — a worker that has not registered past its bound did not run its registration hook",
-                unregistered,
-            )
         _run_session_claude_mapping_riders(state_service)
         if self._peer_registry is not None and self._bridge_manager is not None:
             fired = sweep_deadline_dependencies(
@@ -10615,13 +9609,6 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             )
             if fired:
                 logger.info("D1 sweep: fired %d 'deadline' dependency edge(s)", fired)
-            lane_fired = sweep_lane_closed_dependencies(
-                state_service,
-                peer_registry=self._peer_registry,
-                bridge_manager=self._bridge_manager,
-            )
-            if lane_fired:
-                logger.info("D1 sweep: fired %d 'lane_closed' dependency edge(s)", lane_fired)
             if self._session_role_claim_pruner is not None:
                 pruned = self._session_role_claim_pruner.sweep(
                     state_service,
@@ -11173,7 +10160,11 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             # the instance id in this hint has rotated.
             sender_agent_session_id=sender_agent_session_id,
         )
-        envelope = f"[peer:{sender_agent_id}{label_segment} instance={sender_agent_instance_id}] {delivered_prose}\n\n{reply_hint}"
+        envelope = f"[peer:{sender_agent_id}{label_segment} instance={sender_agent_instance_id}] {delivered_prose}"
+        # An empty hint (the scheduler sentinel has no address to reply to) leaves
+        # the envelope bare rather than ending in a blank line.
+        if reply_hint:
+            envelope = f"{envelope}\n\n{reply_hint}"
         # Synthetic flow_id keeps the bridge subprocess emitting a
         # non-empty meta.flow_id on the resulting channel notification.
         meta: dict[str, object] = {
@@ -11944,49 +10935,12 @@ class AgentMessagingPlugin(RegisteredOperations, ServicePlugin, IOInterfacePlugi
             ),
         )
 
-    def _native_spawn_actor(self, state: dict[str, Any], lane: str, role: str) -> RegisterActor:
-        actor = self._dispatch_actor_from_state(state)
-        return RegisterActor(actor.agent_instance_id, actor.agent_session_id, role, lane)
-
-    def _register_unit_client(self) -> PsoletRegisterUnitClient:
-        """Read the existing registered Unit and its exact brief revision."""
-        return PsoletRegisterUnitClient(
-            resolve_psolet_cli(_provider_get(self._resolve_config_provider(), CONFIG_PSOLET_CLI)),
-            solet_name=os.environ["SOLET_NAME"].strip(),
-        )
-
-    def _fleet_stall_register_reader(self) -> PsoletFleetStallReader:
-        """The same configured register CLI as :meth:`_register_unit_client`,
-        read-only, with the two fleet-wide reads the stall sweep keys on.
-
-        Built the same way and from the same config key, so a deployment that
-        points the register CLI somewhere else moves this read with it. The
-        Solet name labels register writes only; these reads send none.
-        """
-        return PsoletFleetStallReader(
-            resolve_psolet_cli(_provider_get(self._resolve_config_provider(), CONFIG_PSOLET_CLI)),
-            solet_name=os.environ.get("SOLET_NAME", "").strip(),
-        )
-
-    def _retirement_evidence_reader(self) -> RetirementEvidenceReader:
-        """The configured register CLI, read-only, for a retirement's custody evidence.
-
-        The Solet name labels register writes only; these reads send none, so a
-        missing ``SOLET_NAME`` cannot affect them.
-        """
-        return PsoletRetirementEvidenceReader(
-            resolve_psolet_cli(_provider_get(self._resolve_config_provider(), CONFIG_PSOLET_CLI)),
-            solet_name=os.environ.get("SOLET_NAME", "").strip(),
-        )
-
     def _build_session_lifecycle_policy_config(self) -> _SessionLifecyclePolicyConfig:
         provider = self._resolve_config_provider()
         return _SessionLifecyclePolicyConfig(
-            work_class_defaults=_as_work_class_defaults(
-                _provider_get(provider, "work_class_defaults"),
-            ),
-            work_class_tool_allowlists=_as_work_class_tool_allowlists(
-                _provider_get(provider, "work_class_tool_allowlists"),
+            default_allowed_tools=_as_str_tuple(
+                _provider_get(provider, "default_allowed_tools"),
+                default=(),
             ),
             headless_permission_mode=_as_str(
                 _provider_get(provider, "headless_permission_mode"),
@@ -12394,48 +11348,13 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _log_managed_dispatch_sweep(result: Mapping[str, Any]) -> None:
-    """Log only actionable reconciliation outcomes, never a false all-clear."""
-    if not (result["dead"] or result["unknown"] or result["conditions"]):
-        return
-    logger.warning(
-        "managed-dispatch sweep: attempts=%d alive=%d dead=%d unknown=%d dispatches=%d conditions=%d notices=%d",
-        result["attempts_evaluated"],
-        result["alive"],
-        result["dead"],
-        result["unknown"],
-        result["dispatches_evaluated"],
-        len(result["conditions"]),
-        result["notices_emitted"],
-    )
-
-
-def _run_ledger_tmux_rider(state_service: Any) -> None:
-    """Fault-isolated metadata observer on the existing 300-second default tick."""
-    try:
-        report = collect_ledger_tmux_report(state_service)
-        reasons = sorted({row["reason"] for row in report["observations"]} | set(report["advisories"]))
-        logger.warning(
-            "Ledger/tmux metadata observation: %s",
-            report,
-            extra={"advisory_reasons": reasons, "ledger_tmux_report": report},
-        )
-    except Exception:  # noqa: BLE001 -- observer faults must not suppress existing riders
-        logger.exception(
-            "Ledger/tmux reconciliation advisory: collector failed; existing riders continue",
-            extra={"advisory_reasons": ["probe_unknown"]},
-        )
-
-
 def _run_session_claude_mapping_riders(state_service: Any) -> None:
     """Split out of ``_run_session_lifecycle_sweep`` to keep it under the
-    radon cc threshold (mirrors ``session_sweep.py``'s own
-    ``_mark_one_overdue`` split and ``_spawn_session_request_from_params``
-    above -- same "thin dispatch" rationale) -- the two T1 usage-capture
-    riders that share the same no-peer_registry/no-bridge_manager-dependency
-    call-site pattern as the overdue marking: ``drain_session_claude_mapping_spool``
-    (ruling 2026-08-05, Q1(d)) and ``detect_hook_absent_sessions`` (S2c,
-    named follow-up) both run every tick regardless of bridge availability.
+    radon cc threshold (mirrors ``_spawn_session_request_from_params``
+    above -- same "thin dispatch" rationale) -- the T1 usage-capture
+    rider that has no peer_registry/bridge_manager dependency:
+    ``drain_session_claude_mapping_spool`` (ruling 2026-08-05, Q1(d)) runs
+    every tick regardless of bridge availability.
     A verb nobody calls is bound-in-name-only. A module-level function
     (not a method) -- it touches no instance state, only ``state_service``."""
     drain_result = lifecycle_drain_session_claude_mapping_spool(state_service)
@@ -12446,29 +11365,6 @@ def _run_session_claude_mapping_riders(state_service: Any) -> None:
             drain_result["upserted"],
             drain_result["skipped_malformed"],
         )
-    # S2c: detects a genuinely BROKEN SessionStart hook installation (as
-    # opposed to the cross-check's not-yet-fired case, which is not an error).
-    hook_absent = lifecycle_detect_hook_absent_sessions(state_service)
-    if hook_absent:
-        logger.warning("D1 sweep: hook-absence detected for %d session(s)", hook_absent)
-
-
-def _spawn_dispatch_overrides_from_params(raw: dict[str, Any]) -> dict[str, Any]:
-    """The dispatch-override subset of ``spawn_session``'s params (host,
-    model, effort, allowed_tools, permission_mode, allow_askuserquestion) —
-    split out of ``_spawn_session_request_from_params`` to keep it under the
-    radon cc threshold; these six fields share one purpose (per-spawn
-    dispatch overrides), so grouping them is a real seam, not an arbitrary
-    split."""
-    return {
-        "host": (str(raw["host"]) if raw.get("host") else None),
-        "agent_runtime": str(raw.get("agent_runtime", "") or "claude_code"),
-        "model": str(raw.get("model", "") or ""),
-        "effort": str(raw.get("effort", "") or ""),
-        "allowed_tools": _as_str_tuple(raw.get("allowed_tools"), default=()),
-        "permission_mode": str(raw.get("permission_mode", "") or ""),
-        "allow_askuserquestion": bool(raw.get("allow_askuserquestion", False)),
-    }
 
 
 def _param_text(raw: dict[str, Any], name: str) -> str:
@@ -12481,53 +11377,67 @@ def _param_positive_int(raw: dict[str, Any], name: str) -> int:
     return int(value) if value else 0
 
 
-def _spawn_session_identity_params(raw: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "role_class": _param_text(raw, "role_class"),
-        "lane_id": _param_text(raw, "lane_id"),
-        "unit_id": _param_text(raw, "unit_id"),
-        "repository_root": _param_text(raw, "repository_root"),
-        "work_class": _param_text(raw, "work_class"),
-        "budget_line": _param_text(raw, "budget_line"),
-        "dispatch_id": _param_text(raw, "dispatch_id"),
-        "role_name": _param_text(raw, "role_name"),
-        "visibility": _param_text(raw, "visibility"),
-    }
+def _caller_instance_id(state: dict[str, Any]) -> str:
+    """The calling session's instance id when the call carries one, else "".
 
-
-def _spawn_session_lifecycle_params(raw: dict[str, Any], directed_by: str) -> dict[str, Any]:
-    return {
-        "report_by_seconds": _param_positive_int(raw, "report_by_seconds"),
-        "spawned_by_instance_id": _param_text(raw, "spawned_by_instance_id"),
-        "spawned_by_role": _param_text(raw, "spawned_by_role"),
-        "first_go": _param_text(raw, "first_go"),
-        "directed_by": directed_by,
-        "local_name": _param_text(raw, "local_name"),
-        "degraded_hooks_acknowledged": bool(raw.get("degraded_hooks_acknowledged")),
-        "dispatch_kind": _param_text(raw, "dispatch_kind"),
-        "reviewed_report_vendor": _param_text(raw, "reviewed_report_vendor"),
-        "pair_id": _param_text(raw, "pair_id"),
-        "scope_tags": _as_str_tuple(raw.get("scope_tags"), default=()),
-        "difficulty_score": raw.get("difficulty_score"),
-        "selection_receipt": raw.get("selection_receipt"),
-        "enforce_selection_receipt": True,
-    }
+    Server-derived only: the authenticated principal, then the bridge's
+    routing identity. An absent identity is information for lineage, never a
+    refusal.
+    """
+    try:
+        principal_instance = extract_authenticated_principal(state).agent_instance_id.strip()
+    except PermissionError:
+        principal_instance = ""
+    if principal_instance:
+        return principal_instance
+    for key in ("inference_vertex_session_id", "caller_attribution_instance_id"):
+        value = state.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _spawn_session_request_from_params(
     raw: dict[str, Any],
-    directed_by: str,
+    state: dict[str, Any],
+    policy: _SessionLifecyclePolicyConfig,
 ) -> SpawnSessionRequest:
     """Build the ``spawn_session`` verb's typed request from raw transport
-    params. Split out of the ``spawn_session`` method so the transport shim
-    stays a thin dispatch (radon cc)."""
-    reject_retired_launch_fields(raw)
-    return SpawnSessionRequest(
-        **_spawn_session_identity_params(raw),
-        **_spawn_session_lifecycle_params(raw, directed_by),
-        **_spawn_dispatch_overrides_from_params(raw),
+    params, with lineage from the call itself (else the caller's stated
+    ``spawned_by_instance_id``), then fill the omitted permission fields from
+    plugin.yaml. The transport shim stays a thin dispatch (radon cc)."""
+    req = SpawnSessionRequest(
+        agent_runtime=_param_text(raw, "agent_runtime"),
+        model=_param_text(raw, "model"),
+        effort=_param_text(raw, "effort"),
+        workspace=_param_text(raw, "workspace"),
+        first_message=_param_text(raw, "first_message"),
+        label=_param_text(raw, "label"),
+        host=(str(raw["host"]) if raw.get("host") else None),
+        visibility=_param_text(raw, "visibility"),
+        local_name=_param_text(raw, "local_name"),
+        report_by_seconds=_param_positive_int(raw, "report_by_seconds"),
+        spawned_by_instance_id=_caller_instance_id(state) or _param_text(raw, "spawned_by_instance_id"),
+        directed_by=format_directed_by(state.get("call_context")),
+        allowed_tools=_explicit_allowed_tools(raw),
+        permission_mode=_param_text(raw, "permission_mode"),
+        transport=_param_text(raw, "transport"),
+        allow_askuserquestion=bool(raw.get("allow_askuserquestion", False)),
         provider_env=_spawn_provider_env_from_params(raw),
+        degraded_hooks_acknowledged=bool(raw.get("degraded_hooks_acknowledged")),
     )
+    return _apply_spawn_session_policy(req, policy)
+
+
+def _explicit_allowed_tools(raw: dict[str, Any]) -> tuple[str, ...] | None:
+    """The caller's ``allowed_tools`` as stated: ``None`` when omitted, so the
+    policy may fill it; an explicit empty list stays empty (no tool allowed)."""
+    value = raw.get("allowed_tools")
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    return (str(value),)
 
 
 def _spawn_provider_env_from_params(raw: dict[str, Any]) -> dict[str, str]:
@@ -12547,91 +11457,20 @@ def _spawn_provider_env_from_params(raw: dict[str, Any]) -> dict[str, str]:
     return dict(overlay)
 
 
-def _dispatch_spec_from_params(
-    raw: dict[str, Any],
+def _apply_default_tool_allowlist(
     req: SpawnSessionRequest,
-    directed_by: str,
-) -> DispatchSpec:
-    """Build the immutable contract from policy-resolved spawn inputs."""
-    return DispatchSpec(
-        dispatch_id=_param_text(raw, "dispatch_id"),
-        lane_id=req.lane_id,
-        role_name=req.role_name,
-        role_class=req.role_class,
-        work_class=req.work_class,
-        budget_line=req.budget_line,
-        unit_id=req.unit_id,
-        repository_root=req.repository_root,
-        expected_revision_id=_param_text(raw, "expected_revision_id"),
-        expected_path=str(raw.get("expected_path") or ""),
-        completion_contract=_as_object(raw.get("completion_contract")),
-        model=req.model,
-        effort=req.effort,
-        agent_runtime=req.agent_runtime,
-        allowed_hosts=list(_as_str_tuple(raw.get("allowed_hosts"))),
-        host=str(req.host or ""),
-        visibility=req.visibility,
-        local_name=req.local_name,
-        report_by_seconds=req.report_by_seconds,
-        allowed_tools=req.allowed_tools,
-        permission_mode=req.permission_mode,
-        transport=req.transport,
-        allow_askuserquestion=req.allow_askuserquestion,
-        degraded_hooks_acknowledged=req.degraded_hooks_acknowledged,
-        spawned_by_instance_id=req.spawned_by_instance_id,
-        spawned_by_role=req.spawned_by_role,
-        directed_by=directed_by,
-        uptake_due_at=str(raw.get("uptake_due_at") or ""),
-        report_by=str(raw.get("report_by") or ""),
-        watchdog_due_at=str(raw.get("watchdog_due_at") or ""),
-        dispatch_kind=req.dispatch_kind,
-        reviewed_report_vendor=req.reviewed_report_vendor,
-        pair_id=req.pair_id,
-        scope_tags=req.scope_tags,
-        difficulty_score=req.difficulty_score,
-        selection_receipt=req.selection_receipt or {},
-        selection_receipt_enforced=req.enforce_selection_receipt,
-        repository_id=_param_text(raw, "repository_id"),
-    )
-
-
-def _apply_work_class_defaults(
-    req: SpawnSessionRequest,
-    defaults: Mapping[str, Mapping[str, str]],
-) -> SpawnSessionRequest:
-    """§6 L3 rule 1 — fill an OMITTED ``model``/``effort`` from the
-    operator-configured per-``work_class`` default (``plugin.yaml``'s
-    ``work_class_defaults`` block). Never overrides a value the caller
-    explicitly passed; an unconfigured ``work_class`` (the shipped default —
-    empty block) leaves both fields exactly as ``spawn_session`` received
-    them, i.e. today's behavior."""
-    entry = defaults.get(req.work_class)
-    if not entry:
-        return req
-    model = req.model or str(entry.get("model", ""))
-    effort = req.effort or str(entry.get("effort", ""))
-    if model == req.model and effort == req.effort:
-        return req
-    return replace(req, model=model, effort=effort)
-
-
-def _apply_tool_allowlist(
-    req: SpawnSessionRequest,
-    allowlists: Mapping[str, tuple[str, ...]],
+    allowlist: tuple[str, ...],
 ) -> SpawnSessionRequest:
     """§6 permission-mode ruling (2026-08-03) — fill an OMITTED
-    ``allowed_tools`` from the operator-configured per-``work_class``
-    allowlist (``plugin.yaml``'s ``work_class_tool_allowlists`` block).
-    Never overrides an explicit caller value. An unconfigured ``work_class``
-    resolves to the shipped-empty default (``()``) — the spawn is STILL
-    gated (``headless_adapter.py`` always injects the PreToolUse hook),
-    just with nothing extra allowed, never an open default."""
-    if req.allowed_tools:
+    ``allowed_tools`` from the operator-configured ``default_allowed_tools``
+    (``plugin.yaml``). Never overrides an explicit caller value, and an
+    explicit empty list is an explicit value (no tool allowed), not an omission.
+    Shipped empty, the spawn is STILL gated (``headless_adapter.py`` always
+    injects the PreToolUse hook), just with nothing extra allowed, never an open
+    default."""
+    if req.allowed_tools is not None:
         return req
-    configured = allowlists.get(req.work_class)
-    if not configured:
-        return req
-    return replace(req, allowed_tools=configured)
+    return replace(req, allowed_tools=allowlist)
 
 
 def _resolve_permission_mode(req: SpawnSessionRequest, policy_mode: str) -> SpawnSessionRequest:
@@ -12663,21 +11502,11 @@ def _apply_spawn_session_policy(
     req: SpawnSessionRequest,
     policy: _SessionLifecyclePolicyConfig,
 ) -> SpawnSessionRequest:
-    """The four spawn-config-resolution steps every ``spawn_session``
-    dispatch must run — model/effort defaults, tool allowlist, permission
-    mode, transport — factored out so ``spawn_session()`` (the API path)
-    and the ``restart_session`` choreography (the background-worker path)
-    share exactly ONE resolution path. Before this (2026-08-10), the
-    choreography built its own ``SpawnSessionRequest`` directly and skipped
-    all four steps; ``permission_mode``/``allowed_tools``/``transport`` are
-    not columns on ``managed_session``, so restarting a worker silently lost
-    them every time (measured live: ``host_cannot_spawn`` — no permission
-    mode configured — on the fresh spawn). A fifth policy step added here
-    now reaches both callers automatically instead of needing to be copied
-    into a second, easily-forgotten call site."""
-    if not req.model or not req.effort:
-        req = _apply_work_class_defaults(req, policy.work_class_defaults)
-    req = _apply_tool_allowlist(req, policy.work_class_tool_allowlists)
+    """The three spawn-config-resolution steps every ``spawn_session``
+    dispatch runs — tool allowlist, permission mode, transport — factored out
+    so every caller shares exactly ONE resolution path (a field a request
+    leaves empty is filled from plugin.yaml, never silently dropped)."""
+    req = _apply_default_tool_allowlist(req, policy.default_allowed_tools)
     req = _resolve_permission_mode(req, policy.headless_permission_mode)
     req = _resolve_transport(req, policy.default_fleet_transport)
     return req
@@ -13259,55 +12088,6 @@ def _as_str_tuple(
         items = tuple(str(v) for v in value)
         return items or default
     return (str(value),)
-
-
-def _as_object(value: object) -> dict[str, Any]:
-    """Return a shallow object mapping or an empty mapping for validation."""
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _as_work_class_defaults(value: object) -> dict[str, dict[str, str]]:
-    """Coerce ``plugin.yaml``'s ``work_class_defaults`` block (§6 L3 rule 1)
-    into ``{work_class: {"model": ..., "effort": ...}}``. Tolerant of a
-    malformed entry (skips it, logs, keeps the rest) rather than failing the
-    whole config build over one operator typo — matches ``_as_bool``/
-    ``_as_int``'s "fall back rather than crash" posture. Absent/wrong-typed
-    input returns ``{}``, which is exactly today's behavior (no defaults
-    applied, spawn_session leaves model/effort as the caller passed them)."""
-    if not isinstance(value, dict):
-        return {}
-    result: dict[str, dict[str, str]] = {}
-    for work_class, entry in value.items():
-        if not isinstance(work_class, str) or not isinstance(entry, dict):
-            logger.warning(
-                "Skipping malformed work_class_defaults entry for %r: not a mapping",
-                work_class,
-            )
-            continue
-        result[work_class] = {str(k): str(v) for k, v in entry.items() if k in {"model", "effort"}}
-    return result
-
-
-def _as_work_class_tool_allowlists(value: object) -> dict[str, tuple[str, ...]]:
-    """Coerce ``plugin.yaml``'s ``work_class_tool_allowlists`` block (§6
-    permission-mode ruling, 2026-08-03) into ``{work_class: (tool_name, ...)}``.
-    Tolerant of a malformed entry (skips it, logs, keeps the rest) — same
-    posture as ``_as_work_class_defaults``. Absent/wrong-typed input returns
-    ``{}``: every headless spawn is STILL gated (the hook is always injected,
-    per ``headless_adapter.py``'s ``_spawn_env``), just with an empty
-    allowlist — never an open default."""
-    if not isinstance(value, dict):
-        return {}
-    result: dict[str, tuple[str, ...]] = {}
-    for work_class, entry in value.items():
-        if not isinstance(work_class, str) or not isinstance(entry, (list, tuple)):
-            logger.warning(
-                "Skipping malformed work_class_tool_allowlists entry for %r: not a list",
-                work_class,
-            )
-            continue
-        result[work_class] = tuple(str(t) for t in entry)
-    return result
 
 
 def _resolve_solet_name() -> str:

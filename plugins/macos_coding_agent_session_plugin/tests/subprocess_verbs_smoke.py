@@ -31,6 +31,7 @@ from macos_coding_agent_session_plugin.plugin import MacosCodingAgentSessionPlug
 CONTEXT = {"session_id": "fixture-session", "flow_id": "fixture-flow"}
 VERBS = (("macos_coding_agent_session_plugin", "spawn_bridge"),)
 FAILURE_IS_DATA = True
+PARK_SECONDS = 30.0
 
 
 class Ledger:
@@ -40,6 +41,7 @@ class Ledger:
         self.rows: dict[str, dict[str, Any]] = {}
         self.requests: dict[str, dict[str, Any]] = {}
         self.lock = threading.RLock()
+        self.gate = threading.Event()
         self.manager = AsyncJobManager.__new__(AsyncJobManager)
 
     def create_job(self, **kwargs: Any) -> dict[str, Any]:
@@ -87,7 +89,7 @@ def execute(plugin: Any, verb: str, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def terminal(ledger: Ledger, job_id: str) -> dict[str, Any]:
-    deadline = time.monotonic() + 8
+    deadline = time.monotonic() + PARK_SECONDS
     while time.monotonic() < deadline:
         row = ledger.get_job(job_id)["data"]["job"]
         if row["status"] in {"completed", "error", "cancelled"}:
@@ -97,8 +99,11 @@ def terminal(ledger: Ledger, job_id: str) -> dict[str, Any]:
 
 
 @contextmanager
-def fixture(plugin_name: str, verb: str, *, failed: bool = False) -> Any:
-    """Replace leaf boundaries, keeping dispatch and job workers real."""
+def fixture(plugin_name: str, verb: str, *, failed: bool = False, hold: bool = False) -> Any:
+    """Replace leaf boundaries, keeping dispatch and job workers real.
+
+    With ``hold`` the guarded subprocess parks on ``ledger.gate`` until the test releases it.
+    """
     ledger = Ledger()
     touches: list[int] = []
     forwarded: list[dict[str, Any]] = []
@@ -107,7 +112,8 @@ def fixture(plugin_name: str, verb: str, *, failed: bool = False) -> Any:
         def boundary(argv: list[str], **_kwargs: Any) -> Any:
             assert argv == ["fixture-subprocess"], f"unguarded subprocess: {argv!r}"
             touches.append(threading.get_ident())
-            time.sleep(0.3)
+            if hold:
+                assert ledger.gate.wait(PARK_SECONDS), "fixture gate never released"
             if failed:
                 raise OSError("guarded subprocess failed")
             return SimpleNamespace(pid=424242, stdout="fixture", returncode=0)
@@ -132,20 +138,22 @@ def fixture(plugin_name: str, verb: str, *, failed: bool = False) -> Any:
             yield plugin, ledger, params, touches, forwarded
         finally:
             # Keep every guard installed until this fixture's admitted work ends.
+            ledger.gate.set()
             for job_id, request in tuple(ledger.requests.items()):
                 if request.get("notes") != "prior runtime request":
                     terminal(ledger, job_id)
 
 
 def check_case(plugin_name: str, verb: str, *, failed: bool = False) -> None:
-    with fixture(plugin_name, verb, failed=failed) as (plugin, ledger, params, touches, forwarded):
+    with fixture(plugin_name, verb, failed=failed, hold=True) as (plugin, ledger, params, touches, forwarded):
         caller = threading.get_ident()
         started = time.perf_counter()
         receipt = execute(plugin, verb, params)
         elapsed = time.perf_counter() - started
         data = _queued_receipt(verb, receipt)
-        assert elapsed < 0.05, f"{verb}: handler blocked {elapsed * 1000:.1f}ms"
+        assert not ledger.gate.is_set(), f"{verb}: receipt must be issued while the subprocess is parked"
         assert caller not in touches, f"{verb}: subprocess ran on caller"
+        ledger.gate.set()
         job_id = data["job_id"]
         row = terminal(ledger, job_id)
         assert row["provider_name"] == f"{plugin_name}.{verb}", row
@@ -172,15 +180,16 @@ def _queued_receipt(verb: str, receipt: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_queued_cancellation(plugin_name: str, verb: str) -> None:
-    with fixture(plugin_name, verb) as (plugin, ledger, params, touches, _forwarded):
+    with fixture(plugin_name, verb, hold=True) as (plugin, ledger, params, touches, _forwarded):
         first = execute(plugin, verb, params)["data"]["job_id"]
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + PARK_SECONDS
         while not touches and time.monotonic() < deadline:
             time.sleep(0.005)
-        assert touches, "first job must own the delayed subprocess"
+        assert touches, "first job must own the parked subprocess"
         second = execute(plugin, verb, params)["data"]["job_id"]
         ledger.update_job(second, {"status": "cancelled"})
         third = execute(plugin, verb, params)["data"]["job_id"]
+        ledger.gate.set()
         assert terminal(ledger, first)["status"] == "completed"
         assert terminal(ledger, third)["status"] == "completed"
         assert terminal(ledger, second)["status"] == "cancelled"

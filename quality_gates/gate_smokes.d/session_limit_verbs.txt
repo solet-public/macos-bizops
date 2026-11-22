@@ -1,0 +1,2 @@
+# engine-5 S2 A2 (chg_fe282783): the set and list session limit verbs over in-memory state, offline, no file written.
+plugins/agent_messaging_plugin/tests/session_limit_verbs_smoke.py

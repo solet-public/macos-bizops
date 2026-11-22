@@ -259,7 +259,8 @@ def _check_store_series(res: Results) -> _NaiveDatetimeReadbackState:
     )
     second = _write_store(state, reading_at="2026-09-01T17:00:01+00:00", tokens=2)
     rows, truncated = read_session_context_status_history(
-        cast(Any, state), "agi-naive-readback",
+        cast(Any, state),
+        "agi-naive-readback",
     )
     res.check(second is True, "M1 a newer aware reading follows naive stored readback")
     res.check(
@@ -300,7 +301,7 @@ def _check_gauge_stale_prose(res: Results) -> None:
     """The stale notice guides readers to the correct runtime and evidence."""
     prose = _gauge_stale_prose(
         agent_instance_id="agi-naive-readback",
-        row={"lane_id": "lane-cdx-fix-gauge-naive-readback"},
+        row={"label": "gauge-naive-readback"},
         last_alive=datetime(2026, 9, 1, 18, 0, tzinfo=UTC),
         measured_at=datetime(2026, 9, 1, 17, 0, tzinfo=UTC),
         clock=datetime(2026, 9, 1, 18, 0, tzinfo=UTC),
@@ -475,10 +476,12 @@ def main() -> int:
             )
 
             state.write_text(
-                json.dumps({
-                    "claude_session_id": "previous-runtime",
-                    "reading_at": "2026-08-22T20:00:03.000Z",
-                }),
+                json.dumps(
+                    {
+                        "claude_session_id": "previous-runtime",
+                        "reading_at": "2026-08-22T20:00:03.000Z",
+                    }
+                ),
                 encoding="utf-8",
             )
             proc = run_hook(

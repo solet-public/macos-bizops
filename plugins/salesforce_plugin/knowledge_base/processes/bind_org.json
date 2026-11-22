@@ -1,0 +1,17 @@
+{
+  "process_key": "plugin::salesforce_plugin::bind_org",
+  "display_name": "Salesforce: Bind Org",
+  "description": "Bind an org the sf CLI is already logged in to (target_org: its CLI alias or username), so every Salesforce verb can name it with org. The binding comes from what the CLI and the org report, not from the caller: sf org display gives the org id, username and instance URL, whose host becomes the binding's pin (an instance_host given here must equal it or the bind is refused); one Organization query says whether the org is a sandbox; the CLI's own Dev Hub test (SELECT Id FROM ScratchOrgInfo) says whether it is a Dev Hub; a scratch org is recognised by the Dev Hub the CLI records for it. The binding is keyed by org id with an alias (alias, else the CLI alias, else the username) that names no other bound org: not another binding's alias, username or org id. Binding an org again, by any name the CLI knows it by, refreshes the binding with the org id the CLI reports and keeps how it logged in (its JWT key and secrets); the display call carries every bound JWT key because the org is not known until the CLI answers, leaving out with a warning a key the vault no longer holds, so a missing key fails only its own org's calls. The first bound org, or one bound with make_default true, is the default. Returns job_id/status queued.",
+  "embedding_description": "Connect this solet to a Salesforce org you are already logged in to with the sf CLI, such as a production org, a sandbox, a scratch org or a Dev Hub, so requests can name it by alias. Verifies the org's id, user and instance host, notes whether it is a sandbox or Dev Hub, and can make it the default org.",
+  "result_processor_customizations": {
+    "action_label": "Salesforce org binding queued",
+    "result_type": "salesforce_bind_org_result",
+    "result_description": "Queued dispatch: job_id and status. Completion: binding (org_id, alias, target_org, username, instance_host, org_type, is_dev_hub, login_method cli, default), org (the alias) and org_id.",
+    "presentation_guidance": "Confirm the alias, username and instance host so the operator can see the right org was bound, and say whether it is now the default."
+  },
+  "error_processor_customizations": {
+    "action_context": "Bind an org the sf CLI is logged in to.",
+    "error_interpretation": "sf.invalid_params: target_org is missing, or the alias, the org's username or its CLI target already names another bound org (the message says which and the way out), or the alias has characters other than letters, digits, '_', '.', '@', '+' and '-'. sf.not_configured: the CLI's org resolves to a different instance host than instance_host, or sf_cli_path does not name the CLI. sf.auth_failed: the CLI has no live session for target_org. sf.api_error: the CLI reported an org without an id. sf.org_registry_failed: the vault index could not be written.",
+    "recovery_guidance": "For sf.auth_failed, log in first (login, or sf org login web --alias <alias>) and bind again. For an alias clash, choose another alias. org_lifecycle list shows every org the CLI knows."
+  }
+}

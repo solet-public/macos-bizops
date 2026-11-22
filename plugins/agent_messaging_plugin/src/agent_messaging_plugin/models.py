@@ -170,8 +170,10 @@ class BridgeBinding:
     # watch-transport read path and, for a spawn_session-managed worker,
     # drive_on_delivery's driver-channel nudge — both independent of this
     # flag's value. Kept on the schema/dataclass so a future native wake
-    # path can flip it without a migration; nothing currently branches on it
-    # at dispatch time.
+    # path can flip it without a migration. peer_dispatch reads it, with
+    # delivery queued_wake, to decide whether a delivery-waiting pane notice
+    # is typed (channel_support.channel_carries_message, prb_57c118ad); it
+    # stays declared by the bridge, never probed.
     wake_capable: bool = True
     # MSG-04/identity-unification (2026-08-20): DECLARED, never probed, by
     # `solet-bridge watch` on every peer/register call — the one caller that KNOWS

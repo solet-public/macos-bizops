@@ -1,0 +1,2 @@
+# Two sets of recorded references stay isolated on one private tmux server.
+plugins/agent_messaging_plugin/tests/two_solets_one_tmux_smoke.py

@@ -22,6 +22,10 @@ Pins:
   operator-facing).
 * [7-8] Q5: a QUEUED result carrying probe success evidence lands on
   the applied envelope as ``data.probe``.
+* [10-13] A FAILED restart's ``reason_code`` rides every branch of the
+  restart-failed envelope as ``data.restart_reason_code`` (clean rollback,
+  concurrent commit, failed restore), and is ``None`` when the plugin gave
+  none, so a caller branches on the typed cause and never on message prose.
 
 Run:
     SOLET_NAME=<name> .venv/bin/python3 ananta/tests/lifecycle_management_service/apply_manifest_probe_rollback_smoke.py
@@ -159,6 +163,19 @@ def _failed_result() -> RestartResult:
     )
 
 
+def _schema_refused_result() -> RestartResult:
+    """The cutover refusing a release's schema change; the code is the plugin's token, opaque to core."""
+    return RestartResult(
+        status=RestartStatus.FAILED,
+        restart_action_id="",
+        message="schema preflight refused deploy (smoke)",
+        reason="smoke",
+        expected_etag="",
+        dry_run=False,
+        reason_code="schema_preflight_refused",
+    )
+
+
 def _apply(service: LifecycleManagementService) -> dict[str, Any]:
     return service.apply_manifest(
         new_manifest={"plugins": [FIXTURE_PLUGIN_NAME], "service_bindings": {}},
@@ -251,6 +268,66 @@ def _case_restart_failed_rolled_back(app_home: Path) -> None:
         data.get("manifest_restored_to") and data.get("service_bindings_restored_to"),
         "[9] FAILED restart envelope exposes the restoration paths",
     )
+    _check(
+        "restart_reason_code" in data and data["restart_reason_code"] is None,
+        f"[13] a FAILED restart that carries no reason_code answers restart_reason_code None (got {data.get('restart_reason_code', '<absent>')!r})",
+    )
+
+
+def _case_reason_code_clean_rollback(app_home: Path) -> None:
+    _seed_app_home(app_home)
+    plugin = _FakeDeploymentPlugin(_schema_refused_result())
+    data = _apply(LifecycleManagementService(_FakeOrchestratorRef(app_home, plugin)))["data"]
+    _check(
+        data.get("status") == "restart_failed_after_manifest_commit" and bool(data.get("manifest_restored_to")),
+        "[10] clean-rollback branch reached (manifest restored)",
+    )
+    _check(
+        data.get("restart_reason_code") == "schema_preflight_refused",
+        f"[10] clean-rollback branch carries restart_reason_code (got {data.get('restart_reason_code', '<absent>')!r})",
+    )
+
+
+def _case_reason_code_concurrent_commit(app_home: Path) -> None:
+    _seed_app_home(app_home)
+    plugin = _FakeDeploymentPlugin(_schema_refused_result())
+
+    def _concurrent_commit() -> None:
+        (app_home / "config" / "manifest.yaml").write_bytes(b"profile_name: local\nplugins:\n- somebody_elses_plugin\n")
+
+    plugin.pre_return_hook = _concurrent_commit
+    data = _apply(LifecycleManagementService(_FakeOrchestratorRef(app_home, plugin)))["data"]
+    _check(
+        data.get("status") == "restart_failed_after_manifest_commit" and bool(data.get("on_disk_etag")),
+        "[11] concurrent-commit branch reached (rollback skipped, on_disk_etag surfaced)",
+    )
+    _check(
+        data.get("restart_reason_code") == "schema_preflight_refused",
+        f"[11] concurrent-commit branch carries restart_reason_code (got {data.get('restart_reason_code', '<absent>')!r})",
+    )
+
+
+def _case_reason_code_restore_failed(app_home: Path) -> None:
+    _seed_app_home(app_home)
+    plugin = _FakeDeploymentPlugin(_schema_refused_result())
+    config_dir = app_home / "config"
+
+    def _lock_config_dir() -> None:
+        os.chmod(config_dir, stat.S_IRUSR | stat.S_IXUSR)
+
+    plugin.pre_return_hook = _lock_config_dir
+    try:
+        data = _apply(LifecycleManagementService(_FakeOrchestratorRef(app_home, plugin)))["data"]
+    finally:
+        os.chmod(config_dir, stat.S_IRWXU)
+    _check(
+        data.get("status") == "restart_failed_after_manifest_commit" and "manifest_rollback_failed" in " ".join(data.get("rejection_reasons") or []),
+        "[12] failed-restore branch reached (manifest_rollback_failed)",
+    )
+    _check(
+        data.get("restart_reason_code") == "schema_preflight_refused",
+        f"[12] failed-restore branch carries restart_reason_code (got {data.get('restart_reason_code', '<absent>')!r})",
+    )
 
 
 def _case_q5_success_evidence(app_home: Path) -> None:
@@ -300,6 +377,9 @@ def run_smoke() -> int:
                 _case_restore_oserror,
                 _case_restart_failed_rolled_back,
                 _case_q5_success_evidence,
+                _case_reason_code_clean_rollback,
+                _case_reason_code_concurrent_commit,
+                _case_reason_code_restore_failed,
             ):
                 app_home = Path(tempfile.mkdtemp(dir=tmp, prefix="app_home_"))
                 case(app_home)

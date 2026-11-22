@@ -1,0 +1,3 @@
+# Tmux session-closed notice proofs, hermetic and private-server.
+plugins/agent_messaging_plugin/tests/host_end_notice_smoke.py
+plugins/agent_messaging_plugin/tests/host_end_notice_live_smoke.py

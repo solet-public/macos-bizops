@@ -29,9 +29,7 @@ class PluginSchemaServiceInterface(ABC):
     INTERFACE_VERSION: ClassVar[str] = "1.0.0"
 
     @abstractmethod
-    def install_plugin_schema(
-        self, plugin_namespace: str, declared_schema_json: dict[str, Any]
-    ) -> dict[str, Any]:
+    def install_plugin_schema(self, plugin_namespace: str, declared_schema_json: dict[str, Any]) -> dict[str, Any]:
         """Idempotent install for a namespace.
 
         - Unknown namespace, no live tables: create everything, record ownership.
@@ -40,17 +38,22 @@ class PluginSchemaServiceInterface(ABC):
         - Known namespace, identical shape recorded: no-op (bump ``updated_at``).
         - Known namespace, different shape recorded: delegate to update.
         - Previously uninstalled (status=``inactive``): reactivate, then update if differs.
+        - Tables listed in the declaration's ``retired_tables`` that ownership records
+          as active are dropped first, as in ``update_plugin_schema``.
         """
         ...
 
     @abstractmethod
-    def update_plugin_schema(
-        self, plugin_namespace: str, declared_schema_json: dict[str, Any]
-    ) -> dict[str, Any]:
+    def update_plugin_schema(self, plugin_namespace: str, declared_schema_json: dict[str, Any]) -> dict[str, Any]:
         """Diff declared-new against ownership-recorded-current and apply.
 
-        Refuses to drop tables — operator must ``uninstall_plugin_schema`` (preserves
-        data) or ``purge_plugin_schema`` (destructive) for table removal. Other
+        Drops each table the declaration lists in ``retired_tables`` that ownership
+        records as active (the DROP and the ownership-row delete share one
+        transaction; an unowned name is a no-op; a name also declared in ``tables``
+        is refused). A table the declaration merely omits is left alone: a namespace
+        is declared piecewise, so an omission is not a removal request. Other
+        table removal is ``uninstall_plugin_schema`` (preserves data) or
+        ``purge_plugin_schema`` (destructive). Other
         non-additive changes (column type changes, check-constraint mutations,
         ``with_history`` toggles, ``id_prefix`` changes) raise ``NotImplementedError``.
         """
@@ -66,9 +69,7 @@ class PluginSchemaServiceInterface(ABC):
         ...
 
     @abstractmethod
-    def purge_plugin_schema(
-        self, plugin_namespace: str, force: bool = False
-    ) -> dict[str, Any]:
+    def purge_plugin_schema(self, plugin_namespace: str, force: bool = False) -> dict[str, Any]:
         """Destructive purge — drops platform-owned tables and ownership rows.
 
         Refuses against an ``active`` namespace unless ``force=True``. Refuses

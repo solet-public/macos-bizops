@@ -161,6 +161,16 @@
       "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
       "manifest_sha256": "fb54226c822265bbc53752a3e195bee8434bf2c0ee0b91137db7a11bac472667",
       "legacy_anchor_id": null
+    },
+    {
+      "repository": "https://github.com/solet-public/macos-bizops.git",
+      "commit": "9af3e784b4942a66eac8359c142073dee3b159fe",
+      "tree": "0e710a9e8d024234ce70be2a4616498c00f6d1e1",
+      "provenance_sha256": "ce163a04aac013dec4091855822b765903cf8aa4145ca4862756c379e63dfacf",
+      "seed_id": "1841be91-355e-51b9-aaee-b231466f58b4",
+      "origin_id": "31bfa93c-fe20-4988-b019-f8186684e88e",
+      "manifest_sha256": "fb54226c822265bbc53752a3e195bee8434bf2c0ee0b91137db7a11bac472667",
+      "legacy_anchor_id": null
     }
   ],
   "source_operation": {
@@ -376,8 +386,10 @@
       "marker": null,
       "stamp": "# rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST}",
       "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/claude_launcher.template",
-      "template_digest": "sha256:3ea74744d9290845cb15b7b8c48a139cb83dd8d83d59c034025dd2c01da3dd2e",
-      "previous_template_digests": []
+      "template_digest": "sha256:2813e5610154c33830f72cd255ce14b89182d3ef2794b7414edf3e0f82928293",
+      "previous_template_digests": [
+        "sha256:3ea74744d9290845cb15b7b8c48a139cb83dd8d83d59c034025dd2c01da3dd2e"
+      ]
     },
     {
       "artifact_id": "retired_controller_codex_launcher",
@@ -387,8 +399,10 @@
       "marker": null,
       "stamp": "# rendered-from: {TEMPLATE_REF}@{TEMPLATE_DIGEST}",
       "template_ref": "plugins/github_midwife_plugin/knowledge_base/hydration_templates/codex_launcher.template",
-      "template_digest": "sha256:040e4c3b4db764ca4730da1add189f51db7e70561841d3cf0e1ff87843864c80",
-      "previous_template_digests": []
+      "template_digest": "sha256:666c21da422dc52ed9dba4b5cb832e397c5815b9987ccfc61c3e93b7873d4952",
+      "previous_template_digests": [
+        "sha256:040e4c3b4db764ca4730da1add189f51db7e70561841d3cf0e1ff87843864c80"
+      ]
     },
     {
       "artifact_id": "retired_controller_fleet_launcher",
@@ -426,7 +440,7 @@
   },
   "knowledge_removals": [],
   "lifecycle": {
-    "strategy": "router_preferred",
+    "strategy": "single_color_required",
     "readiness_budget_seconds": 300,
     "readiness_release_signal": "bridge_health_healthy",
     "verification_modules": [

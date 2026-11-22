@@ -153,15 +153,17 @@ class StandardFieldDefinitions:
 
 class SchemaStandardizer:
     # Standard fields that are fully protected - no overrides allowed
-    PROTECTED_STANDARD_FIELDS: frozenset[str] = frozenset({
-        "id",           # Primary key - platform managed
-        "namespace",    # Routing key - platform managed
-        "created_at",   # Auto-timestamp - platform managed
-        "updated_at",   # Auto-timestamp - platform managed
-        "created_by",   # Attribution - platform managed
-        "updated_by",   # Attribution - platform managed
-        "is_deleted",   # Soft delete flag - platform managed
-    })
+    PROTECTED_STANDARD_FIELDS: frozenset[str] = frozenset(
+        {
+            "id",  # Primary key - platform managed
+            "namespace",  # Routing key - platform managed
+            "created_at",  # Auto-timestamp - platform managed
+            "updated_at",  # Auto-timestamp - platform managed
+            "created_by",  # Attribution - platform managed
+            "updated_by",  # Attribution - platform managed
+            "is_deleted",  # Soft delete flag - platform managed
+        }
+    )
 
     # Fields that allow specific constraint additions/relaxations:
     # - name: can add unique=True and/or not_null=True
@@ -188,11 +190,10 @@ class SchemaStandardizer:
             version=schema_def.version,
             description=schema_def.description,
             tables=standardized_tables,
+            retired_tables=schema_def.retired_tables,
         )
 
-    def _standardize_table(
-        self, table_name: str, table_schema: TableSchema
-    ) -> TableSchema:
+    def _standardize_table(self, table_name: str, table_schema: TableSchema) -> TableSchema:
         """Standardize table by adding platform fields and validating overrides.
 
         FAIL-FAST: Rejects schemas that override protected standard fields.
@@ -227,9 +228,7 @@ class SchemaStandardizer:
             data_sensitivity=table_schema.data_sensitivity,
         )
 
-    def _validate_no_protected_field_overrides(
-        self, table_name: str, table_schema: TableSchema
-    ) -> None:
+    def _validate_no_protected_field_overrides(self, table_name: str, table_schema: TableSchema) -> None:
         """Validate standard field overrides.
 
         Rules:
@@ -253,22 +252,14 @@ class SchemaStandardizer:
         overridden_protected = set(table_schema.columns.keys()) & self.PROTECTED_STANDARD_FIELDS
         if overridden_protected:
             fields_list = ", ".join(sorted(overridden_protected))
-            raise ValueError(
-                f"SCHEMA VALIDATION FAILED: Table '{table_name}' attempts to override "
-                f"protected standard field(s): [{fields_list}]. "
-                f"These fields are platform-managed and cannot be redefined."
-            )
+            raise ValueError(f"SCHEMA VALIDATION FAILED: Table '{table_name}' attempts to override protected standard field(s): [{fields_list}]. These fields are platform-managed and cannot be redefined.")
 
         # Validate constrainable field overrides
         for field_name in self.CONSTRAINABLE_FIELDS:
             if field_name in table_schema.columns:
-                self._validate_constrainable_field(
-                    table_name, field_name, table_schema.columns[field_name]
-                )
+                self._validate_constrainable_field(table_name, field_name, table_schema.columns[field_name])
 
-    def _validate_constrainable_field(
-        self, table_name: str, field_name: str, column_def: ColumnDefinition
-    ) -> None:
+    def _validate_constrainable_field(self, table_name: str, field_name: str, column_def: ColumnDefinition) -> None:
         """Validate that a constrainable field override only adds allowed constraints.
 
         Args:

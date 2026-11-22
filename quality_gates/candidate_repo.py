@@ -334,7 +334,7 @@ def provision_private_git(repo_root: Path, candidate: CandidateTree, *, base_ref
     # from. `materialize_candidate_tree` reads its blobs from `base_ref`, not
     # from `repo_root`'s current HEAD, and the two commonly differ (the
     # re-homed-candidate-at-master rule builds from a `base_ref` ahead of a
-    # behind-master lane worktree's own HEAD). Re-applying the source HEAD in
+    # behind-master linked worktree's own HEAD). Re-applying the source HEAD in
     # that case mislabels the candidate: `git diff --cached` against that HEAD
     # would see the whole base-gap as staged, and a verifier checking
     # `HEAD == base_ref` fails on a tree that is actually correct
@@ -434,9 +434,9 @@ def _root_pattern(root: Path) -> re.Pattern[str]:
 def _rehome(payload: str, source_root: Path, candidate_root: Path) -> str:
     """Re-home on PATH BOUNDARIES, never as a bare substring.
 
-    A lane worktree is a SIBLING of the checkout that owns the shared venv and
+    A linked worktree is a SIBLING of the checkout that owns the shared venv and
     its directory name begins with the same characters, so `/…/base` is a prefix
-    SUBSTRING of `/…/base_lane_worktrees/…` without ever being a parent of it.
+    SUBSTRING of `/…/base_linked_worktrees/…` without ever being a parent of it.
     A bare `str.replace` therefore rewrites paths that were never under
     `source_root` at all — silently, because every guard in this module is a
     containment test that such a corrupted path still satisfies.  Only a match
@@ -449,7 +449,7 @@ def _rehome(payload: str, source_root: Path, candidate_root: Path) -> str:
 def _venv_source_root(shared_venv: Path, repo_root: Path) -> Path:
     """The checkout whose paths the shared venv's pointers actually name.
 
-    `repo_root` is the WRONG key for re-homing.  A lane worktree reaches the
+    `repo_root` is the WRONG key for re-homing.  A linked worktree reaches the
     shared virtualenv through a `.venv` symlink, so the editable pointers inside
     it carry absolute paths into the checkout that OWNS that venv — the main
     one — and never mention the worktree.  Keying on `repo_root` makes every

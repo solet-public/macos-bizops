@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:server-side-internals, evidence-category:identity-model, evidence-category:invariant-contract, domain:agent-messaging, domain:fleet-session-lifecycle
 
-Embedding Description: What a spawned fleet worker is NAMED on its own machine and what that name does and does not buy — the local_name spawn field feeding both host drivers' --name, why a role-named worker answers to that name on its first turn but is still unreachable by role-addressed peer_send_by_name until it claims explicitly, why no git gate reads that name any more, and the three separate gates that govern role collisions (spawn refuses a second live local name, peer_claim_role refuses a live different-session holder, a dead holder stays cheaply claimable on purpose).
+Embedding Description: What a spawned fleet worker is NAMED on its own machine and what that name does and does not buy — the local_name spawn field feeding both host drivers' --name, why a role-named worker answers to that name on its first turn but is still unreachable by role-addressed peer_send_by_name until it claims explicitly, why no git gate reads that name any more, and the three separate gates that govern role collisions (spawn refuses a second live local name, peer_claim_role refuses a live different-session holder, a dead holder stays cheaply claimable on purpose), and that none of them reads a role class: only the sys: keyspace is reserved.
 
 ## Purpose
 
@@ -28,14 +28,8 @@ the same vocabulary.
 under. Both host drivers consume it — the headless driver's `--name`, and the
 tmux driver's `--name` plus the label its tmux session name derives from.
 
-Resolution, when the caller omits it:
-
-- a **project**-class role → `role_name`
-- anything else → `lane_id`
-
-The project class is the one whose entire point is that the worker *is* the
-role. Every other class is lane work, and `lane_id` is what those sessions were
-already labelled with, so the default is a no-op for them.
+When the caller omits `local_name`, the spawn uses the session label, falling
+back to the agent instance ID if the label is empty.
 
 ## What the local name buys: the session's own name, immediately
 
@@ -64,7 +58,7 @@ conflating them is the easy mistake here.
 the incumbent's, so an automatic claim at spawn would EVICT whoever currently
 holds that role — a destructive act triggered by a routine one.
 
-So a freshly spawned project-role worker named `<Role>`:
+So a freshly spawned worker named `<Role>`:
 
 - answers to `<Role>` immediately (local name), **and**
 - is NOT yet a `peer_send_by_name` destination for `<Role>` (no claim).
@@ -79,7 +73,7 @@ role-addressed routing reach it. `role_name` is recorded on the
 
 A spawn whose resolved `local_name` matches a NON-TERMINAL `managed_session`
 row is refused with `local_name_already_held`, naming the incumbent's
-`agent_instance_id`, `lifecycle_state`, `host`, `host_ref` and `lane_id`, plus
+`agent_instance_id`, `lifecycle_state`, `host`, `host_ref` and `label`, plus
 the `terminate_session` call that frees the name. Never a silent suffix (see
 above), never a silent eviction.
 
@@ -114,6 +108,16 @@ loop.
 
 **The general rule, stated once:** the platform refuses collisions between LIVE
 holders and never refuses succession from a dead one.
+
+### What no gate reads: a role class
+
+A role has no class, and no act stamps or grants authority onto one. A
+`<solet>-Main` name is minted, claimed, displaced, released and retired exactly
+like any other name. The one reserved keyspace is `sys:`: a general claim of a
+`sys:` name is refused `system_slot_claim_denied`. Retiring a role
+(`retire_role`) is open to any registered caller, refuses a role a live session
+holds, and appends an entry naming who retired it; see
+`15_retired_role_registry_interface.md`.
 
 ## Spawning onto a host where hooks cannot run
 

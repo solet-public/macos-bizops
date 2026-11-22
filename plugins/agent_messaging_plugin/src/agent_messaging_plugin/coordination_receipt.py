@@ -1,8 +1,8 @@
 """Whether a managed Claude session's coordination ownership receipt will be accepted.
 
-Every coordination hook (heartbeat, wake, context gauge) refuses a managed
+Both coordination hooks (wake and context gauge) refuse a managed
 session whose receipt is absent, foreign, or no longer matches the hook bytes
-it bound, and it refuses to stderr only, so a bad receipt turns all three off
+it bound, and each refuses to stderr only, so a bad receipt turns both off
 without a sound. This module is the one place that question is asked ahead of
 the hooks and the one place the answer is worded, so the spawn warning and the
 sweep's gauge notice cannot disagree.
@@ -25,19 +25,10 @@ from pathlib import Path
 RECEIPT_RELATIVE_PATH = Path("data/coordination-hooks/claude/installation.v1.json")
 RECEIPT_ENV = "AGENT_COORDINATION_RECEIPT_PATH"
 
-DEVELOPMENT_CHECKOUT_HINT = (
-    "Publish it with `python3 -m github_midwife_plugin.checkout_receipt "
-    "--repo-root <clone> --solet-name <name>`, and again after any change to "
-    "the four coordination hooks or their hooks.json."
-)
-INSTALLED_SOLET_HINT = (
-    "Publish it with `solet-manager update <name>`: its plugin step "
-    "(`claude.publish_coordination_receipt`) rebuilds the receipt over the "
-    "installed plugin cache. Do not use the development-checkout publisher here."
-)
+DEVELOPMENT_CHECKOUT_HINT = "Publish it with `python3 -m github_midwife_plugin.checkout_receipt --repo-root <clone> --solet-name <name>`, and again after any change to the three coordination hook files or their hooks.json."
+INSTALLED_SOLET_HINT = "Publish it with `solet-manager update <name>`: its plugin step (`claude.publish_coordination_receipt`) rebuilds the receipt over the installed plugin cache. Do not use the development-checkout publisher here."
 
 _CAPABILITY_FILES = (
-    ("heartbeat", "heartbeat_report_alive.py"),
     ("context_watch", "rotation_due_watch.py"),
     ("wake", "wake_waiter.py"),
 )
@@ -57,9 +48,7 @@ def _binds_installed_cache(receipt: Path) -> bool:
     except (OSError, ValueError):
         return False
     surfaces = payload.get("surfaces") if isinstance(payload, dict) else None
-    return isinstance(surfaces, list) and any(
-        isinstance(surface, dict) and surface.get("kind") == "plugin_cache" for surface in surfaces
-    )
+    return isinstance(surfaces, list) and any(isinstance(surface, dict) and surface.get("kind") == "plugin_cache" for surface in surfaces)
 
 
 def publish_hint(receipt: Path, hook_root: Path) -> str:
@@ -75,21 +64,21 @@ def publish_hint(receipt: Path, hook_root: Path) -> str:
 
 
 def _refusal(receipt: Path, hook_root: Path, why: str) -> str:
-    return (
-        f"The coordination receipt {receipt} is not accepted for {hook_root} ({why}), so every "
-        f"managed session's heartbeat, wake and context-gauge hooks refuse ownership and do "
-        f"nothing. {publish_hint(receipt, hook_root)}"
-    )
+    return f"The coordination receipt {receipt} is not accepted for {hook_root} ({why}), so every managed session's wake and context-gauge hooks refuse ownership and do nothing. {publish_hint(receipt, hook_root)}"
 
 
 def _first_refusal(owner: Path, reporter: Path, receipt: Path, solet_name: str) -> str | None:
-    return _guard_refusal(owner, reporter, {
-        "SOLET_NAME": solet_name,
-        "AGENT_INSTANCE_ID": "receipt-check",
-        "AGENT_SESSION_ID": "receipt-check",
-        RECEIPT_ENV: str(receipt),
-        "AGENT_CONTEXT_GAUGE_REPORTER_PATH": str(reporter),
-    })
+    return _guard_refusal(
+        owner,
+        reporter,
+        {
+            "SOLET_NAME": solet_name,
+            "AGENT_INSTANCE_ID": "receipt-check",
+            "AGENT_SESSION_ID": "receipt-check",
+            RECEIPT_ENV: str(receipt),
+            "AGENT_CONTEXT_GAUGE_REPORTER_PATH": str(reporter),
+        },
+    )
 
 
 def _guard_refusal(owner: Path, reporter: Path, environ: Mapping[str, str]) -> str | None:
@@ -130,17 +119,11 @@ def launch_finding(environ: Mapping[str, str], reporter: Path) -> str | None:
     hook_root = reporter.parent
     owner = hook_root / "coordination_owner.py"
     try:
-        why = _guard_refusal(owner, reporter, environ) if owner.is_file() else (
-            f"the hook root has no {owner.name}, so its hooks cannot be verified"
-        )
+        why = _guard_refusal(owner, reporter, environ) if owner.is_file() else (f"the hook root has no {owner.name}, so its hooks cannot be verified")
     except Exception as error:  # noqa: BLE001 -- the guard is arbitrary checkout code; its failure is the finding
         why = f"the ownership guard {owner} could not be run: {type(error).__name__}: {error}"
     if why is None:
         return None
     receipt = environ.get(RECEIPT_ENV, "").strip()
     remedy = f" {publish_hint(Path(receipt), hook_root)}" if receipt and "refusal:" in why else ""
-    return (
-        f"This session's coordination hooks under {hook_root} refuse it ({why}), so its heartbeat, "
-        f"wake and context-gauge hooks will do nothing and session_context_status will read ceiling 0 "
-        f"for it.{remedy}"
-    )
+    return f"This session's coordination hooks under {hook_root} refuse it ({why}), so its wake and context-gauge hooks will do nothing and session_context_status will read ceiling 0 for it.{remedy}"

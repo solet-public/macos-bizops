@@ -1,0 +1,1 @@
+plugins/postgres_state_management_plugin/tests/key_value_round_trip_smoke.py

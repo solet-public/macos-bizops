@@ -17,7 +17,7 @@ import sys
 from collections.abc import Iterable
 from pathlib import Path
 
-from ananta.core.runtime.port_manager import ClientIOExecutor
+from ananta.core.runtime.port_manager import ClientIOExecutor, write_private_port_file
 
 from .service_install import RUNTIME_DIR, validate_solet_name
 
@@ -41,8 +41,7 @@ def ingress_port_file_path(solet: str, runtime_dir: Path = RUNTIME_DIR) -> Path:
 
 def _write_port_file(path: Path, port: int) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-    path.write_text(str(port), encoding="utf-8")
-    path.chmod(0o600)
+    write_private_port_file(path, port)
 
 
 def read_router_port(path: Path) -> int:

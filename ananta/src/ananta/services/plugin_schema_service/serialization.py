@@ -31,10 +31,8 @@ def to_json(schema_def: SchemaDefinition) -> dict[str, Any]:
         "namespace": schema_def.namespace,
         "version": schema_def.version,
         "description": schema_def.description,
-        "tables": {
-            table_name: _table_to_json(table)
-            for table_name, table in schema_def.tables.items()
-        },
+        "tables": {table_name: _table_to_json(table) for table_name, table in schema_def.tables.items()},
+        "retired_tables": list(schema_def.retired_tables),
     }
 
 
@@ -42,21 +40,17 @@ def from_json(data: dict[str, Any]) -> SchemaDefinition:
     """Hydrate a canonical JSON shape into a ``SchemaDefinition``."""
     return SchemaDefinition(
         namespace=data["namespace"],
-        tables={
-            table_name: _table_from_json(t)
-            for table_name, t in data.get("tables", {}).items()
-        },
+        tables={table_name: _table_from_json(t) for table_name, t in data.get("tables", {}).items()},
         version=data.get("version", "1.0.0"),
         description=data.get("description"),
+        retired_tables=tuple(data.get("retired_tables", ())),
     )
 
 
 def _table_to_json(table: TableSchema) -> dict[str, Any]:
     return {
         "table_name": table.table_name,
-        "columns": {
-            col_name: _column_to_json(col) for col_name, col in table.columns.items()
-        },
+        "columns": {col_name: _column_to_json(col) for col_name, col in table.columns.items()},
         "indexes": [_index_to_json(idx) for idx in table.indexes],
         "check_constraints": list(table.check_constraints),
         "with_history": table.with_history,
@@ -69,10 +63,7 @@ def _table_to_json(table: TableSchema) -> dict[str, Any]:
 def _table_from_json(data: dict[str, Any]) -> TableSchema:
     return TableSchema(
         table_name=data["table_name"],
-        columns={
-            col_name: _column_from_json(c)
-            for col_name, c in data.get("columns", {}).items()
-        },
+        columns={col_name: _column_from_json(c) for col_name, c in data.get("columns", {}).items()},
         indexes=[_index_from_json(i) for i in data.get("indexes", [])],
         check_constraints=list(data.get("check_constraints", [])),
         with_history=data.get("with_history", False),

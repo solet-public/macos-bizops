@@ -318,7 +318,7 @@ def build_peer_inbox_request(
         # A4 (2026-08-04): the silent/important split at send time is
         # retired, so the catch-up view is the only meaningful one — never
         # read from the caller. This closes the hatch the same way Amendment
-        # 3 closes send_peer_message's: the schema entry AND the
+        # 3 closes peer_send's: the schema entry AND the
         # read-and-branch code both go, not just one.
         include_important=True,
         role_after=(str(role_after_raw) if role_after_raw not in (None, "") else None),

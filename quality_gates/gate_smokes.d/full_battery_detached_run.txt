@@ -1,0 +1,2 @@
+# The scheduled full battery runs in a detached export of its frozen commit, so a landing cannot interrupt it (frq_e2cdefed, Change chg_5578d2b4).
+plugins/platform_dev_surface_plugin/tests/full_battery_detached_run_smoke.py

@@ -1,0 +1,1 @@
+plugins/agent_messaging_plugin/tests/env_contract_prose_smoke.py

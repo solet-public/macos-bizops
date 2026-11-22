@@ -40,19 +40,15 @@ from .model_capability_reconcile import (
     RunTally,
     build_report,
     cost_floor,
-    flag_new_cell,
     group_readings,
-    key_text,
-    manual_disagreement_note,
     plan_creation,
-    prior_value,
     processed_cells,
     reconcile_cells,
     unrenewable_stale,
 )
+from .model_capability_settlement import settle_cell
 from .schema import (
     CELL_ACCEPTANCE_ACCEPTED,
-    CELL_ACCEPTANCE_CROSSCHECK_CONFLICT,
     CELL_ACCEPTANCE_PENDING_CROSSCHECK,
     CELL_ACCEPTANCE_WITHDRAWN,
     CELL_ACCEPTANCES,
@@ -484,7 +480,7 @@ def _write_reading_observation(state: StateManagementInterface, run_id: str, rea
     record: dict[str, Any] = {
         "refresh_run_id": run_id,
         "source_id": reading.source_id,
-        "fetch_method": f"GET (parsed by model_capability_fetch, {reading.source_id})",
+        "fetch_method": f"GET Artificial Analysis (parsed by model_capability_fetch, {reading.source_id}); attribution: artificialanalysis.ai",
         "fetched_at": reading.fetched_at,
         "provider": reading.provider,
         "runtime": reading.runtime,
@@ -600,91 +596,8 @@ def _write_cell(
     _write_policy_cell(state, record)
 
 
-def _hold_withdrawn(state: StateManagementInterface, cell: DiscoveredCell, outcome: ReconcileOutcome, existing: dict[str, Any], run_id: str, tally: RunTally) -> str:
-    """A refresh never changes the acceptance of a withdrawn cell (iss_71a21363, design mutant 13).
-
-    The readings were recorded as observations already. When two sources agree, or one source
-    stays inside tolerance of the retained value (`prior_value` bounds a withdrawn cell too),
-    the cell's values are refreshed in place and it stays withdrawn; anything else leaves it
-    untouched. Acceptance moves only by the harness pass's reinstatement of an automatic
-    withdrawal or by `reinstate_model_capability_cell`. The write is predicated on the cell
-    still being withdrawn, so a reinstatement that lands first is not overwritten."""
-    tally.withdrawn_left.append(key_text(cell.key))
-    if outcome.acceptance != CELL_ACCEPTANCE_ACCEPTED:  # a conflict, or a lone reading past tolerance (pending): the retained value stands
-        return "unchanged"
-    require_updated(
-        state.update_state(
-            AGENT_ROLE_BINDING_NAMESPACE,
-            {"table": TABLE_MODEL_CAPABILITY_CELL, "filters": {"id": existing["id"], "acceptance": CELL_ACCEPTANCE_WITHDRAWN}},
-            {
-                "capability_score": outcome.capability_score,
-                "cost_per_task_usd": outcome.cost_per_task_usd,
-                "measured_at": outcome.measured_at,
-                "agreeing_observation_ids": outcome.agreeing_observation_ids,
-                "last_refresh_run_id": run_id,
-            },
-        ),
-    )
-    return "unchanged"
-
-
-def _hold_manual_value(state: StateManagementInterface, cell: DiscoveredCell, outcome: ReconcileOutcome, existing: dict[str, Any] | None, run_id: str, tally: RunTally) -> bool:
-    """Q8: keep a manual cell's values when the live pages disagree, with a loud note; True when it did."""
-    if existing is None or outcome.acceptance != CELL_ACCEPTANCE_ACCEPTED:
-        return False
-    prior = prior_value(existing)
-    if prior is None or not _manual_source_for_cell(state, existing):
-        return False
-    advisory = manual_disagreement_note(prior, outcome)
-    if advisory is None:
-        return False
-    require_completed(
-        state.update_state(
-            AGENT_ROLE_BINDING_NAMESPACE,
-            {"table": TABLE_MODEL_CAPABILITY_CELL, "filters": {"id": existing["id"]}},
-            {"disagreement_note": advisory, "last_refresh_run_id": run_id},
-        ),
-        "note a manual versus live disagreement",
-    )
-    tally.manual_conflicts.append(key_text(cell.key))
-    return True
-
-
-def _settle_cell(
-    state: StateManagementInterface,
-    cell: DiscoveredCell,
-    outcome: ReconcileOutcome,
-    existing: dict[str, Any] | None,
-    run_id: str,
-    *,
-    staleness_window_hours: int | None,
-    floor: float | None,
-    tally: RunTally,
-) -> str:
-    """Write one reconciled outcome and return 'accepted' | 'conflicted' | 'unchanged'.
-
-    The refresh never writes a `pending_crosscheck` cell (design 4.3): a single-source
-    reading that moved past tolerance, or any pending outcome, leaves the prior cell as it
-    is. A genuine `crosscheck_conflict` DOES overwrite a prior accepted cell (real
-    disagreement is real signal). A renewal resets the staleness window to
-    `staleness_window_hours`, so a manual cell that live sources renew takes the current resolved window.
-    A withdrawn cell is the exception: its acceptance never moves here (`_hold_withdrawn`)."""
-    if existing is not None and existing.get("acceptance") == CELL_ACCEPTANCE_WITHDRAWN:
-        return _hold_withdrawn(state, cell, outcome, existing, run_id, tally)
-    if outcome.single_source_unconfirmed:
-        tally.unconfirmed.append(key_text(cell.key))
-        return "unchanged"
-    if outcome.acceptance == CELL_ACCEPTANCE_PENDING_CROSSCHECK or _hold_manual_value(state, cell, outcome, existing, run_id, tally):
-        return "unchanged"
-    if outcome.acceptance not in (CELL_ACCEPTANCE_ACCEPTED, CELL_ACCEPTANCE_CROSSCHECK_CONFLICT):
-        raise CatalogError("catalog_invalid", f"reconcile_cell produced an unexpected acceptance {outcome.acceptance!r}.")
-    unverified_since: str | None = None
-    if existing is None:
-        outcome = flag_new_cell(outcome, cell)
-        tally.created.append(key_text(cell.key))
-        unverified_since = _now_iso() if cell.derived_launch_id else None  # the clock withdraws a derived id no `ok` list ever confirms (design 1.7)
-    _write_cell(state, outcome, run_id, staleness_window_hours=staleness_window_hours, floor=floor, unverified_since=unverified_since)
-    return "accepted" if outcome.acceptance == CELL_ACCEPTANCE_ACCEPTED else "conflicted"
+manual_source_for_cell = _manual_source_for_cell
+write_cell = _write_cell
 
 
 def _apply_outcomes(
@@ -701,7 +614,7 @@ def _apply_outcomes(
     for cell in processed:
         outcome = outcomes.get(cell.key)
         if outcome is not None:
-            tally.counts[_settle_cell(state, cell, outcome, by_key.get(cell.key), run_id, staleness_window_hours=staleness_window_hours, floor=floor, tally=tally)] += 1
+            tally.counts[settle_cell(state, cell, outcome, by_key.get(cell.key), run_id, staleness_window_hours=staleness_window_hours, floor=floor, tally=tally)] += 1
     return tally
 
 
@@ -725,7 +638,8 @@ def reconcile_discovery(
     reading is neither created nor renewed and never becomes `pending_crosscheck`
     (design 4.3). Mirrors `seed_catalog`'s "never silently undo an already-accepted
     cell on weaker evidence" rule: a genuine `crosscheck_conflict` DOES overwrite a
-    prior accepted cell, but a thin single-source reading never does."""
+    prior accepted cell (a manual one is held, see `_settle_cell`), but a thin
+    single-source reading never does."""
     catalog = read_cells_page(state, ceiling=None)
     window = resolve_catalog_window(state, catalog.rows, requested=staleness_window_hours)
     by_key = {_cell_key(row): row for row in catalog.rows}
@@ -1247,10 +1161,13 @@ def _enabled(row: dict[str, Any]) -> bool:
 def selection_catalog(
     rows: list[dict[str, Any]],
     weight_for: Callable[[str, str], float] | None = None,
+    preference_for: Callable[[dict[str, Any]], tuple[float, str | None]] | None = None,
 ) -> tuple[CapabilityCell, ...]:
     """Every scored cell as the pure selector wants it; unscored rows are dropped here, counted by the verb.
 
     ``weight_for(runtime, model)`` is the plan's declared dispatch weight; without it every cell weighs 1.0.
+    ``preference_for(row)`` is the operator's preference weight for the row and the id of the rule that set it
+    (None when no rule did); without it every cell weighs 1.0 with no rule.
     """
     cells: list[CapabilityCell] = []
     for row in rows:
@@ -1261,6 +1178,7 @@ def selection_catalog(
         measured_at = _parse_stamp(measured_raw, "measured_at") if measured_raw else datetime.min.replace(tzinfo=UTC)
         runtime = str(row.get("runtime", ""))
         model = str(row.get("model", ""))
+        preference_weight, preference_rule = (1.0, None) if preference_for is None else preference_for(row)
         cells.append(
             CapabilityCell(
                 runtime=runtime,
@@ -1273,6 +1191,8 @@ def selection_catalog(
                 acceptance=str(row.get("acceptance", "")),
                 plan_weight=1.0 if weight_for is None else weight_for(runtime, model),
                 enabled=_enabled(row),
+                preference_weight=preference_weight,
+                preference_rule=preference_rule,
             ),
         )
     return tuple(cells)

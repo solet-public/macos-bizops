@@ -11,7 +11,7 @@
     "presentation_guidance": "Routine clear-path success needs no narration; surface the record's factual findings and escalations, not a claim inferred from a write receipt."
   },
   "error_processor_customizations": {
-    "action_context": "One StateManagementInterface append to the deployment's fleet_liveness_run table; no project-solet register access and no filesystem write.",
+    "action_context": "One StateManagementInterface append to the deployment's fleet_liveness_run table; no external register access and no filesystem write.",
     "error_interpretation": "missing_argument or invalid_argument means the caller did not provide a complete structured pass. state_service_unavailable means deployment-native persistence is unavailable; do not substitute a markdown log.",
     "recovery_guidance": "Fix the structured payload before retrying a validation failure. For an uncertain transport failure after a write attempt, query recent runs before deciding whether a new pass record is warranted."
   }

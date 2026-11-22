@@ -93,7 +93,7 @@ artifacts `existing_install_flow.json` declares.
 | `user_claude_md_section.template` | `managed` | `user_claude_md_section`, a marker-delimited block |
 | `feedback_skill_SKILL.md.template` | `managed` | `feedback_skill`, refresh-only: an edited copy is reported and left, a missing one is not created |
 | `clone_exclude_block.template` | `managed` | `clone_exclude_block`, a marker-delimited block in `<clone>/.git/info/exclude`; the update adds `client/` there so the clone ignores the fleet file, and the plan no longer refuses it |
-| `fleet_functions.zsh.template` | `managed` | `fleet_launcher`, refreshed above the `# One function per role` line only: an r56 launcher section is replaced with a backup, the operator's role functions are kept byte-for-byte; retired controller assignments are removed, an edited section is reported and left, a missing file is not created |
+| `fleet_functions.zsh.template` | `managed` | `fleet_launcher`, refreshed above the `# One function per role` line only: an r56 launcher section is replaced with a backup, the operator's role functions are kept byte-for-byte; retired controller assignments are removed, an edited section is reported and left, a missing file is not created; doctor reports it when client/<name>.zsh sources it |
 | `rename_skill_SKILL.md.template` | `refresh-safe-manual` | user scope, but its bytes are identical at r43, r56 and this release, so there is nothing to deliver yet |
 | `solet.zsh.template` | `managed` | removal-only artifact: removes an old controller assignment from `client/<name>.zsh`, with a backup and no other byte changes |
 | `launch.template` | `refresh-safe-manual` | same: `client/bin/` |

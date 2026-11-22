@@ -27,7 +27,7 @@ Drives the REAL chain, one seam per section, no reimplementations:
   3. ``ActionProcessor._lift_inference_vertex_identity`` (the real method) lifts
      it into the handler ``state``;
   4. ``_resolve_role_send_sender`` (the real ladder) stamps an honest sender;
-  5. ``send_peer_message`` (the real verb body) does the same — it used to
+  5. ``peer_send`` (the real verb body) does the same — it used to
      hardcode the sentinel on EVERY transport, including a registered MCP
      caller, so this leg fails even with the whole CLI plumbing present.
 
@@ -47,11 +47,14 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
+
+if TYPE_CHECKING:
+    from ananta.core.actions.action_processor import QueuedActionProtocol
 
 from ananta.core.actions.action_processor import ActionProcessor  # noqa: E402
 from ananta.services.store import Store, open_store  # noqa: E402
@@ -154,16 +157,16 @@ class _RoleStateService:
         self._roles = roles_by_instance
 
     def query_state(
-        self, _namespace: str, query: dict[str, Any],
+        self,
+        _namespace: str,
+        query: dict[str, Any],
     ) -> dict[str, Any]:
         filters = query.get("filters", {})
         instance = str(filters.get("agent_instance_id", ""))
         return {
             "action_status": "completed",
             "data": {
-                "records": [
-                    {"role": role} for role in self._roles.get(instance, [])
-                ],
+                "records": [{"role": role} for role in self._roles.get(instance, [])],
             },
         }
 
@@ -176,7 +179,8 @@ class _RaisingRegistry:
 
 
 def _surface(
-    peer_registry: object, state_service: object | None = None,
+    peer_registry: object,
+    state_service: object | None = None,
 ) -> PlatformSurface:
     return PlatformSurface(
         action_factory=cast(Any, object()),
@@ -186,9 +190,7 @@ def _surface(
         peer_registry=cast(Any, peer_registry),
         state_service=cast(
             Any,
-            state_service
-            if state_service is not None
-            else _RoleStateService({_LIVE_INSTANCE: [_LIVE_ROLE]}),
+            state_service if state_service is not None else _RoleStateService({_LIVE_INSTANCE: [_LIVE_ROLE]}),
         ),
     )
 
@@ -208,7 +210,8 @@ def _cli_bridge(caller_agent_session_id: str) -> BridgeSessionState:
 
 
 def _app_with(
-    registry: PeerRegistry, manager: BridgeSessionManager,
+    registry: PeerRegistry,
+    manager: BridgeSessionManager,
 ) -> FastAPI:
     app = FastAPI()
     register_routes(
@@ -241,8 +244,7 @@ def test_open_route_parks_key_without_registering() -> None:
         bridge_id = response.json()["bridge_id"]
         bridge = manager.get(bridge_id)
         _check(
-            bridge is not None
-            and bridge.caller_agent_session_id == _LIVE_SESSION_ID,
+            bridge is not None and bridge.caller_agent_session_id == _LIVE_SESSION_ID,
             "open: the opaque session key is parked on the in-memory bridge state",
         )
         _check(
@@ -251,8 +253,7 @@ def test_open_route_parks_key_without_registering() -> None:
         )
     _check(
         _registry_snapshot(registry) == before,
-        "open NEGATIVE CONTROL: registry byte-identical — the caller's own row "
-        "survives (the rejected 'CLI registers' design evicts it here)",
+        "open NEGATIVE CONTROL: registry byte-identical — the caller's own row survives (the rejected 'CLI registers' design evicts it here)",
     )
 
 
@@ -283,9 +284,7 @@ def test_attribution_resolved_from_registry() -> None:
         _cli_bridge(_LIVE_SESSION_ID),
     )
     _check(
-        attribution.agent_id == _LIVE_AGENT_ID
-        and attribution.agent_instance_id == _LIVE_INSTANCE
-        and attribution.session_label == _LIVE_LABEL,
+        attribution.agent_id == _LIVE_AGENT_ID and attribution.agent_instance_id == _LIVE_INSTANCE and attribution.session_label == _LIVE_LABEL,
         "attribution: identity read out of the registered binding, not the request",
     )
     _check(
@@ -344,11 +343,8 @@ def test_attribution_resolved_from_registry_for_watch_registered_caller() -> Non
     )
     attribution = surface._resolve_caller_attribution(_cli_bridge(_WATCH_SESSION_ID))
     _check(
-        attribution.agent_id == _WATCH_AGENT_ID
-        and attribution.agent_instance_id == _WATCH_INSTANCE
-        and attribution.session_label == _WATCH_LABEL,
-        "attribution: a watch-registered caller's identity resolves out of the "
-        "registered binding exactly like an MCP-registered caller's does",
+        attribution.agent_id == _WATCH_AGENT_ID and attribution.agent_instance_id == _WATCH_INSTANCE and attribution.session_label == _WATCH_LABEL,
+        "attribution: a watch-registered caller's identity resolves out of the registered binding exactly like an MCP-registered caller's does",
     )
     _check(
         attribution.role == _WATCH_ROLE,
@@ -361,15 +357,13 @@ def test_attribution_degrades_to_empty() -> None:
     unknown = surface._resolve_caller_attribution(_cli_bridge("ases-never-registered"))
     _check(
         unknown == CallerAttribution(),
-        "attribution: an unresolvable key yields NOTHING — an unverifiable claim "
-        "is never promoted",
+        "attribution: an unresolvable key yields NOTHING — an unverifiable claim is never promoted",
     )
     registered = _cli_bridge(_LIVE_SESSION_ID)
     registered.agent_instance_id = "agi-its-own"
     _check(
         surface._resolve_caller_attribution(registered) == CallerAttribution(),
-        "attribution: a REGISTERED bridge ignores the key — its own identity is "
-        "strictly better evidence",
+        "attribution: a REGISTERED bridge ignores the key — its own identity is strictly better evidence",
     )
 
 
@@ -384,8 +378,7 @@ def test_attribution_survives_registry_fault() -> None:
         attribution = CallerAttribution()
     _check(
         not raised,
-        "attribution: an ambiguous/faulted lookup does NOT raise — this runs "
-        "outside the caller's error envelope on EVERY process_call",
+        "attribution: an ambiguous/faulted lookup does NOT raise — this runs outside the caller's error envelope on EVERY process_call",
     )
     _check(
         attribution == CallerAttribution(),
@@ -405,15 +398,12 @@ def test_trigger_data_keeps_inference_vertex_empty() -> None:
         caller_attribution=surface._resolve_caller_attribution(bridge),
     )
     _check(
-        trigger.get("caller_attribution_instance_id") == _LIVE_INSTANCE
-        and trigger.get("caller_attribution_role") == _LIVE_ROLE,
+        trigger.get("caller_attribution_instance_id") == _LIVE_INSTANCE and trigger.get("caller_attribution_role") == _LIVE_ROLE,
         "trigger_data: attribution stamped under caller_attribution_*",
     )
     _check(
-        trigger.get("inference_vertex_session_id") == ""
-        and trigger.get("inference_vertex_role") == "",
-        "trigger_data: inference_vertex_* stays EMPTY — an attributed CLI call "
-        "can never re-point the flow's inference vertex at the attributed session",
+        trigger.get("inference_vertex_session_id") == "" and trigger.get("inference_vertex_role") == "",
+        "trigger_data: inference_vertex_* stays EMPTY — an attributed CLI call can never re-point the flow's inference vertex at the attributed session",
     )
 
 
@@ -441,8 +431,9 @@ class _LiftProc(ActionProcessor):
 
 def _lift(trigger: dict[str, Any]) -> dict[str, object]:
     state: dict[str, object] = {"session_id": "s", "flow_id": "f"}
-    _LiftProc(trigger)._lift_inference_vertex_identity(  # type: ignore[arg-type]
-        state, _FakeAction("f"),
+    _LiftProc(trigger)._lift_inference_vertex_identity(
+        state,
+        cast("QueuedActionProtocol", _FakeAction("f")),
     )
     return state
 
@@ -457,15 +448,14 @@ def test_lift_carries_attribution_family() -> None:
         },
     )
     _check(
-        state.get("caller_attribution_role") == _LIVE_ROLE
-        and state.get("caller_attribution_instance_id") == _LIVE_INSTANCE
-        and state.get("caller_attribution_agent_id") == _LIVE_AGENT_ID
-        and state.get("caller_attribution_label") == _LIVE_LABEL,
+        state.get("caller_attribution_role") == _LIVE_ROLE and state.get("caller_attribution_instance_id") == _LIVE_INSTANCE and state.get("caller_attribution_agent_id") == _LIVE_AGENT_ID and state.get("caller_attribution_label") == _LIVE_LABEL,
         "lift: all four caller_attribution_* keys reach the handler state",
     )
     _check(
-        _lift({"authenticated_principal": {"client_id": "x"}}) == {
-            "session_id": "s", "flow_id": "f",
+        _lift({"authenticated_principal": {"client_id": "x"}})
+        == {
+            "session_id": "s",
+            "flow_id": "f",
         },
         "lift guard: an unattributed flow adds no keys (degrade-silent preserved)",
     )
@@ -501,16 +491,15 @@ class _NoRoleStateService:
 
 def test_ladder_prefers_attributed_role() -> None:
     sender = _resolve_role_send_sender(
-        dict(_ATTRIBUTED_STATE), _NoRoleStateService(),
+        dict(_ATTRIBUTED_STATE),
+        _NoRoleStateService(),
     )
     _check(
         sender.reply_to_role == _LIVE_ROLE,
-        "ladder: an attributed caller's ROLE becomes the durable reply-to "
-        "(a reply now reaches the sender, not 'system')",
+        "ladder: an attributed caller's ROLE becomes the durable reply-to (a reply now reaches the sender, not 'system')",
     )
     _check(
-        sender.agent_instance_id == _LIVE_INSTANCE
-        and sender.agent_id != "system",
+        sender.agent_instance_id == _LIVE_INSTANCE and sender.agent_id != "system",
         "ladder: sender stamped with the attributed identity, NOT the sentinel",
     )
 
@@ -520,9 +509,7 @@ def test_ladder_attributed_instance_without_role() -> None:
     state["caller_attribution_role"] = ""
     sender = _resolve_role_send_sender(state, _NoRoleStateService())
     _check(
-        sender.agent_id == _LIVE_AGENT_ID
-        and sender.agent_instance_id == _LIVE_INSTANCE
-        and sender.session_label == _LIVE_LABEL,
+        sender.agent_id == _LIVE_AGENT_ID and sender.agent_instance_id == _LIVE_INSTANCE and sender.session_label == _LIVE_LABEL,
         "ladder: a roleless attributed caller is still honestly labelled",
     )
 
@@ -536,8 +523,7 @@ def test_ladder_registered_caller_and_sentinel_unchanged() -> None:
         "ladder: a REGISTERED caller's own identity still outranks attribution",
     )
     _check(
-        _resolve_role_send_sender({}, _NoRoleStateService()).agent_instance_id
-        == "system:scheduler",
+        _resolve_role_send_sender({}, _NoRoleStateService()).agent_instance_id == "system:scheduler",
         "ladder: a genuine scheduler-originated send still stamps the sentinel",
     )
 
@@ -548,16 +534,13 @@ def test_peer_identity_reports_one_shot_attribution() -> None:
     result = plugin.peer_identity({}, {"caller_attribution_instance_id": _LIVE_INSTANCE})
     data = result.get("data")
     _check(
-        isinstance(data, dict)
-        and data.get("caller_identity_available") is True
-        and data.get("registered_bridge") is False
-        and data.get("bridge_identity") == "one_shot_attributed",
+        isinstance(data, dict) and data.get("caller_identity_available") is True and data.get("registered_bridge") is False and data.get("bridge_identity") == "one_shot_attributed",
         "peer_identity: one-shot caller attribution reports its available identity",
     )
 
 
 class _CapturingService:
-    """Captures the PeerSendRequest ``send_peer_message`` hands the service."""
+    """Captures the PeerSendRequest ``peer_send`` hands the service."""
 
     def __init__(self) -> None:
         self.request: Any = None
@@ -576,7 +559,7 @@ class _CapturingService:
 _UNSET = object()
 
 
-def _send_peer_message(
+def _peer_send(
     state: dict[str, Any],
     state_service: object = _UNSET,
     *,
@@ -586,7 +569,7 @@ def _send_peer_message(
     requested_instance_id: str = "agi-recipient",
     requested_session_id: str | None = None,
 ) -> Any:
-    """Drive the REAL ``send_peer_message`` body against a captured service."""
+    """Drive the REAL ``peer_send`` body against a captured service."""
     registry = _registry_with_live_session()
     bridge_manager = BridgeSessionManager(
         session_id_factory=lambda _n: "ags-x",
@@ -598,7 +581,8 @@ def _send_peer_message(
     # the recipient needs a REAL opened bridge (last_seen_at fresh at open),
     # not just a registered binding pointing at an id nothing ever opened.
     recipient_bridge_id = bridge_manager.open(
-        solet_name="test", parent_pid=None,
+        solet_name="test",
+        parent_pid=None,
     ).bridge_id
     registry.register(
         BridgeBinding(
@@ -625,38 +609,34 @@ def _send_peer_message(
     }
     if requested_session_id is not None:
         params["peer_agent_session_id"] = requested_session_id
-    result = plugin.send_peer_message(params, state)
+    result = plugin.peer_send_action(params, state)
     _check(
         result.get("action_status") == "completed",
-        "send_peer_message: the send still succeeds",
+        "peer_send: the send still succeeds",
     )
     return service.request
 
 
-def test_send_peer_message_stamps_attributed_sender() -> None:
-    request = _send_peer_message(dict(_ATTRIBUTED_STATE))
+def test_peer_send_stamps_attributed_sender() -> None:
+    request = _peer_send(dict(_ATTRIBUTED_STATE))
     _check(
         request is not None and request.sender_agent_id == _LIVE_AGENT_ID,
-        "send_peer_message: sender_agent_id is the caller, not 'system' — this "
-        "verb hardcoded the sentinel on EVERY transport, MCP included",
+        "peer_send: sender_agent_id is the caller, not 'system' — this verb hardcoded the sentinel on EVERY transport, MCP included",
     )
     _check(
-        request is not None
-        and request.sender_agent_instance_id == _LIVE_INSTANCE
-        and request.sender_session_label == _LIVE_LABEL,
-        "send_peer_message: instance + label carry the caller's identity",
+        request is not None and request.sender_agent_instance_id == _LIVE_INSTANCE and request.sender_session_label == _LIVE_LABEL,
+        "peer_send: instance + label carry the caller's identity",
     )
     _check(
         request is not None and request.sender_bridge_id == "system:scheduler",
-        "send_peer_message: sender_bridge_id UNCHANGED — peer threads are keyed "
-        "on it, so only the identity triple moves",
+        "peer_send: sender_bridge_id UNCHANGED — peer threads are keyed on it, so only the identity triple moves",
     )
 
 
-def test_send_peer_message_survives_unbound_state_service() -> None:
+def test_peer_send_survives_unbound_state_service() -> None:
     """``_get_state_service()`` can return None — the role rung must not raise.
 
-    ``send_peer_message`` did not consult ``state`` at all before §34.6, so this
+    ``peer_send`` did not consult ``state`` at all before §34.6, so this
     path is new: an attributed caller with a role sends ``None`` into
     ``resolve_role_binding``. The degrade must happen inside ``_sender_from_role``'s
     best-effort guard, not as an exception out of the verb.
@@ -666,33 +646,27 @@ def test_send_peer_message_survives_unbound_state_service() -> None:
     """
     raised = ""
     try:
-        request = _send_peer_message(dict(_ATTRIBUTED_STATE), state_service=None)
+        request = _peer_send(dict(_ATTRIBUTED_STATE), state_service=None)
     except Exception as exc:  # noqa: BLE001 — the point is that it must NOT propagate
         raised = f"{type(exc).__name__}: {exc}"
         request = None
-    _check(not raised, f"send_peer_message: unbound state service does not raise ({raised})")
+    _check(not raised, f"peer_send: unbound state service does not raise ({raised})")
     _check(
-        request is not None
-        and request.sender_agent_instance_id == _LIVE_INSTANCE
-        and request.sender_agent_id == _LIVE_AGENT_ID,
-        "send_peer_message: with no state service the attributed identity still "
-        "stands (the registry already resolved it; only the role re-read fails)",
+        request is not None and request.sender_agent_instance_id == _LIVE_INSTANCE and request.sender_agent_id == _LIVE_AGENT_ID,
+        "peer_send: with no state service the attributed identity still stands (the registry already resolved it; only the role re-read fails)",
     )
 
 
-def test_send_peer_message_sentinel_when_unattributed() -> None:
-    request = _send_peer_message({})
+def test_peer_send_sentinel_when_unattributed() -> None:
+    request = _peer_send({})
     _check(
-        request is not None
-        and request.sender_agent_id == "system"
-        and request.sender_agent_instance_id == "system:scheduler",
-        "send_peer_message: a genuinely scheduler-originated send is still "
-        "honestly the sentinel (no regression)",
+        request is not None and request.sender_agent_id == "system" and request.sender_agent_instance_id == "system:scheduler",
+        "peer_send: a genuinely scheduler-originated send is still honestly the sentinel (no regression)",
     )
 
 
-def test_send_peer_message_reaches_no_claim_watcher_by_stable_session() -> None:
-    request = _send_peer_message(
+def test_peer_send_reaches_no_claim_watcher_by_stable_session() -> None:
+    request = _peer_send(
         dict(_ATTRIBUTED_STATE),
         recipient_instance_id="agi-watch-codex-lane",
         recipient_session_id="ases-codex-lane",
@@ -701,20 +675,18 @@ def test_send_peer_message_reaches_no_claim_watcher_by_stable_session() -> None:
         requested_session_id="ases-codex-lane",
     )
     _check(
-        request is not None
-        and request.peer_agent_instance_id == "agi-watch-codex-lane"
-        and request.peer_agent_session_id == "ases-codex-lane",
-        "send_peer_message: stable-session fallback reaches a no-claim watcher binding",
+        request is not None and request.peer_agent_instance_id == "agi-watch-codex-lane" and request.peer_agent_session_id == "ases-codex-lane",
+        "peer_send: stable-session fallback reaches a no-claim watcher binding",
     )
     metadata = getattr(
-        AgentMessagingPlugin.send_peer_message,
+        AgentMessagingPlugin.peer_send_action,
         "_platform_process_metadata",
         None,
     )
     parameters = getattr(metadata, "parameters", {})
     _check(
         "peer_agent_session_id" in parameters,
-        "send_peer_message: process schema exposes the watcher-safe session fallback",
+        "peer_send: process schema exposes the watcher-safe session fallback",
     )
 
 

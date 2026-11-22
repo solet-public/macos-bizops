@@ -382,7 +382,7 @@ def test_an_auto_withdrawn_cell_is_excluded_by_the_selector_as_not_accepted() ->
     _preload(state, "m-cheap", "medium", runtime=_CODEX, score=45.0, clock=_hours(100))
     _preload(state, "m-dear", "medium", runtime=_CODEX, score=45.0)
     state.update_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_MODEL_CAPABILITY_CELL, "filters": {"model": "m-dear"}}, {"cost_per_task_usd": 2.0})
-    params = {"required_score": 40, "billing_objective": "metered_usd"}
+    params = {"required_score": 40}
     before = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)
     _pass(state, _run(codex=("ok", ["m-dear"])), now=_NOW)  # m-cheap is absent and its clock ran out
     after = verbs.select_dispatch_tier(_typed(state), params, now=_NOW)

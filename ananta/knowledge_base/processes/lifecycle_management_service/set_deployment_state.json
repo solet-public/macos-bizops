@@ -1,0 +1,18 @@
+{
+  "process_key": "service_interface::lifecycle_management_service::set_deployment_state",
+  "display_name": "Set Deployment State",
+  "description": "Withdraw or reinstate one deployment record, for example because it was recorded wrongly. withdrawn True moves the row to 'withdrawn' and withdrawn False moves it back to 'recorded'. The change is a compare-and-set on version: pass the version you last read as expected_version; if the row has moved since, the call is refused with stale_version and writes nothing. A successful change raises the version by one and appends a history event holding the reason and the acting instance, model and effort. Records are never edited or deleted; a wrong fact is withdrawn and the right one recorded again with record_deployment.",
+  "embedding_description": "Withdraw a deployment record that was logged by mistake, or reinstate one withdrawn by mistake. Needs the version you last read; refuses if the record changed since. Keeps a history of every change with its reason.",
+  "result_processor_customizations": {
+    "action_label": "Deployment state set",
+    "result_type": "deployment_record",
+    "result_description": "Deployment row after the change with keys deployment_id, solet_name, release_id, git_sha, deployed_at, trigger, state (recorded|withdrawn) and version (the old version plus one).",
+    "presentation_guidance": "Say which record changed, its new state and new version, and the reason given. A withdrawn row no longer counts as the current deployment.",
+    "output_action_guidance": "Use the returned version as expected_version for any further change. If the withdrawn record was wrong, call record_deployment with the correct facts."
+  },
+  "error_processor_customizations": {
+    "action_context": "Changing the state of one deployment record by compare-and-set on its version in the solet's own database",
+    "error_interpretation": "stale_version: expected_version no longer matches the row, so someone else changed it; nothing was written. unknown_deployment: no record has that deployment_id. state_service_unavailable: the state service is not bound. The code is in data.error_code and prefixes the error text.",
+    "recovery_guidance": "For stale_version, call read_deployments mode get to see the current state and version, decide whether the change is still wanted, and call again with the fresh version. For unknown_deployment, find the id with read_deployments mode history. For state_service_unavailable, wait for the solet to finish starting and retry once."
+  }
+}

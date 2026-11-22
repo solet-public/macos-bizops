@@ -1,0 +1,3 @@
+# Fragment of the gate-smoke register for the model-availability route seam (prb_66bfd36b, unt_806720a5).
+# Hermetic unittest module: fixed host readings and a faked subprocess.run, so no host command runs.
+solet_cli/tests/host_model_availability_route_smoke.py

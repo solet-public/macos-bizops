@@ -27,6 +27,8 @@ from recovery_packets import Recovery
 from recovery_rebuild import rebuild
 from recovery_types import Json, RecoveryError
 
+_REF_REASONS = frozenset({"ignored_in_ref", "unclassified"})
+
 
 def _restore_entry(recovery: Recovery, parts: tuple[str, ...], manifest: Json, folder: Path, entry: Json, empty: bool) -> Json:
     path = entry["path"]
@@ -109,9 +111,28 @@ def write_blobs(recovery: Recovery, git: Git, parts: tuple[str, ...], manifest: 
         raise RecoveryError("restore_blob_identity_mismatch")
 
 
+def _kept_out(manifest: Json, reference: Json) -> list[Json]:
+    """Name the paths the save left out of this reference, with the reason the manifest recorded.
+
+    reference["omitted"] lists every path the visible-path rule kept out of this
+    one reference; manifest["unsaved"] carries the reason (ignored_in_ref or
+    unclassified) but holds at most 200 rows, so a path without a row is still
+    named, with reason "not_recorded", rather than left out of the table.
+    """
+    reasons = {row["path"]: row["reason"] for row in manifest["unsaved"] if row["reason"] in _REF_REASONS}
+    return [{"path": path, "reason": reasons.get(path, "not_recorded")} for path in reference.get("omitted", [])]
+
+
+def _with_kept_out(outcome: Json, kept_out: list[Json]) -> Json:
+    if not kept_out:
+        return outcome
+    names = ", ".join(f"{row['path']} ({row['reason']})" for row in kept_out)
+    return {**outcome, "outcome": f"{outcome['outcome']}; not saved, so absent from it: {names}", "unsaved": kept_out}
+
+
 def _fallback_ref(recovery: Recovery, parts: tuple[str, ...], manifest: Json, reference: Json, entries: list[Json]) -> Json:
     copies = [str(saved_copy(recovery, parts[-1], entry, recovery.payload(parts, manifest, entry), prefix=f"refs/{reference['tip']}/{entry['layer']}")) for entry in entries if entry["sha256"]]
-    return {"path": reference["name"], "outcome": "base commit gone; saved paths copied", "saved_copies": copies}
+    return _with_kept_out({"path": reference["name"], "outcome": "base commit gone; saved paths copied", "saved_copies": copies}, _kept_out(manifest, reference))
 
 
 def _record_ref(git: Git, reference: Json, tip: str, save_id: str) -> str:
@@ -136,7 +157,9 @@ def restore_ref(recovery: Recovery, git: Git, parts: tuple[str, ...], manifest: 
         write_blobs(recovery, git, parts, manifest, entries)
         tip = rebuild(recovery, git, reference, entries)
     name = _record_ref(git, reference, tip, parts[-1])
-    return {"path": name, "outcome": "reference restored exactly" if existing else "reference rebuilt from visible saved paths", "oid": tip}
+    if existing:
+        return {"path": name, "outcome": "reference restored exactly", "oid": tip}
+    return _with_kept_out({"path": name, "outcome": "reference rebuilt from visible saved paths", "oid": tip}, _kept_out(manifest, reference))
 
 
 def _leaf(parent: int, name: str, object_format: str) -> tuple[store.LocalEntry, tuple[int, ...] | None]:

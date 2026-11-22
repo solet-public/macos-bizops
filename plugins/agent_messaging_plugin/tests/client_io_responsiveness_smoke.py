@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import io
@@ -25,7 +24,6 @@ sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 
-from agent_messaging_plugin import seat_idle_watcher as watcher  # noqa: E402
 from agent_messaging_plugin import seat_rotation_helper as rotation  # noqa: E402
 from agent_messaging_plugin.mcp_bridge import __main__ as bridge  # noqa: E402
 from agent_messaging_plugin.mcp_bridge.forwarder import BridgeHTTPError, Forwarder  # noqa: E402
@@ -242,77 +240,6 @@ class ClientResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(Path(target).read_bytes(), b"blob")
             finally:
                 await fw._client.aclose()
-
-    async def test_seat_tick(self) -> None:
-        identity = watcher.SeatIdentity(1, "claude-test", "session-test", "agi-test", "idle", 0, "test")
-        for action in (watcher.ACTION_POKE, watcher.ACTION_ROTATE):
-            for mode in ("fast", "slow", "failure"):
-                calls: list[str] = []
-
-                def record(*_args: object, mode: str = mode, calls: list[str] = calls, **_kwargs: object) -> None:
-                    if mode != "fast":
-                        time.sleep(0.3)
-                    if mode == "failure":
-                        raise OSError("state failed")
-                    calls.append("record")
-
-                async def rotate(*_args: object, calls: list[str] = calls, **_kwargs: object) -> dict[str, str]:
-                    calls.append("rotate")
-                    return {"status": "completed"}
-
-                with (
-                    self.subTest(action=action, mode=mode),
-                    tempfile.TemporaryDirectory() as directory,
-                    patch.object(watcher, "resolve_seat_identity", return_value=identity),
-                    patch.object(watcher, "cross_check_idle", return_value=True),
-                    patch.object(watcher, "resolve_pending_count", return_value=1 if action == watcher.ACTION_POKE else 0),
-                    patch.object(watcher, "_read_last_poke_at", return_value=None),
-                    patch.object(watcher, "_record_poke", record),
-                    patch.object(watcher, "_confirm_pane_ready_for_action", AsyncMock(return_value=(True, "ready"))),
-                    patch.object(rotation, "run_rotation", rotate),
-                ):
-                    prompt = Path(directory) / "prompt"
-                    prompt.write_text("pickup")
-                    original = Path.read_text
-
-                    def read(target: Path, mode: str = mode, original: Callable[..., str] = original, **kwargs: Any) -> str:
-                        if mode != "fast":
-                            time.sleep(0.3)
-                        if mode == "failure":
-                            raise OSError("state failed")
-                        return original(target, **kwargs)
-
-                    with patch.object(Path, "read_text", read):
-
-                        async def tick(prompt: Path = prompt, directory: str = directory) -> dict[str, Any]:
-                            return await watcher.run_tick(role_tag="test", cleared_signature="❯", pickup_prompt_path=prompt, poke_message="poke", marker_dir=Path(directory), project_dir=Path(directory))
-
-                        if mode == "failure":
-                            with self.assertRaisesRegex(OSError, "state failed"):
-                                await self.responsive(tick)
-                        else:
-                            result = await self.responsive(tick)
-                            self.assertEqual(result, {"tick_status": "acted", "action": action, "result": {"status": "completed"}})
-                            self.assertEqual(calls, ["rotate", "record"] if action == watcher.ACTION_POKE else ["rotate"])
-
-    async def test_seat_liveness(self) -> None:
-        for mode in ("fast", "slow", "failure"):
-
-            def write(*_args: object, mode: str = mode, **_kwargs: object) -> None:
-                if mode != "fast":
-                    time.sleep(0.3)
-                if mode == "failure":
-                    raise OSError("liveness failed")
-
-            args = argparse.Namespace(
-                marker_dir="/unused", liveness_path="/unused", role_tag="test", cleared_signature="❯", pickup_prompt_file="/unused", poke_message="poke", project_dir="/unused", idle_poke_threshold_seconds=1, idle_rotate_threshold_seconds=2, poke_cooldown_seconds=1, settle_timeout_seconds=1, once=True
-            )
-            with self.subTest(mode=mode), patch.object(watcher, "run_tick", AsyncMock(return_value={"tick_status": "no_action"})), patch.object(watcher, "write_liveness", write):
-                if mode == "failure":
-                    with self.assertRaisesRegex(OSError, "liveness failed"):
-                        await self.responsive(lambda args=args: watcher.poll_forever(args))
-                else:
-                    await self.responsive(lambda args=args: watcher.poll_forever(args))
 
 
 if __name__ == "__main__":

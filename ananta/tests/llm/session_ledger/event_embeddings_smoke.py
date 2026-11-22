@@ -701,7 +701,7 @@ def test_drain_halts_without_advancing_past_a_failed_page() -> None:
 
 
 def _set_drain_counter(state: StubStateService, value: int) -> None:
-    state.key_values[("session_ledger", "event_embed_drain_fires", "GLOBAL")] = str(value)
+    state.set_key_value("session_ledger", "event_embed_drain_fires", str(value))
 
 
 def test_drain_periodic_reconcile_catches_below_cursor_straggler() -> None:

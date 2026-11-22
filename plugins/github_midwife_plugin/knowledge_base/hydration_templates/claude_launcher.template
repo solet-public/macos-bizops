@@ -4,13 +4,24 @@
 #
 # Usage: claude-{{SOLET_NAME}} [label] [model] [effort]
 #   label   session name shown in Claude Code and in {{SOLET_NAME}}'s
-#           peer registry (default: Operator)
+#           peer registry (default: the launch folder's name; no role is
+#           claimed)
 #   model   optional Claude model alias; empty = your settings default
 #   effort  optional effort level; empty = your settings default
 #
 # Works standalone by absolute path — no shell integration required.
 
-label="${1:-Operator}"
+# An unnamed launch is named for the folder it was started from (characters
+# outside A-Za-z0-9._- become "-", "session" at the filesystem root) and
+# claims no role; a name the person gives is also their own role claim.
+label="$1"
+label_defaulted=0
+if [[ -z "$label" ]]; then
+  label="${PWD:t}"
+  label="${label//[^A-Za-z0-9._-]/-}"
+  [[ -z "$label" ]] && label="session"
+  label_defaulted=1
+fi
 model="$2"
 effort="$3"
 
@@ -86,6 +97,13 @@ esac
 # exports it for the claude process. An existing clone receives this line only
 # after hydration Step 2 is re-run.
 unset GIT_CONTROLLER_NAME
+# A defaulted label stays display metadata: the bridge treats a label alone as
+# a role claim unless AGENT_ROLE_AUTOBIND=0, and refuses that setting beside an
+# inherited AGENT_ROLE, so the unnamed launch drops it.
+if (( label_defaulted )); then
+  unset AGENT_ROLE
+  export AGENT_ROLE_AUTOBIND=0
+fi
 SOLET_NAME="{{SOLET_NAME}}" \
 AGENT_SESSION_LABEL="$label" \
 AGENT_SESSION_ID="ases-$(date +%s)-$$-${RANDOM}" \

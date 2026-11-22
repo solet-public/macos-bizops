@@ -7,8 +7,8 @@ and callable through the channel as ``service_interface::plugin_schema_service::
 The verbs reconcile a plugin's declared persistent shape (a ``SchemaDefinition``,
 serialized via ``ananta.services.plugin_schema_service.serialization.to_json``)
 against the live PostgreSQL state. Install / update are additive at the table
-level; only ``uninstall`` (logical, data-preserving) and ``purge`` (destructive)
-ever remove tables.
+level, except that a declaration's ``retired_tables`` names tables to drop;
+``uninstall`` (logical, data-preserving) and ``purge`` (destructive) also remove tables.
 """
 
 from __future__ import annotations
@@ -88,8 +88,9 @@ class PluginSchemaServicePublicAPI(ABC):
         → adopt (legacy-type normalization + index reconciliation). Identical
         re-install → no-op. Previously-uninstalled namespace → reactivate. Tables
         in the declaration that already exist with a different shape → diff-and-update
-        (additive: add columns, swap indexes; never drops tables — for that, use
-        ``uninstall`` (logical) or ``purge`` (destructive)).
+        (additive: add columns, swap indexes). The only tables it drops are those
+        the declaration lists in ``retired_tables`` (see ``update_plugin_schema``);
+        otherwise use ``uninstall`` (logical) or ``purge`` (destructive).
         """
         pass
 
@@ -108,9 +109,13 @@ class PluginSchemaServicePublicAPI(ABC):
     def update_plugin_schema(self, plugin_namespace: str, declared_schema_json: dict[str, Any]) -> dict[str, Any]:
         """Diff declared shape against ownership snapshot and apply DDL in one transaction.
 
-        Refuses table removal — operator must ``uninstall_plugin_schema`` (logical,
-        preserves data) or ``purge_plugin_schema`` (destructive). Refuses column
-        type changes, ``with_history`` toggles, ``id_prefix`` changes (out of v1 scope).
+        Drops each table listed in the declaration's ``retired_tables`` that ownership
+        records as active, deleting its ownership row in the same transaction; a name
+        with no ownership row is a no-op and a name also declared in ``tables`` is
+        refused. A table the declaration merely omits is left alone. Other table
+        removal is ``uninstall_plugin_schema`` (logical, preserves data) or
+        ``purge_plugin_schema`` (destructive). Refuses column type changes,
+        ``with_history`` toggles, ``id_prefix`` changes (out of v1 scope).
         """
         pass
 
@@ -175,20 +180,23 @@ class PluginSchemaServicePublicAPI(ABC):
         pass
 
     @service_interface_process(
+        is_async=True,
         name="get_installed_schema",
         provider=PROVIDER,
         is_discoverable=True,
         parameters={"plugin_namespace": _NAMESPACE_PARAM},
-        return_value_schema=ReturnValueSchema(
-            type=ParameterType.OBJECT,
-            description="Per-table snapshot + status for the namespace.",
-            properties={
-                "namespace": ParameterMetadata(type=ParameterType.STRING, description="Plugin namespace queried."),
-                "tables": ParameterMetadata(
-                    type=ParameterType.OBJECT,
-                    description="Map of table_name → {status, schema_snapshot, installed_at, updated_at, uninstalled_at}.",
-                ),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                type=ParameterType.OBJECT,
+                description="Per-table snapshot + status for the namespace.",
+                properties={
+                    "namespace": ParameterMetadata(type=ParameterType.STRING, description="Plugin namespace queried."),
+                    "tables": ParameterMetadata(
+                        type=ParameterType.OBJECT,
+                        description="Map of table_name → {status, schema_snapshot, installed_at, updated_at, uninstalled_at}.",
+                    ),
+                },
+            )
         ),
     )
     @abstractmethod

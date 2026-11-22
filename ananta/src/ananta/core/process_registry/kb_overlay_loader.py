@@ -42,13 +42,22 @@ logger = logging.getLogger(__name__)
 # These override the decorator-defined values when the JSON supplies them.
 # Any customization field NOT in these sets is merged additively
 # (decorator wins if set; JSON fills missing).
-_RESULT_CUSTOMIZATION_TEXT_FIELDS = frozenset({
-    "action_label", "result_type", "result_description",
-    "presentation_guidance", "output_action_guidance",
-})
-_ERROR_CUSTOMIZATION_TEXT_FIELDS = frozenset({
-    "action_context", "error_interpretation", "recovery_guidance",
-})
+_RESULT_CUSTOMIZATION_TEXT_FIELDS = frozenset(
+    {
+        "action_label",
+        "result_type",
+        "result_description",
+        "presentation_guidance",
+        "output_action_guidance",
+    }
+)
+_ERROR_CUSTOMIZATION_TEXT_FIELDS = frozenset(
+    {
+        "action_context",
+        "error_interpretation",
+        "recovery_guidance",
+    }
+)
 
 
 def apply_deprecation(entry: dict[str, object], json_data: dict[str, object]) -> None:
@@ -84,10 +93,7 @@ def apply_deprecation(entry: dict[str, object], json_data: dict[str, object]) ->
     deprecation = json_data["deprecation"]
     if not isinstance(deprecation, dict):
         raise FrameworkError(
-            message=(
-                "'deprecation' must be an object with keys replacement_key / "
-                "superseded_date / migration_note / active_retrieval"
-            ),
+            message=("'deprecation' must be an object with keys replacement_key / superseded_date / migration_note / active_retrieval"),
             error_code="process_registry.malformed_deprecation",
             severity=ErrorSeverity.CRITICAL,
         )
@@ -138,9 +144,7 @@ class KnowledgeBaseOverlayLoader:
         if not isinstance(processes, dict):
             return
 
-        ananta_kb_processes_dir = (
-            Path(__file__).parent.parent.parent.parent.parent / "knowledge_base" / "processes"
-        )
+        ananta_kb_processes_dir = Path(__file__).parent.parent.parent.parent.parent / "knowledge_base" / "processes"
 
         errors: list[str] = []
         merged_count = 0
@@ -150,7 +154,9 @@ class KnowledgeBaseOverlayLoader:
                 continue
 
             json_path = self._resolve_process_json_path(
-                process_key, entry, ananta_kb_processes_dir,
+                process_key,
+                entry,
+                ananta_kb_processes_dir,
             )
 
             if json_path is None:
@@ -169,10 +175,7 @@ class KnowledgeBaseOverlayLoader:
 
             file_pk = json_data.get("process_key", "")
             if file_pk != process_key:
-                errors.append(
-                    f"{process_key}: process_key mismatch in {json_path.name} "
-                    f"(got '{file_pk}')"
-                )
+                errors.append(f"{process_key}: process_key mismatch in {json_path.name} (got '{file_pk}')")
                 continue
 
             self._merge_process_json(entry, json_data)
@@ -189,9 +192,7 @@ class KnowledgeBaseOverlayLoader:
                 severity=ErrorSeverity.CRITICAL,
             )
 
-        logger.info(
-            f"Loaded knowledge base definitions for {merged_count} processes"
-        )
+        logger.info(f"Loaded knowledge base definitions for {merged_count} processes")
 
     def _resolve_process_json_path(
         self,
@@ -214,9 +215,7 @@ class KnowledgeBaseOverlayLoader:
         if provider_type == "plugin":
             plugin_instance = self._plugin_manager.plugins.get(provider)
             if plugin_instance is None:
-                logger.warning(
-                    f"Plugin '{provider}' not found for process '{process_key}'"
-                )
+                logger.warning(f"Plugin '{provider}' not found for process '{process_key}'")
                 return None
             plugin_source = Path(inspect.getfile(type(plugin_instance)))
             # plugin_source: plugins/<name>/src/<name>/plugin.py
@@ -224,13 +223,13 @@ class KnowledgeBaseOverlayLoader:
             plugin_root = plugin_source.parent.parent.parent
             return plugin_root / "knowledge_base" / "processes" / f"{function_name}.json"
 
-        logger.warning(
-            f"Unknown provider_type '{provider_type}' for process '{process_key}'"
-        )
+        logger.warning(f"Unknown provider_type '{provider_type}' for process '{process_key}'")
         return None
 
     def _merge_process_json(
-        self, entry: dict[str, object], json_data: dict[str, object],
+        self,
+        entry: dict[str, object],
+        json_data: dict[str, object],
     ) -> None:
         """Merge knowledge base JSON fields into a registry entry.
 
@@ -249,17 +248,23 @@ class KnowledgeBaseOverlayLoader:
         self._merge_top_level_fields(entry, json_data)
         self._merge_action_definition_template(entry, json_data)
         self._merge_customization_fields(
-            entry, json_data,
-            "result_processor_customizations", _RESULT_CUSTOMIZATION_TEXT_FIELDS,
+            entry,
+            json_data,
+            "result_processor_customizations",
+            _RESULT_CUSTOMIZATION_TEXT_FIELDS,
         )
         self._merge_customization_fields(
-            entry, json_data,
-            "error_processor_customizations", _ERROR_CUSTOMIZATION_TEXT_FIELDS,
+            entry,
+            json_data,
+            "error_processor_customizations",
+            _ERROR_CUSTOMIZATION_TEXT_FIELDS,
         )
         apply_deprecation(entry, json_data)
 
     def _merge_top_level_fields(
-        self, entry: dict[str, object], json_data: dict[str, object],
+        self,
+        entry: dict[str, object],
+        json_data: dict[str, object],
     ) -> None:
         """Merge all top-level JSON keys that override decorator values.
 
@@ -291,7 +296,9 @@ class KnowledgeBaseOverlayLoader:
             entry["parameter_schema"] = json_data["parameters"]
 
     def _merge_action_definition_template(
-        self, entry: dict[str, object], json_data: dict[str, object],
+        self,
+        entry: dict[str, object],
+        json_data: dict[str, object],
     ) -> None:
         """Apply the action_definition_template_arguments JSON override.
 
@@ -330,7 +337,9 @@ class KnowledgeBaseOverlayLoader:
                 entry[entry_key] = json_custs
 
     def _regenerate_derived_docs(
-        self, process_key: str, entry: dict[str, object],
+        self,
+        process_key: str,
+        entry: dict[str, object],
     ) -> None:
         """Regenerate derived documentation fields after knowledge base merge.
 

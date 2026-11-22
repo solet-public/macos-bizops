@@ -109,15 +109,15 @@ class CatalogPolicySmoke(unittest.TestCase):
         }
         self.assertEqual(set(independent[0].tables), expected)
         original = get_session_lifecycle_schema_definition()
-        self.assertEqual(original.version, "1.16.0", "LIFECYCLE_VERSION_BUMPED_FOR_NULLABLE_WINDOW")
+        self.assertEqual(original.version, "1.20.0", "LIFECYCLE_VERSION_BUMPED_FOR_NULLABLE_WINDOW")
         self.assertTrue({TABLE_MODEL_CAPABILITY_CELL, TABLE_MODEL_CELL_POLICY} <= original.tables.keys())
         cell_schema = get_model_capability_cell_schema()
         window = cell_schema.columns["staleness_window_hours"]
         self.assertFalse(window.not_null, "UNKNOWN_WINDOW_IS_REPRESENTABLE_AS_NULL")
         self.assertEqual(window.type.name, "INTEGER", "WINDOW_RETAINS_INTEGER_TYPE")
         self.assertIsNone(window.default, "UNKNOWN_WINDOW_HAS_NO_NUMERIC_DEFAULT")
-        self.assertIn("unknown", window.description.lower(), "UNKNOWN_WINDOW_DESCRIPTION")
-        self.assertIn("measured", window.description.lower(), "MEASURED_WINDOW_DESCRIPTION")
+        self.assertIn("unknown", (window.description or "").lower(), "UNKNOWN_WINDOW_DESCRIPTION")
+        self.assertIn("measured", (window.description or "").lower(), "MEASURED_WINDOW_DESCRIPTION")
         self.assertTrue(all(not expected.intersection(schema.tables) for schema in schemas if schema is not independent[0]))
         manager = SchemaManager(cast(Any, object()), lifecycle)
         manager.initialize_schemas(schemas)

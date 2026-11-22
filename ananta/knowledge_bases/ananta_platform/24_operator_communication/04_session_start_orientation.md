@@ -34,12 +34,12 @@ There is always more than one knowledge base available to a session, and they ar
 
 A fresh session anchors on four standing documents, and each settles a different class of question:
 
-- **The charter** settles what this solet is, its mission and cost boundary, its design values, and how decisions get made. Search the knowledge base for "charter" scoped to this solet, or for the template at `ananta/knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` if none exists yet.
+- **The governance statement** settles what this solet is, its mission and cost boundary, its design values, and how decisions get made. Search the knowledge base for "governance statement" scoped to this solet, or for the template at `ananta/knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` if none exists yet.
 - **The standing-positions document** holds the agents' argued, dated, revisable positions on the big picture, so a fresh session inherits a point of view instead of starting blank. Positions are advocacy; operator rulings close arguments and are recorded inline.
 - **The decision-brief convention** at `ananta/knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` governs every request for an operator ruling. Its third rule matters at session start: settled questions do not get re-asked.
 - **The collaboration craft conventions** at `ananta/knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` govern day-to-day working style with the operator: reporting, autonomy, credential flows, and close-out hygiene.
 
-Before substantive work, a session confirms it is not about to relitigate something these documents already settle. Direction questions go to the charter and standing positions; process questions about operator communication go to the two conventions. If a genuine gap exists, the work proceeds and the gap is recorded where it belongs: a new argued position in the standing-positions document, or a decision brief if only the operator can close it.
+Before substantive work, a session confirms it is not about to relitigate something these documents already settle. Direction questions go to the governance statement and standing positions; process questions about operator communication go to the two conventions. If a genuine gap exists, the work proceeds and the gap is recorded where it belongs: a new argued position in the standing-positions document, or a decision brief if only the operator can close it.
 
 ## Messaging, role binding, and reattaching after a restart or /clear
 
@@ -73,7 +73,7 @@ For a session that has claimed a durable role, the read-only ownership check, on
 - `plugin::agent_messaging_plugin::peer_inbox` — the catch-up read for direct and role-addressed messages, in launcher-run fleet sessions.
 - `plugin::agent_messaging_plugin::peer_holds_role` — the read-only role-ownership check.
 - `ananta/knowledge_bases/ananta_platform/24_operator_communication/01_operator_decision_briefs.md` — the decision-request convention.
-- `ananta/knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` — the charter template with its platform-constant sections.
+- `ananta/knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md` — the governance statement template with its platform-constant sections.
 - `ananta/knowledge_bases/ananta_platform/24_operator_communication/03_collaboration_craft.md` — the distilled working conventions.
-- `plugins/github_midwife_plugin/knowledge_base/04_first_days_runbook.md` — how the charter and standing positions come to exist for a new solet.
+- `plugins/github_midwife_plugin/knowledge_base/04_first_days_runbook.md` — how the governance statement and standing positions come to exist for a new solet.
 - `plugins/github_midwife_plugin/knowledge_base/08_deployment_report_card.md` — its compact session-start readiness table, an optional opening ritual that checks runtime, knowledge, and the role claim above in one pass before work begins. The same article's full report card is the close-out artifact, not a session-start step.

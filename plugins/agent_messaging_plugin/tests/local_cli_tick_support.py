@@ -37,11 +37,11 @@ def _working_watch_run(
     screens: list[str],
     *,
     report: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    panes: str = "%1 4321\n",
     captured_pid: str = "4321",
     agent_id: str = "codex",
     parent: int | None = 4321,
     instance_env: str = "agi-working-watch",
+    pane_env: str | None = "%1",
     capture_error: bool = False,
 ) -> tuple[list[dict[str, Any]], list[float], list[str]]:
     """Run the real stream, BridgeClient and parser with controlled host I/O.
@@ -79,25 +79,31 @@ def _working_watch_run(
 
     def tmux(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         assert args[0] == "tmux", args
-        if args[1] == "list-panes":
-            stdout = panes
-        elif args[1] == "capture-pane":
+        if args[1] == "capture-pane":
             assert args[-1] == "%1", args
             if capture_error:
                 raise subprocess.TimeoutExpired(args, 2)
             stdout = screens[min((polls[0] - 1) // 3, len(screens) - 1)]
         else:
             assert args[1] == "display-message", args
+            assert args[-2] == "%1", args
+            # A named target would use the exact =NAME: form, never a prefix.
             stdout = captured_pid
         return subprocess.CompletedProcess(args, 0, stdout, "")
 
     identity = cli_mod.WatchIdentity("test-watch", agent_id, "ases-working", "agi-working-watch")
+    environment = dict(os.environ)
+    environment["AGENT_INSTANCE_ID"] = instance_env
+    if pane_env is None:
+        environment.pop("TMUX_PANE", None)
+    else:
+        environment["TMUX_PANE"] = pane_env
     with client_mod.BridgeClient("http://test", transport=httpx.MockTransport(handler)) as client:
         with (
             patch.object(cli_mod.time, "monotonic", lambda: clock[0]),
             patch.object(cli_mod, "_parent_is_gone", lambda _pid: polls[0] >= 3 * len(screens)),
             patch.object(cli_mod.subprocess, "run", tmux),
-            patch.dict(os.environ, {"AGENT_INSTANCE_ID": instance_env}),
+            patch.dict(os.environ, environment, clear=True),
             patch.object(cli_mod.click, "echo", lambda value, **_kw: output.append(str(value))),
         ):
             cli_mod._stream_events(client, identity, None, Path(tempfile.mkdtemp()) / "session.marks", parent)
@@ -114,6 +120,8 @@ def _working_lifecycle_case() -> Generator[_WorkingLifecycleCase]:
     HTTP calls from the stream reach that handler through the transport double.
     Captured outcomes and deadlines retain each call for current-state checks;
     the state fake also retains the append-only lifecycle transition records.
+    The registered row declares its own report window, because a registered row
+    re-arms only from a window it declares.
     """
     from ananta.core.services.call_context import CallContext
 
@@ -131,11 +139,11 @@ def _working_lifecycle_case() -> Generator[_WorkingLifecycleCase]:
         state,
         ManagedSessionSpec(
             agent_instance_id="agi-working-watch",
-            lane_id="working-watch",
-            assignment=importlib.import_module("_register_unit_double").fixture_assignment(),
-            work_class="read_only",
-            budget_line="test",
+            label="working-watch",
+            session_origin="registered",
             host="operator",
+            # A registered row re-arms only from a window it declares, so the fixture states one.
+            report_by_seconds=300,
         ),
     )
     plugin = object.__new__(AgentMessagingPlugin)
@@ -232,16 +240,17 @@ def check_working_watch_ticks_independently_and_recaptures() -> None:
 def check_working_watch_requires_positive_parent_and_turn_evidence() -> None:
     """Only the authenticated watch identity and its exact active pane may tick.
 
-    Missing, ambiguous and replaced panes are distinct from an idle screen:
+    Missing and replaced panes are distinct from an idle screen:
     host failures emit advisories while ordinary inactivity remains quiet.
     """
     for screen in ("› Ask Codex to do anything", "• Starting MCP servers (1/2)", "unknown TUI", "Working in transcript"):
         calls, _, _ = _working_watch_run([screen])
         assert not calls, (screen, calls)
+    calls, _, output = _working_watch_run([_WORKING_SCREEN], pane_env=None)
+    assert not calls and len(output) == 1 and "TMUX_PANE is not set" in output[0], (calls, output)
+    calls, _, output = _working_watch_run([_WORKING_SCREEN], captured_pid="9999")
+    assert not calls and len(output) == 1 and "is not the process of tmux pane" in output[0], (calls, output)
     evidence_cases: tuple[dict[str, Any], ...] = (
-        {"panes": "%2 9999\n"},
-        {"panes": "%1 4321\n%2 4321\n"},
-        {"captured_pid": "9999"},
         {"instance_env": "agi-other"},
         {"capture_error": True},
     )
@@ -283,17 +292,46 @@ def check_working_watch_real_disposable_tmux_parent_mapping() -> None:
     """
     # A disposable non-agent pane exits itself; no live worker is driven/killed.
     code = "import time; print('• Working (12s · esc to interrupt)', flush=True); time.sleep(2); print('\\033[2J\\033[H› Ask Codex to do anything', flush=True); time.sleep(2)"
-    created = subprocess.run(
-        ["tmux", "new-session", "-d", "-P", "-F", "#{pane_id} #{pane_pid}", "-s", f"watch-proof-{os.getpid()}-{time.time_ns()}", sys.executable, "-c", code],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    _pane, pid = created.stdout.strip().split()
-    deadline = time.monotonic() + 1.5
-    while cli_mod._codex_parent_busy_reason(int(pid)) is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert cli_mod._codex_parent_busy_reason(int(pid)) is not None
-    time.sleep(2.1)
-    assert cli_mod._codex_parent_busy_reason(int(pid)) is None
+    server_name = f"w-{os.getpid()}-{time.time_ns()}"
+    session_name = f"watch-proof-{os.getpid()}-{time.time_ns()}"
+    try:
+        created = subprocess.run(
+            [
+                "tmux",
+                "-L",
+                server_name,
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_id} #{pane_pid} #{socket_path} #{pid}",
+                "-s",
+                session_name,
+                sys.executable,
+                "-c",
+                code,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        pane, pid, socket_path, server_pid = created.stdout.strip().split()
+        exact_named_target = f"={session_name}:"
+        named_pid = subprocess.run(
+            ["tmux", "-L", server_name, "display-message", "-p", "-t", exact_named_target, "#{pane_pid}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        assert named_pid == pid, (exact_named_target, named_pid, pid)
+        with patch.dict(os.environ, {"TMUX": f"{socket_path},{server_pid},0", "TMUX_PANE": pane}):
+            deadline = time.monotonic() + 1.5
+            while cli_mod._codex_parent_busy_reason(int(pid)) is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert cli_mod._codex_parent_busy_reason(int(pid)) is not None
+            time.sleep(2.1)
+            assert cli_mod._codex_parent_busy_reason(int(pid)) is None
+    finally:
+        subprocess.run(["tmux", "-L", server_name, "kill-server"], check=False, capture_output=True, text=True, timeout=5)

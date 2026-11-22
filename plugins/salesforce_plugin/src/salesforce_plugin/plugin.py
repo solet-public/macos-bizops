@@ -1,12 +1,16 @@
-"""Salesforce plugin entry point — SOQL, record CRUD, describe, Bulk v2 and typed API families.
+"""Salesforce plugin entry point — many bound orgs, SOQL, record CRUD, Bulk v2, typed API families and org lifecycle.
 
 Auth (operator-ratified 2026-07-14, full CLI delegation): every verb shells
-out to the operator's `sf` CLI — the ``salesforce_org`` address-book entry
-names the CLI alias (``target_org``) and the pinned ``instance_host``; the
-CLI's keychain-backed refresh token is the durable credential and the
-platform stores no Salesforce secret of its own, nor does any access token
-ever enter this process. Full read/write including delete_record (record
-deletion is an acceptable-loss class, RATIFY-2).
+out to the operator's `sf` CLI, and the CLI keeps each org's session. Build 6
+binds many orgs at once (``orgs.py``, the Google multi-account pattern): a
+vault index holds one binding per org (org id, alias, the CLI target and the
+pinned ``instance_host``) and the default; every verb that reaches an org
+takes an optional ``org`` and every result names the org it ran against. The
+single ``salesforce_org`` address-book entry of earlier builds becomes the
+first binding on first use. Login secrets the operator stores in the vault
+(a JWT key, an SFDX auth URL, an access token) are read only inside the call
+that hands them to the CLI (``org_secrets.py``). Full read/write including
+delete_record (record deletion is an acceptable-loss class, RATIFY-2).
 
 Verbs (all EDGE; the data/org verbs use the D0.3 deferred-completion shape —
 workbench/2026-08-09_sync_verb_d03_deferred_completion_doctrine_syncverb-doctrine.md):
@@ -29,18 +33,25 @@ concurrency of one.
                                                       local files (transfers.py)
   - authenticated_request                           — any other endpoint
   - test_connection                                 — diagnostic
-  - probe_cli                                       — offline local CLI diagnostic
+  - list_orgs / bind_org / login / logout /         — the bound orgs (org_service.py)
+    set_default_org / disconnect_org
+  - org_lifecycle                                   — scratch orgs from a Dev Hub, sandboxes
+                                                      from a production org (org_lifecycle.py)
+  - probe_cli / provision_cli                       — local CLI diagnostic and install; no org
 
 Security posture (umbrella design §2; process_export deny retired by operator
 ruling 2026-07-15 — see
 workbench/2026-07-15_result_error_processing_architecture_deep_dive.md): every
 verb is directly process_call-able like any other process; auth/session/
 permission error messages are GENERIC fixed strings — never the driver
-exception, which could leak the org host (§1.6);
-the plugin reaches ONLY the address-book-resolved org (no org/domain param on
-any verb). There is no retry-on-expiry mechanism — the CLI refreshes its own
-credential transparently inside every invocation, so there is no mid-flight
-session for this process to detect and re-mint.
+exception, which could leak the org host (§1.6); a login that carried a vault
+secret reports only the CLI's error name. The plugin reaches only bound orgs:
+an ``org`` that names no binding is refused, and each binding's executor
+verifies once that its CLI target resolves to the binding's pinned host. The
+org is resolved on the job worker, never on the dispatch path. There is no
+retry-on-expiry mechanism — the CLI refreshes its own credential
+transparently inside every invocation, so there is no mid-flight session for
+this process to detect and re-mint.
 """
 
 from __future__ import annotations
@@ -76,8 +87,9 @@ from ananta.interfaces.edge_process_provider import (
     EdgeProcessProvider,
 )
 
-from . import async_jobs, transfers, typed_families
-from .app_config import AppConfigError, AppConfigLoader
+from . import async_jobs, org_lifecycle, org_service, transfers, typed_families
+from .app_config import AppConfigError, AppConfigLoader, SalesforceOrgConfig
+from .cli_commands import check_flags
 from .client import SalesforceCliExecutor
 from .constants import (
     BULK_INGEST_OPERATIONS,
@@ -93,12 +105,14 @@ from .constants import (
     ERROR_INVALID_PARAMS,
     ERROR_NOT_CONFIGURED,
     ERROR_PROVISION_CONSENT_REQUIRED,
+    JWT_KEY_DIRECTORY_PARTS,
     PARAM_ACKNOWLEDGE_OVERRIDE,
     PARAM_INCLUDE_DELETED,
     PARAM_ROW_LIMIT,
     PLUGIN_NAME,
     RESULT_TYPE_ACTIONS,
     RESULT_TYPE_AUTHENTICATED_REQUEST,
+    RESULT_TYPE_BIND_ORG,
     RESULT_TYPE_BULK_INGEST_SUBMIT,
     RESULT_TYPE_BULK_JOB_ABORT,
     RESULT_TYPE_BULK_JOB_RESULTS,
@@ -110,22 +124,32 @@ from .constants import (
     RESULT_TYPE_DASHBOARDS,
     RESULT_TYPE_DELETE_RECORD,
     RESULT_TYPE_DESCRIBE_SOBJECT,
+    RESULT_TYPE_DISCONNECT_ORG,
     RESULT_TYPE_EXPORT_SOQL,
     RESULT_TYPE_GET_RECORD,
+    RESULT_TYPE_LIST_ORGS,
     RESULT_TYPE_LIST_SOBJECTS,
+    RESULT_TYPE_LOGIN,
+    RESULT_TYPE_LOGOUT,
     RESULT_TYPE_METADATA,
+    RESULT_TYPE_ORG_LIFECYCLE,
     RESULT_TYPE_PROBE_CLI,
     RESULT_TYPE_PROVISION_CLI,
     RESULT_TYPE_REPORTS,
     RESULT_TYPE_REST_RESOURCES,
+    RESULT_TYPE_SET_DEFAULT_ORG,
     RESULT_TYPE_SOQL_QUERY,
     RESULT_TYPE_TEST_CONNECTION,
     RESULT_TYPE_TOOLING,
     RESULT_TYPE_UPDATE_RECORD,
     SOQL_EXPORT_ROW_CAP,
     SOQL_MAX_RECORDS_CAP,
+    VAULT_KEY_ORG_SECRET_PREFIX,
+    VAULT_KEY_ORGS_INDEX,
 )
-from .errors import SalesforceServiceError, classify_salesforce_error
+from .errors import SalesforceServiceError, TypedFamilyError, classify_salesforce_error
+from .org_secrets import OrgSecrets
+from .orgs import OrgBinding, OrgIndex, org_selector
 
 _PATH_PARAMETER_TEXT: dict[str, str] = {
     "sobject": "sObject API name in the path, e.g. Account, Invoice__c, Order_Event__e, or a Tooling type such as ApexClass.",
@@ -167,6 +191,21 @@ _INCLUDE_DELETED = ParameterMetadata(
     description="true queries through the vendor queryAll resource, which also returns deleted (recycle bin) and archived records. Default false.",
 )
 
+# Build 6: every verb that reaches an org takes it (orgs.py).
+ORG_PARAM = ParameterMetadata(
+    type=ParameterType.STRING,
+    required=False,
+    description="Which bound org to use: its alias, username or org id. Optional with one bound org; with several, the default org is used. The result names the org (org, org_id). See list_orgs.",
+)
+_REQUIRED_ORG = ParameterMetadata(type=ParameterType.STRING, required=True, description="The bound org: its alias, username or org id (see list_orgs).")
+_MAKE_DEFAULT = ParameterMetadata(type=ParameterType.BOOLEAN, required=False, description="true makes this org the default that verbs use when no org is named. The first bound org is always the default.")
+_ALIAS = ParameterMetadata(type=ParameterType.STRING, required=False, description="The binding's alias, unique among bound orgs (letters, digits, '_', '.', '@', '+', '-'). Defaults to the CLI alias, else the username.")
+_CLI_FLAGS = ParameterMetadata(type=ParameterType.OBJECT, required=False, description="sf CLI flags by their documented names without the leading -- (e.g. instance-url, alias, set-default), with the CLI's own value types. Flags the plugin sets itself are refused with the reason.")
+
+
+def _with_org(parameters: dict[str, ParameterMetadata]) -> dict[str, ParameterMetadata]:
+    return {**parameters, "org": ORG_PARAM}
+
 
 def _family_parameters(family: str) -> dict[str, ParameterMetadata]:
     """Typed family inputs; typed_families validates them against the vendor shape."""
@@ -182,7 +221,7 @@ def _family_parameters(family: str) -> dict[str, ParameterMetadata]:
         parameters["output_csv_path"] = ParameterMetadata(type=ParameterType.STRING, required=False, description="ABSOLUTE .csv destination for query_results, contained under a registered path address.")
     for key in typed_families.local_paths(family):
         parameters[key] = ParameterMetadata(type=ParameterType.STRING, required=False, description=_LOCAL_PATH_TEXT[key])
-    return parameters
+    return _with_org(parameters)
 
 
 def _launch_directory(orchestrator: OrchestratorProtocol) -> Located[str | None]:
@@ -234,7 +273,14 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         self.logger: logging.Logger | None = None
         self._address_book_service: Any | None = None
         self._app_config_loader: AppConfigLoader | None = None
+        # The root executor: local CLI concerns (probe, provision) and the
+        # settings every per-org executor copies (sf_cli_path, api_version).
         self._cli_executor: SalesforceCliExecutor | None = None
+        # Build 6: the vault proxy, one executor per bound org (each verifies
+        # its own pin once), and the org service built on first use.
+        self._vault_service: Any | None = None
+        self._org_executors: dict[tuple[str, str, str, str], SalesforceCliExecutor] = {}
+        self._orgs: org_service.OrgService | None = None
         # D0.3 deferred-completion machinery (async_jobs.py) — lazily acquired /
         # started on first async-shaped dispatch, mirroring
         # comfyui_image_generation_plugin's _try_acquire_job_manager (boot order
@@ -246,22 +292,25 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         self._pending_provision_ids: deque[str] = deque()
 
     # ------------------------------------------------------------------
-    # VaultKeysProvider — no plugin-owned vault keys
+    # VaultKeysProvider — the bound-org index and operator-stored org secrets
     # ------------------------------------------------------------------
+
+    def set_vault_service(self, vault_service: object) -> None:
+        """The platform injects this plugin's caller-bound vault proxy."""
+        self._vault_service = vault_service
 
     def get_required_vault_keys(self) -> list[str]:
         """No vault keys are required at readiness.
 
-        The platform stores NO Salesforce secret at all: the durable
-        credential is the sf CLI's own keychain-backed refresh token, and no
-        access token of any kind ever enters this process (full CLI
-        delegation — every verb shells out to `sf`).
+        The org index is created by the first bind or login, and each org
+        secret is stored by the operator only for the orgs that log in with
+        one. The durable session of every org stays the sf CLI's own.
         """
         return []
 
     def get_declared_vault_keys(self) -> list[str]:
-        """No scoped vault keys are read or written directly by this plugin."""
-        return []
+        """The org index and every operator-stored org secret (org_secret__<name>)."""
+        return [VAULT_KEY_ORGS_INDEX, VAULT_KEY_ORG_SECRET_PREFIX + "*"]
 
     # ------------------------------------------------------------------
     # PluginBase lifecycle
@@ -283,6 +332,12 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             api_version=api_version if isinstance(api_version, str) and api_version else DEFAULT_API_VERSION,
             sf_cli_path=sf_cli_path if isinstance(sf_cli_path, str) and sf_cli_path else DEFAULT_SF_CLI_PATH,
         )
+        keys_dir = self._jwt_keys_dir()
+        if keys_dir is not None:
+            # A call killed mid-flight can leave a JWT key file; nothing else may.
+            removed = OrgSecrets(self._vault_service, keys_dir).sweep()
+            if removed and self.logger:
+                self.logger.warning("%s: removed %d JWT key file(s) left by an interrupted call", self.name, removed)
         self.set_ready()
 
     def _load_plugin_config(self) -> dict[str, object]:
@@ -306,6 +361,50 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         if self._cli_executor is None:
             raise RuntimeError(ERROR_ADDRESS_BOOK_NOT_AVAILABLE)
         return self._cli_executor
+
+    def _jwt_keys_dir(self) -> Path | None:
+        app_home = getattr(self.orchestrator_ref, "APP_HOME", None)
+        return Path(app_home).joinpath(*JWT_KEY_DIRECTORY_PARTS) if isinstance(app_home, (str, os.PathLike)) else None
+
+    def _org_secrets(self) -> OrgSecrets:
+        keys_dir = self._jwt_keys_dir()
+        if keys_dir is None:
+            raise RuntimeError("orchestrator APP_HOME must be injected before org secrets are used")
+        return OrgSecrets(self._vault_service, keys_dir)
+
+    def _org_service(self) -> org_service.OrgService:
+        """The bound orgs of this plugin, built on first use on the job worker."""
+        if self._orgs is None:
+            self._require_executor()
+            self._orgs = org_service.OrgService(
+                index=OrgIndex(self._vault_service),
+                secrets=self._org_secrets(),
+                legacy=self._app_config_loader,
+                executor_for=self._executor_for,
+                legacy_executor=self._legacy_executor,
+                sf_cli_path=lambda: self._require_executor().sf_cli_path,
+            )
+        return self._orgs
+
+    def _executor_for(self, binding: OrgBinding) -> SalesforceCliExecutor:
+        """One executor per bound org for this process, so each pin is verified once."""
+        key = (binding.org_id, binding.target_org, binding.instance_host, binding.jwt_key_secret)
+        executor = self._org_executors.get(key)
+        if executor is None:
+            root = self._require_executor()
+            credential = self._org_secrets().jwt_key_file(binding.jwt_key_secret) if binding.jwt_key_secret else None
+            executor = SalesforceCliExecutor(org_service.BindingSource(binding), api_version=root.api_version, sf_cli_path=root.sf_cli_path, credential=credential)
+            self._org_executors[key] = executor
+        return executor
+
+    def _legacy_executor(self, config: SalesforceOrgConfig) -> SalesforceCliExecutor:
+        """The executor of the pre-build-6 salesforce_org entry, verified against its own pin."""
+        root = self._require_executor()
+        return SalesforceCliExecutor(org_service.FixedSource(config), api_version=root.api_version, sf_cli_path=root.sf_cli_path)
+
+    def _flag_file_gate(self, path: str) -> str:
+        """Read containment for a local file a CLI flag names (definition, key or source file)."""
+        return self._assert_path(path, suffix=None, param_name="flags", reading=True)
 
     def _location_roots(self) -> tuple[Located[tuple[Path, ...]], SoletTree]:
         return _read_location_roots(self.orchestrator_ref)
@@ -360,22 +459,21 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
 
     def _run(
         self,
-        produce: Callable[[SalesforceCliExecutor], dict[str, Any]],
+        produce: Callable[[], dict[str, Any]],
         endpoint_name: str,
     ) -> dict[str, Any]:
         """Shared error-classification path.
 
-        ``produce`` takes the CLI executor and returns the result dict. No
-        retry-on-expiry: the `sf` CLI refreshes its own credential
+        ``produce`` resolves its org, makes its calls and returns the result
+        dict. No retry-on-expiry: the `sf` CLI refreshes its own credential
         transparently inside every invocation, so there is no mid-flight
         session for this process to detect and re-mint — a fault here is
         either a classified REST-level rejection or a CLI-level fault
         (``SalesforceServiceError``), never a stale token. Results and
         messages are returned as received.
         """
-        executor = self._require_executor()
         try:
-            data = produce(executor)
+            data = produce()
         except ValueError as exc:
             return self._error(ERROR_INVALID_PARAMS, str(exc))
         except AppConfigError as exc:
@@ -488,6 +586,13 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             "actions": _edge("actions", RESULT_TYPE_ACTIONS, retryable=False),
             "metadata": _edge("metadata", RESULT_TYPE_METADATA, retryable=False),
             "content_files": _edge("content_files", RESULT_TYPE_CONTENT_FILES, retryable=False),
+            "list_orgs": _edge("list_orgs", RESULT_TYPE_LIST_ORGS, retryable=True),
+            "bind_org": _edge("bind_org", RESULT_TYPE_BIND_ORG, retryable=False),
+            "login": _edge("login", RESULT_TYPE_LOGIN, retryable=False),
+            "logout": _edge("logout", RESULT_TYPE_LOGOUT, retryable=False),
+            "set_default_org": _edge("set_default_org", RESULT_TYPE_SET_DEFAULT_ORG, retryable=False),
+            "disconnect_org": _edge("disconnect_org", RESULT_TYPE_DISCONNECT_ORG, retryable=False),
+            "org_lifecycle": _edge("org_lifecycle", RESULT_TYPE_ORG_LIFECYCLE, retryable=False),
         }
 
     # ------------------------------------------------------------------
@@ -498,13 +603,14 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="authenticated_request",
         display_name="Salesforce: Authenticated Request",
         description=(
-            "Send an authenticated request to any relative endpoint on the registered Salesforce org. "
+            "Send an authenticated request to any relative endpoint on a bound Salesforce org (org). "
             "Supports REST, Tooling, Bulk, Apex REST and SOAP XML bodies, including writes and deletes. "
             "Salesforce credential permissions determine access. Returns a queued job; completion "
             "contains HTTP status, selected headers, JSON/text body and nextRecordsUrl when supplied."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "method": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
@@ -644,13 +750,15 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
             api_version=api_version if isinstance(api_version, str) and api_version else DEFAULT_API_VERSION,
             sf_cli_path=executable_path,
         )
+        # Per-org executors carry the old path; each is rebuilt on its next call.
+        self._org_executors.clear()
 
     @platform_process(
         name="soql_query",
         display_name="Salesforce: SOQL Query",
         description=(
             'Run a SOQL query (e.g. "SELECT Id, Name FROM Account WHERE …") against the '
-            "configured Salesforce org. Returns immediately with a job_id and status 'queued' "
+            "bound Salesforce org (org). Returns immediately with a job_id and status 'queued' "
             "(D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job "
             "finishing. When the job completes, the result is ALWAYS written to the "
             "caller-supplied output_tsv_path, never returned inline — this verb never runs SOQL inside "
@@ -672,6 +780,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "query": ParameterMetadata(type=ParameterType.STRING, required=True, description="The SOQL query string."),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -733,6 +842,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "query": ParameterMetadata(type=ParameterType.STRING, required=True, description="The SOQL query."),
             "output_tsv_path": ParameterMetadata(
                 type=ParameterType.STRING,
@@ -773,6 +883,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         description=("Fetch one record by sobject + id, optionally trimmed to specific fields. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the record's fields are delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The record id."),
             "fields": ParameterMetadata(
@@ -801,6 +912,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         description=("Describe an sobject's fields (name/type/label/nillable/updateable, trimmed). Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the field metadata is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Account'."),
         },
         return_value_schema=ReturnValueSchema(
@@ -822,7 +934,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         display_name="Salesforce: List SObjects",
         description=("List the org's sobjects (API name + label). Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the job finishing; the sobject list is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={},
+        parameters={"org": ORG_PARAM},
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Dispatch envelope — job_id + status: queued. Not the sobject list itself.",
@@ -845,6 +957,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name, e.g. 'Contact'."),
             "fields": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Non-empty object of field values."),
         },
@@ -868,6 +981,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         description=("Apply a non-empty fields object to an existing record by sobject + id. Write action. Returns immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — the dispatch returning is NOT the same as the update being applied; the confirmation is delivered when the job completes."),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name."),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The record id."),
             "fields": ParameterMetadata(type=ParameterType.OBJECT, required=True, description="Non-empty object of field values to set."),
@@ -898,6 +1012,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "sobject": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sobject API name."),
             "id": ParameterMetadata(type=ParameterType.STRING, required=True, description="The record id to delete."),
         },
@@ -919,13 +1034,13 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="test_connection",
         display_name="Salesforce: Test Connection",
         description=(
-            "Verify the org binding by querying the org record through the sf CLI. Returns "
+            "Verify a bound org (org) by querying its org record through the sf CLI. Returns "
             "immediately with a job_id and status 'queued' (D0.3 deferred-completion shape) — "
             "the dispatch returning is NOT the same as the job finishing; ok, org_id, the "
-            "verified username, and the pinned api_version are delivered when the job completes."
+            "verified username, the pinned api_version and the org's alias are delivered when the job completes."
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
-        parameters={},
+        parameters={"org": ORG_PARAM},
         return_value_schema=ReturnValueSchema(
             type=ParameterType.OBJECT,
             description="Dispatch envelope — job_id + status: queued. Not the connection check itself.",
@@ -958,6 +1073,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "operation": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
@@ -1002,6 +1118,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "job_id": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
@@ -1036,6 +1153,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "job_id": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
@@ -1084,6 +1202,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         ),
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters={
+            "org": ORG_PARAM,
             "job_id": ParameterMetadata(
                 type=ParameterType.STRING,
                 required=True,
@@ -1117,7 +1236,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="composite",
         display_name="Salesforce: Composite Resources",
         description=(
-            "Run Salesforce REST composite resources on the registered org: composite (up to 25 "
+            "Run Salesforce REST composite resources on a bound org (org): composite (up to 25 "
             "dependent subrequests with reference ids, allOrNone), graph (composite graph), batch, "
             "tree (sObject tree create), and sObject Collections (collections_create, "
             "collections_retrieve, collections_retrieve_many, collections_update, "
@@ -1137,7 +1256,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="tooling",
         display_name="Salesforce: Tooling API",
         description=(
-            "Use the Salesforce Tooling API on the registered org: query and query_more, search, "
+            "Use the Salesforce Tooling API on a bound org (org): query and query_more, search, "
             "execute_anonymous (anonymous Apex), run_tests_async, run_tests_sync, completions, "
             "list_sobjects, sobject_info, describe, Tooling record create, get, update and delete (ApexClass, "
             "ApexTrigger, TraceFlag and other Tooling types), composite_resources and composite (up to 25 "
@@ -1158,7 +1277,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="bulk_jobs",
         display_name="Salesforce: Bulk API 2.0 Jobs",
         description=(
-            "Manage Salesforce Bulk API 2.0 jobs on the registered org: query jobs (query_create "
+            "Manage Salesforce Bulk API 2.0 jobs on a bound org (org): query jobs (query_create "
             "with operation query or queryAll, query_get, query_list, query_results, query_result_pages, "
             "query_result_pages_more, query_abort, query_delete) and ingest jobs (ingest_list, ingest_delete). query_results writes one "
             "CSV page to an ABSOLUTE output_csv_path under registered path addresses and returns the "
@@ -1179,7 +1298,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="reports",
         display_name="Salesforce: Reports",
         description=(
-            "Use the Salesforce Reports REST API on the registered org: list, create, clone, describe, "
+            "Use the Salesforce Reports REST API on a bound org (org): list, create, clone, describe, "
             "run (synchronous, includeDetails), run_filtered (with reportMetadata filters), run_async, "
             "instances, instance_results, instance_delete, query (run unsaved metadata), update, delete, report_types and "
             "describe_report_type. Reads, writes and deletes alike; Salesforce permissions decide each "
@@ -1197,7 +1316,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     @platform_process(
         name="dashboards",
         display_name="Salesforce: Dashboards",
-        description="Use the Salesforce Dashboards REST API on the registered org: list, clone, describe, results, refresh and status (with runningUser and filter1 to filter3), update and delete. Reads, writes and deletes alike; Salesforce permissions decide each operation. Returns a queued job.",
+        description="Use the Salesforce Dashboards REST API on a bound org (org): list, clone, describe, results, refresh and status (with runningUser and filter1 to filter3), update and delete. Reads, writes and deletes alike; Salesforce permissions decide each operation. Returns a queued job.",
         processor_policy_category=ProcessorPolicyCategory.EDGE,
         parameters=_family_parameters("dashboards"),
         return_value_schema=_FAMILY_RETURN,
@@ -1211,7 +1330,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="rest_resources",
         display_name="Salesforce: REST Resources",
         description=(
-            "Use Salesforce REST API resources beyond record CRUD on the registered org: resources, "
+            "Use Salesforce REST API resources beyond record CRUD on a bound org (org): resources, "
             "limits, recent, describe_global, sobject_info, describe, updated and deleted record ids, "
             "get_by_external_id, upsert_by_external_id, delete_by_external_id, relationship traversal, "
             "relationship_update, relationship_delete, query, query_all, query_more, explain, search and "
@@ -1231,7 +1350,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="actions",
         display_name="Salesforce: Invocable Actions",
         description=(
-            "Discover and invoke Salesforce invocable actions on the registered org: list, "
+            "Discover and invoke Salesforce invocable actions on a bound org (org): list, "
             "list_standard, list_custom, list_custom_type (apex, flow, quickAction, emailAlert...), "
             "describe_standard, describe_custom, invoke_standard and invoke_custom with an inputs "
             "list. Salesforce permissions decide each invocation. Returns a queued job."
@@ -1249,7 +1368,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="metadata",
         display_name="Salesforce: Metadata Deploy",
         description=(
-            "Deploy Salesforce metadata to the registered org through the Metadata REST API: deploy "
+            "Deploy Salesforce metadata to a bound org (org) through the Metadata REST API: deploy "
             "(a .zip package at an ABSOLUTE zip_path under registered path addresses, with deployOptions such "
             "as checkOnly, testLevel, runTests, rollbackOnError, purgeOnDelete; destructiveChanges.xml in "
             "the package deletes components), deploy_status (includeDetails), deploy_cancel and "
@@ -1269,7 +1388,7 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
         name="content_files",
         display_name="Salesforce: Files (ContentVersion)",
         description=(
-            "Move Salesforce Files on the registered org: upload (a local file at an ABSOLUTE file_path "
+            "Move Salesforce Files on a bound org (org): upload (a local file at an ABSOLUTE file_path "
             "under registered path addresses becomes a new ContentVersion; body PathOnClient, Title, "
             "ContentDocumentId for a new version of an existing file, FirstPublishLocationId), download "
             "(a ContentVersion's VersionData to an ABSOLUTE output_path under registered path addresses, kept "
@@ -1285,6 +1404,166 @@ class SalesforcePlugin(PluginBase, EdgeProcessProvider):
     )
     def content_files(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         return self._dispatch_family("content_files", params, state)
+
+    # ------------------------------------------------------------------
+    # Build 6: bound orgs and the org lifecycle
+    # ------------------------------------------------------------------
+
+    def _dispatch_checked(self, action_name: str, params: dict[str, Any], state: dict[str, Any], check: Callable[[dict[str, Any]], object]) -> dict[str, Any]:
+        """Refuse a malformed request before a job exists; the worker checks again with I/O."""
+        try:
+            check(params)
+        except ValueError as exc:
+            return self._error(ERROR_INVALID_PARAMS, str(exc))
+        return self._dispatch_async(action_name, params, state)
+
+    @platform_process(
+        name="list_orgs",
+        display_name="Salesforce: List Bound Orgs",
+        description=("List every Salesforce org bound to this solet: alias, org id, username, pinned instance host, type (production, sandbox or scratch), Dev Hub flag, login method, the default flag and the names (never values) of the vault secrets its login uses. Reads the vault index only. Returns a queued job."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={},
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+        context_handling=ContextHandling.NONE,
+    )
+    def list_orgs(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_async("list_orgs", params, state)
+
+    @platform_process(
+        name="bind_org",
+        display_name="Salesforce: Bind Org",
+        description=(
+            "Bind an org the sf CLI is already logged in to, so verbs can name it with org. The binding is made from what the CLI and the org report "
+            "(org display: org id, username, instance host; an Organization query: sandbox or not; the CLI's Dev Hub test), keyed by org id with a unique alias. "
+            "Binding an org again refreshes it. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "target_org": ParameterMetadata(type=ParameterType.STRING, required=True, description="The sf CLI alias or username of a logged-in org (see org_lifecycle list)."),
+            "alias": _ALIAS,
+            "instance_host": ParameterMetadata(type=ParameterType.STRING, required=False, description="Optional expected my-domain host; binding is refused when the CLI's org resolves elsewhere."),
+            "make_default": _MAKE_DEFAULT,
+        },
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def bind_org(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        def check(checked: dict[str, Any]) -> None:
+            target = checked.get("target_org")
+            if not isinstance(target, str) or not target.strip():
+                raise TypedFamilyError("target_org must be the sf CLI alias or username of an org the CLI is logged in to")
+
+        return self._dispatch_checked("bind_org", params, state, check)
+
+    @platform_process(
+        name="login",
+        display_name="Salesforce: Log In To An Org",
+        description=(
+            "Log the sf CLI in to an org and bind it. method web opens the browser for the operator (up to 5 minutes); jwt logs in unattended with a connected app's "
+            "certificate key, read from the vault secret named in jwt_key_secret (or the jwt-key-file flag); sfdx_url uses an SFDX auth URL from the vault "
+            "(sfdx_auth_url_secret) or the sfdx-url-file flag; access_token uses a token from the vault (access_token_secret). Every documented flag of the CLI's "
+            "login command is accepted in flags. Secrets are stored by the operator with vault_service store_from_file under <solet>.salesforce_plugin.org_secret__<name> "
+            "and are never parameters, results or log lines. Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "method": ParameterMetadata(type=ParameterType.STRING, required=True, description=f"One of: {', '.join(org_service.LOGIN_COMMANDS)}."),
+            "flags": _CLI_FLAGS,
+            "alias": _ALIAS,
+            "make_default": _MAKE_DEFAULT,
+            "jwt_key_secret": ParameterMetadata(type=ParameterType.STRING, required=False, description="jwt: name of the vault secret holding the private key (the part after org_secret__)."),
+            "sfdx_auth_url_secret": ParameterMetadata(type=ParameterType.STRING, required=False, description="sfdx_url: name of the vault secret holding the force:// SFDX auth URL."),
+            "access_token_secret": ParameterMetadata(type=ParameterType.STRING, required=False, description="access_token: name of the vault secret holding the access token."),
+        },
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def login(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_checked("login", params, state, org_service.check_login)
+
+    @platform_process(
+        name="logout",
+        display_name="Salesforce: Log Out Of An Org",
+        description="Log the sf CLI out of one bound org (sf org logout); the binding stays, dormant, until the org is logged in to again. flags takes the CLI's client-app. Returns a queued job.",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={"org": _REQUIRED_ORG, "flags": _CLI_FLAGS},
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def logout(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        def check(checked: dict[str, Any]) -> None:
+            if org_selector(checked) is None:
+                raise TypedFamilyError("org is required: the alias, username or org id of a bound org")
+            check_flags(org_service.LOGOUT_COMMAND, checked.get("flags"))
+
+        return self._dispatch_checked("logout", params, state, check)
+
+    @platform_process(
+        name="set_default_org",
+        display_name="Salesforce: Set Default Org",
+        description="Make one bound org (alias, username or org id) the default that verbs use when no org is named. Returns a queued job.",
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={"org": _REQUIRED_ORG},
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def set_default_org(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_checked("set_default_org", params, state, _require_org)
+
+    @platform_process(
+        name="disconnect_org",
+        display_name="Salesforce: Disconnect Org",
+        description=("Disconnect one bound org: log the sf CLI out of it, remove its binding and delete the vault secrets no other bound org uses. Other bound orgs are untouched; if it was the default, the next bound org becomes the default. Returns a queued job."),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={"org": _REQUIRED_ORG},
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def disconnect_org(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_checked("disconnect_org", params, state, _require_org)
+
+    @platform_process(
+        name="org_lifecycle",
+        display_name="Salesforce: Org Lifecycle",
+        description=(
+            "Manage org lifecycles through the sf CLI: list (every org the CLI knows), display, open (browser, or url-only for a single-use link), "
+            "create_scratch (from a bound Dev Hub; definition-file or inline definition), resume_scratch (binds the scratch org once ready), delete_scratch, "
+            "create_sandbox, clone_sandbox, refresh_sandbox (from a bound production org), resume_sandbox (binds the sandbox once ready), sandbox_status "
+            "(Tooling SandboxProcess) and delete_sandbox. Creates are submitted --async and resumes check once. Every documented flag of each command is accepted in flags. "
+            "Returns a queued job."
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        parameters={
+            "operation": ParameterMetadata(type=ParameterType.STRING, required=True, description=f"One of: {org_lifecycle.operation_names()}."),
+            "org": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=False,
+                description="The bound org the command runs against: the org itself (display, open, delete_*), the Dev Hub (create_scratch, resume_scratch) or the production org (sandbox operations). Defaults as for every verb; scratch operations default to the only bound Dev Hub.",
+            ),
+            "flags": _CLI_FLAGS,
+            "definition": ParameterMetadata(type=ParameterType.OBJECT, required=False, description="create_scratch: an inline scratch org definition (the JSON a definition file holds), instead of the definition-file flag."),
+            "sandbox_name": ParameterMetadata(type=ParameterType.STRING, required=False, description="sandbox_status: the sandbox name (a letter and up to 9 letters or digits)."),
+            "connected_app_secret": ParameterMetadata(type=ParameterType.STRING, required=False, description="create_scratch with the client-id flag: name of the vault secret holding the connected app's client secret."),
+            "alias": _ALIAS,
+            "make_default": _MAKE_DEFAULT,
+        },
+        return_value_schema=_FAMILY_RETURN,
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=False),
+        context_handling=ContextHandling.NONE,
+    )
+    def org_lifecycle(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        return self._dispatch_checked("org_lifecycle", params, state, org_lifecycle.check_lifecycle)
+
+
+def _require_org(params: dict[str, Any]) -> None:
+    if org_selector(params) is None:
+        raise TypedFamilyError("org is required: the alias, username or org id of a bound org (see list_orgs)")
 
 
 def _edge(

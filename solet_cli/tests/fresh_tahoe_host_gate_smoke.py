@@ -6,7 +6,7 @@ the host measurement replaced by a fixed reading:
 * macOS 26.x on arm64 defaults embeddings to llama.cpp, offers llama.cpp and not
   Apple Foundation Models for summaries, and refuses an explicit Apple choice
   with a reason naming the Mac's version;
-* macOS 27.x on arm64 keeps the Apple-native default and refuses llama.cpp;
+* macOS 27.x on arm64 with the Apple model available keeps the Apple-native default and refuses llama.cpp;
 * a Mac that cannot be measured refuses the choice instead of guessing;
 * a recorded answer is never re-judged, so no measurement is taken;
 * the create flow's host profiles equal the existing-install flow's, so fresh
@@ -35,7 +35,7 @@ from solet_manager import host_option_binding
 from solet_manager.config import CreateConfig
 from solet_manager.contracts import ContractBundle
 from solet_manager.errors import ContractError, HostPlatformUnknownError
-from solet_manager.host_platform import HostPlatform, HostPlatformError
+from solet_manager.host_platform import HostPlatform, HostPlatformError, ModelAvailability
 from solet_manager.models import JsonValue
 from solet_manager.plan_builder import SetupPlan, build_setup_plan
 from solet_manager.release_lock import SeedLock
@@ -43,7 +43,7 @@ from solet_manager.release_lock import SeedLock
 _KB = _ROOT / "plugins" / "github_midwife_plugin" / "knowledge_base"
 _REVISION = "a" * 40
 _TAHOE = HostPlatform("26.4", "arm64")
-_GOLDEN_GATE = HostPlatform("27.0", "arm64")
+_GOLDEN_GATE = HostPlatform("27.0", "arm64", ModelAvailability(True, "AVAILABLE"))
 _CHECKS: list[str] = []
 
 
@@ -140,15 +140,13 @@ def _check_tahoe(bundle: ContractBundle) -> None:
     chosen, _ = _plan(bundle, _TAHOE, selections={"inference_implementation": "llama_cpp"})
     _check(
         "macOS 26 accepts llama.cpp summaries alongside llama.cpp embeddings",
-        _decisions(chosen).get("inference_implementation") == "llama_cpp"
-        and _decisions(chosen).get("embeddings_implementation") == "llama_cpp",
+        _decisions(chosen).get("inference_implementation") == "llama_cpp" and _decisions(chosen).get("embeddings_implementation") == "llama_cpp",
         _decisions(chosen),
     )
     genesis = next(item for item in chosen.operations if item.operation_ref == "genesis::solet.run")
     _check(
         "genesis receives both llama.cpp implementation decisions",
-        genesis.public_inputs.get("embeddings_implementation") == "llama_cpp"
-        and genesis.public_inputs.get("inference_implementation") == "llama_cpp",
+        genesis.public_inputs.get("embeddings_implementation") == "llama_cpp" and genesis.public_inputs.get("inference_implementation") == "llama_cpp",
         genesis.public_inputs,
     )
     for decision_id, option_id in (
@@ -177,15 +175,10 @@ def _check_golden_gate(bundle: ContractBundle) -> None:
         ("inference_implementation", "apple_foundation_models", "llama.cpp with Qwen3 8B"),
     ):
         refusal = _refusal(bundle, _GOLDEN_GATE, {decision_id: "llama_cpp"})
-        expected_clause = (
-            f"this Mac meets the macOS 27 or later on arm64 profile and uses the "
-            f"Apple-native option instead of {label}"
-        )
+        expected_clause = f"this Mac meets the macOS 27 or later on arm64 profile and uses the Apple-native option instead of {label}"
         _check(
             f"macOS 27 refuses {decision_id} coherently and names {alternative_id}",
-            "not available on this Mac" in refusal
-            and expected_clause in refusal
-            and alternative_id in _offered(bundle, _GOLDEN_GATE, decision_id),
+            "not available on this Mac" in refusal and expected_clause in refusal and alternative_id in _offered(bundle, _GOLDEN_GATE, decision_id),
             refusal,
         )
 
@@ -212,8 +205,7 @@ def _check_recorded_not_rejudged(bundle: ContractBundle) -> None:
     _check("recorded answers take no measurement", calls == [], calls)
     _check(
         "recorded Apple answers survive on any Mac",
-        _decisions(plan).get("embeddings_implementation") == "coreai"
-        and _decisions(plan).get("inference_implementation") == "apple_foundation_models",
+        _decisions(plan).get("embeddings_implementation") == "coreai" and _decisions(plan).get("inference_implementation") == "apple_foundation_models",
         _decisions(plan),
     )
 

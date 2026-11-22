@@ -32,15 +32,13 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
 import subprocess  # noqa: E402
-
-from _register_unit_double import fixture_assignment_record  # noqa: E402
 
 from agent_messaging_plugin import headless_adapter  # noqa: E402
 from agent_messaging_plugin.headless_adapter import HeadlessHostDriver  # noqa: E402
@@ -59,14 +57,7 @@ def _check(condition: object, label: str) -> None:
         print(f"  FAIL  {label}")
 
 
-_CHATTY_CHILD_SRC = (
-    "import sys\n"
-    "for _ in range(4000):\n"
-    "    sys.stdout.write('x' * 4096)\n"
-    "    sys.stdout.flush()\n"
-    "sys.stderr.write('done\\n')\n"
-    "sys.stderr.flush()\n"
-)
+_CHATTY_CHILD_SRC = "import sys\nfor _ in range(4000):\n    sys.stdout.write('x' * 4096)\n    sys.stdout.flush()\nsys.stderr.write('done\\n')\nsys.stderr.flush()\n"
 
 
 def _real_chatty_popen_fn(*_a: Any, **_k: Any) -> subprocess.Popen[str]:
@@ -75,7 +66,10 @@ def _real_chatty_popen_fn(*_a: Any, **_k: Any) -> subprocess.Popen[str]:
     a little stderr, mirroring a real worker's stream-json chatter."""
     return subprocess.Popen(  # noqa: S603 -- fixed harmless argv, test-only
         [sys.executable, "-c", _CHATTY_CHILD_SRC],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
@@ -125,8 +119,7 @@ def test_spawn_call_order_is_stdout_then_stderr() -> None:
     stderr_pos = source.find("_drain_pipe(proc.stderr)")
     _check(
         stdout_pos != -1 and stderr_pos != -1 and stdout_pos < stderr_pos,
-        "spawn() drains stdout (via _drain_stdout_with_init_capture) before "
-        "draining stderr (via _drain_pipe) -- the fix drains both, in that order",
+        "spawn() drains stdout (via _drain_stdout_with_init_capture) before draining stderr (via _drain_pipe) -- the fix drains both, in that order",
     )
 
 
@@ -148,12 +141,11 @@ def test_red_undrained_stdout_hangs_the_chatty_child() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), popen_fn=_real_chatty_popen_fn)
-            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-red-chatty-1"})
+            host_ref = driver.spawn({"agent_instance_id": "agi-red-chatty-1"})
             time.sleep(2.0)
             _check(
                 driver.alive(host_ref),
-                "RED: with stdout drain skipped, the chatty child is still "
-                "blocked (alive) after 2s -- reproduces the pre-fix hang",
+                "RED: with stdout drain skipped, the chatty child is still blocked (alive) after 2s -- reproduces the pre-fix hang",
             )
             driver.terminate(host_ref, grace_seconds=2)
             time.sleep(0.2)
@@ -168,7 +160,7 @@ def test_green_real_drain_lets_the_chatty_child_exit() -> None:
     generous bound -- the fix actually resolves the RED case above."""
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), popen_fn=_real_chatty_popen_fn)
-        host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-green-chatty-1"})
+        host_ref = driver.spawn({"agent_instance_id": "agi-green-chatty-1"})
         deadline = time.monotonic() + 10.0
         exited = False
         while time.monotonic() < deadline:
@@ -178,8 +170,7 @@ def test_green_real_drain_lets_the_chatty_child_exit() -> None:
             time.sleep(0.1)
         _check(
             exited,
-            "GREEN: with both streams drained, the chatty child exits on "
-            "its own within 10s -- no hang with the real fix in place",
+            "GREEN: with both streams drained, the chatty child exits on its own within 10s -- no hang with the real fix in place",
         )
         if not exited:
             driver.terminate(host_ref, grace_seconds=2)
@@ -195,13 +186,13 @@ def test_child_death_mid_write_does_not_propagate() -> None:
     original_hook = threading.excepthook
 
     def _capture_hook(args: threading.ExceptHookArgs) -> None:
-        thread_errors.append(args.exc_value)
+        thread_errors.append(cast(BaseException, args.exc_value))
 
     threading.excepthook = _capture_hook
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), popen_fn=_real_chatty_popen_fn)
-            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-killed-midwrite-1"})
+            host_ref = driver.spawn({"agent_instance_id": "agi-killed-midwrite-1"})
             time.sleep(0.3)  # let it get partway into writing
             os.kill(int(host_ref), signal.SIGKILL)
             deadline = time.monotonic() + 5.0
@@ -211,8 +202,7 @@ def test_child_death_mid_write_does_not_propagate() -> None:
             time.sleep(0.2)  # let drain threads observe EOF/close and exit
             _check(
                 thread_errors == [],
-                "no exception escaped the drain threads when the child died mid-write "
-                "-- non-fatal by design",
+                "no exception escaped the drain threads when the child died mid-write -- non-fatal by design",
             )
     finally:
         threading.excepthook = original_hook

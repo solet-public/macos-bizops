@@ -35,23 +35,23 @@ DELIVERY_OPERATIONS = frozenset({"deliver_error", "deliver_job_completion", "del
 REGISTERED_OPERATIONS = frozenset(
     {
         *DELIVERY_OPERATIONS,
-        "managed_dispatch_status",
-        "report_managed_dispatch",
         "set_model_cells_enabled",
         "peer_inbox",
         "retire_role",
-        "send_peer_message",
+        "peer_send",
         "set_autonomic_slot",
         "reconcile_operator_session_liveness",
         "clear_session",
         "compact_session",
-        "preserve_lane_evidence",
-        "read_lane_evidence",
         "drive_session",
         "retire_session",
         "start_interface",
     }
 )
+
+# Verbs whose name is also a typed service-interface method on the plugin: the
+# process body is the ``<verb>_action`` wrapper, not the method of that name.
+ACTION_WRAPPED_OPERATIONS = frozenset({"peer_inbox", "peer_send"})
 
 
 class RegisteredOperations:
@@ -73,10 +73,7 @@ class RegisteredOperations:
     ) -> dict[str, Any] | None:
         if action_name not in REGISTERED_OPERATIONS:
             return None
-        raw = parameters.get("parameters", parameters)
-        if action_name == "report_managed_dispatch" and raw.get("event_kind") != "completion":
-            return None
-        body = getattr(self, "peer_inbox_action" if action_name == "peer_inbox" else action_name)
+        body = getattr(self, f"{action_name}_action" if action_name in ACTION_WRAPPED_OPERATIONS else action_name)
         captured_state = dict(state)
         request_parameters = parameters
         volatile = action_name in DELIVERY_OPERATIONS

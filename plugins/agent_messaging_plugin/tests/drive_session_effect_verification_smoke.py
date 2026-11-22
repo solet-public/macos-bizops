@@ -60,7 +60,6 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
 
 from agent_messaging_plugin import session_hosts  # noqa: E402
 from agent_messaging_plugin import tmux_adapter as tmux_module  # noqa: E402
@@ -154,28 +153,38 @@ def _state() -> StateManagementInterface:
 
 
 def _live_session(
-    state: StateManagementInterface, agent_instance_id: str, host: str,
+    state: StateManagementInterface,
+    agent_instance_id: str,
+    host: str,
     lifecycle_state: str = LIFECYCLE_LIVE,
 ) -> None:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id="lane-drive-honesty",
-            assignment=fixture_assignment(), work_class="read_only",
-            budget_line="fleet:session-mgmt-bugwave-2026-08-19", host=host,
+            agent_instance_id=agent_instance_id,
+            label="drive-effect",
+            session_origin="spawned",
+            host=host,
         ),
     )
     from agent_messaging_plugin.schema import LIFECYCLE_SPAWNING  # noqa: PLC0415
+
     if lifecycle_state == LIFECYCLE_SPAWNING:
         return
     transition_lifecycle_state(
-        state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        state,
+        agent_instance_id=agent_instance_id,
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
     )
     if lifecycle_state != LIFECYCLE_LIVE:
         transition_lifecycle_state(
-            state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_LIVE,
-            to_state=lifecycle_state, directed_by="operator:none",
+            state,
+            agent_instance_id=agent_instance_id,
+            from_state=LIFECYCLE_LIVE,
+            to_state=lifecycle_state,
+            directed_by="operator:none",
         )
 
 
@@ -191,6 +200,7 @@ def _uninstall(host: str) -> None:
 # THE RED PIN — the measured lie, as an executable assertion.
 # ---------------------------------------------------------------------------
 
+
 def test_stranded_drive_fails_loud_instead_of_returning_success() -> None:
     """THE DEFECT. A drive positively observed stranded must not yield a
     success shape. Pre-fix this returned ``{'lifecycle_state': 'live',
@@ -204,7 +214,9 @@ def test_stranded_drive_fails_loud_instead_of_returning_success() -> None:
         raised: VerbError | None = None
         try:
             drive_session(
-                state, agent_instance_id="agi-drive-red", text="do the thing",
+                state,
+                agent_instance_id="agi-drive-red",
+                text="do the thing",
                 directed_by="operator:none",
             )
         except VerbError as exc:
@@ -238,12 +250,16 @@ def test_unconfirmed_drive_does_not_take_the_unpark_edge() -> None:
     try:
         state = _state()
         _live_session(
-            state, "agi-drive-nounpark", _TEST_HOST_VERIFYING,
+            state,
+            "agi-drive-nounpark",
+            _TEST_HOST_VERIFYING,
             lifecycle_state=LIFECYCLE_PARKED,
         )
         try:
             drive_session(
-                state, agent_instance_id="agi-drive-nounpark", text="wake up",
+                state,
+                agent_instance_id="agi-drive-nounpark",
+                text="wake up",
                 directed_by="operator:none",
             )
         except VerbError:
@@ -268,7 +284,9 @@ def test_confirmed_drive_reports_the_effect_positively() -> None:
         state = _state()
         _live_session(state, "agi-drive-green", _TEST_HOST_VERIFYING)
         result = drive_session(
-            state, agent_instance_id="agi-drive-green", text="do the thing",
+            state,
+            agent_instance_id="agi-drive-green",
+            text="do the thing",
             directed_by="operator:none",
         )
         _check(result.get("submitted") is True, "a CONFIRMED drive reports submitted=True")
@@ -281,7 +299,8 @@ def test_confirmed_drive_reports_the_effect_positively() -> None:
             "the send is still reported separately as 'dispatched'",
         )
         _check(
-            channel.sent == ["do the thing"], "the confirmed path sends the text exactly once",
+            channel.sent == ["do the thing"],
+            "the confirmed path sends the text exactly once",
         )
     finally:
         _uninstall(_TEST_HOST_VERIFYING)
@@ -296,7 +315,9 @@ def test_blind_driver_degrades_to_honest_naming_never_to_a_verdict() -> None:
         state = _state()
         _live_session(state, "agi-drive-blind", _TEST_HOST_BLIND)
         result = drive_session(
-            state, agent_instance_id="agi-drive-blind", text="do the thing",
+            state,
+            agent_instance_id="agi-drive-blind",
+            text="do the thing",
             directed_by="operator:none",
         )
         _check(
@@ -325,11 +346,15 @@ def test_blind_driver_still_unparks_on_request() -> None:
     try:
         state = _state()
         _live_session(
-            state, "agi-drive-blindunpark", _TEST_HOST_BLIND,
+            state,
+            "agi-drive-blindunpark",
+            _TEST_HOST_BLIND,
             lifecycle_state=LIFECYCLE_PARKED,
         )
         result = drive_session(
-            state, agent_instance_id="agi-drive-blindunpark", text="wake up",
+            state,
+            agent_instance_id="agi-drive-blindunpark",
+            text="wake up",
             directed_by="operator:none",
         )
         _check(result.get("unparked") is True, "a blind driver still un-parks the row")
@@ -344,6 +369,7 @@ def test_blind_driver_still_unparks_on_request() -> None:
 # ---------------------------------------------------------------------------
 # The tmux leg — the real read-back surface, and the composer-idle trap.
 # ---------------------------------------------------------------------------
+
 
 class _FakeCompletedProcess:
     def __init__(self, stdout: str = "", returncode: int = 0) -> None:
@@ -385,8 +411,11 @@ class _FakeClock:
 
 def _tmux_channel(runner: _FakeTmuxRunner, **kwargs: Any) -> Any:
     return tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        sleep_fn=lambda _s: None, now_fn=_FakeClock(),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        sleep_fn=lambda _s: None,
+        now_fn=_FakeClock(),
         **kwargs,
     )
 
@@ -409,7 +438,9 @@ def test_tmux_verify_driven_confirms_population_then_idle() -> None:
     runner = _FakeTmuxRunner(
         capture_pane_sequence=[
             f"❯ {_PROBE_TEXT}",
-            "❯\xa0", "❯\xa0", "❯\xa0",
+            "❯\xa0",
+            "❯\xa0",
+            "❯\xa0",
         ],
     )
     channel = _tmux_channel(runner)
@@ -418,7 +449,8 @@ def test_tmux_verify_driven_confirms_population_then_idle() -> None:
         "tmux verify_driven() confirms a submit once text is observed landing then leaving",
     )
     _check(
-        runner.send_key_count() == 0, "verify_driven only ever READS the pane — never sends a key",
+        runner.send_key_count() == 0,
+        "verify_driven only ever READS the pane — never sends a key",
     )
     _check(
         runner.capture_pane_used_dash_e(),
@@ -426,12 +458,7 @@ def test_tmux_verify_driven_confirms_population_then_idle() -> None:
     )
 
 
-_MULTILINE_PROBE_TEXT = (
-    "Dispatch: establish ground truth first.\n\n"
-    "1. Read the driver channel code.\n"
-    "2. Fix the readiness gate.\n"
-    "3. Add rollback for a failed insert.\n"
-)
+_MULTILINE_PROBE_TEXT = "Dispatch: establish ground truth first.\n\n1. Read the driver channel code.\n2. Fix the readiness gate.\n3. Add rollback for a failed insert.\n"
 """A payload shaped like a real dispatch: multi-line, so the TUI COLLAPSES it
 in the composer instead of echoing it. ``_PROBE_TEXT`` above is 21 characters
 on one row — the only payload shape the pre-2026-09-07 population anchor
@@ -467,7 +494,9 @@ def test_tmux_verify_driven_confirms_a_collapsed_multiline_paste() -> None:
     runner = _FakeTmuxRunner(
         capture_pane_sequence=[
             _collapsed_paste_row(_MULTILINE_PROBE_TEXT),
-            "❯\xa0", "❯\xa0", "❯\xa0",
+            "❯\xa0",
+            "❯\xa0",
+            "❯\xa0",
         ],
     )
     channel = _tmux_channel(runner)
@@ -524,7 +553,9 @@ def test_tmux_verify_driven_does_not_treat_dim_ghost_text_as_stranded() -> None:
     runner = _FakeTmuxRunner(
         capture_pane_sequence=[
             f"❯ \x1b[2m{_PROBE_TEXT}\x1b[0m",
-            "❯\xa0", "❯\xa0", "❯\xa0",
+            "❯\xa0",
+            "❯\xa0",
+            "❯\xa0",
         ],
     )
     channel = _tmux_channel(runner)
@@ -553,8 +584,7 @@ def test_tmux_verify_driven_rejects_idle_that_never_populated() -> None:
     channel = _tmux_channel(runner, drive_verify_timeout_seconds=3.0)
     _check(
         channel.verify_driven(_PROBE_TEXT) is None,
-        "an idle composer that NEVER observed the driven text land is could-not-determine, "
-        "not a confirmed submit (kills the composer-idle-by-absence mutation)",
+        "an idle composer that NEVER observed the driven text land is could-not-determine, not a confirmed submit (kills the composer-idle-by-absence mutation)",
     )
 
 

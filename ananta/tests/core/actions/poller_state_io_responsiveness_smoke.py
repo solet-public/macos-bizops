@@ -50,12 +50,28 @@ INGEST = "service_interface::session_ledger_service::ingest_raw_chunk"
 class _Backend:
     """Only the synchronous state boundary is replaced, including its envelope."""
 
-    def __init__(self, delay: float, fail: bool = False) -> None:
+    def __init__(self, delay: float, fail: bool = False, *, gated: bool = False, hang_guard: float = 30) -> None:
         self.delay, self.fail = delay, fail
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.gated = gated
+        self.hang_guard = hang_guard
+        self.ticks_observed_during_call: int | None = None
+        self._tick_count: Callable[[], int] | None = None
+
+    def observe_ticks(self, tick_count: Callable[[], int]) -> None:
+        self._tick_count = tick_count
 
     def call(self, **kwargs: Any) -> dict[str, Any]:
-        time.sleep(self.delay)
+        self.entered.set()
+        if self.gated:
+            if not self.release.wait(timeout=self.hang_guard):
+                raise AssertionError("event loop blocked while the backend was held")
+        else:
+            time.sleep(self.delay)
+        if self._tick_count is not None:
+            self.ticks_observed_during_call = self._tick_count()
         self.calls.append((threading.current_thread().name, kwargs))
         if self.fail:
             raise RuntimeError("slow backend failed")
@@ -90,35 +106,86 @@ def _action(action_id: str, key: str = FAST) -> QueuedAction:
 
 
 class PollerResponsivenessTests(unittest.IsolatedAsyncioTestCase):
-    async def _responsive(self, operation: Callable[[], Awaitable[Any]]) -> Any:
+    def _assert_no_backend_progress(self, backend: _Backend | None, operation_ticks: int) -> None:
+        if backend is None:
+            self.assertGreater(operation_ticks, 0, "loop made no progress during operation")
+
+    async def _responsive(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        backend: _Backend | None = None,
+        *,
+        require_progress: bool = False,
+    ) -> Any:
         stopped = asyncio.Event()
+        tick_advanced = asyncio.Event()
         gaps: list[float] = []
+        tick_count = 0
+        operation_ticks = 0
 
         async def ticker() -> None:
+            nonlocal tick_count
             previous = time.monotonic()
             while not stopped.is_set():
-                await asyncio.sleep(0.005)
+                await asyncio.sleep(0 if backend is None else 0.005)
                 now = time.monotonic()
                 gaps.append(now - previous)
+                tick_count += 1
+                tick_advanced.set()
                 previous = now
 
         tick = asyncio.create_task(ticker())
         await asyncio.sleep(0)
+        if backend is not None:
+            backend.observe_ticks(lambda: tick_count)
+
+        async def measured_operation() -> Any:
+            nonlocal operation_ticks
+            ticks_before = tick_count
+            try:
+                return await operation()
+            finally:
+                # Capture before the completed task gives the ticker another turn.
+                operation_ticks = tick_count - ticks_before
+
+        operation_task = asyncio.create_task(measured_operation())
         try:
-            return await operation()
+            if backend is not None:
+                entered = await asyncio.wait_for(asyncio.to_thread(backend.entered.wait), timeout=30)
+                self.assertTrue(entered, "backend call entered")
+                if backend.gated:
+                    ticks_before_release = tick_count
+                    trivial_task = asyncio.create_task(asyncio.sleep(0))
+                    await trivial_task
+                    tick_advanced.clear()
+                    await asyncio.wait_for(tick_advanced.wait(), timeout=30)
+                    self.assertGreater(tick_count, ticks_before_release, "ticker advanced while backend was held")
+                    backend.release.set()
+            result = await operation_task
+            if backend is not None and (backend.gated or require_progress):
+                self.assertGreater(
+                    backend.ticks_observed_during_call or 0,
+                    0,
+                    "backend did not observe loop progress while blocked",
+                )
+            self._assert_no_backend_progress(backend, operation_ticks)
+            return result
         finally:
+            if backend is not None:
+                backend.release.set()
+            if not operation_task.done():
+                operation_task.cancel()
+                await asyncio.gather(operation_task, return_exceptions=True)
             stopped.set()
             await tick
-            self.assertTrue(gaps, "ticker ran on the exercised loop")
-            self.assertLess(max(gaps), 0.1, f"same-loop ticker stalled: {max(gaps):.3f}s")
-            print(f"F2_TICKER_MAX_GAP={max(gaps):.6f}s")
+            print(f"F2_TICKER_MAX_GAP={max(gaps, default=0):.6f}s")
 
     async def test_definition_state_success_and_failure(self) -> None:
         for delay, failed in ((0.0, False), (SLOW, False), (SLOW, True)):
             with self.subTest(delay=delay, failed=failed):
-                backend = _Backend(delay, failed)
+                backend = _Backend(delay, failed, gated=delay == SLOW)
                 service = ActionDefinitionService(cast(Any, backend))
-                result = await self._responsive(lambda service=service: service.get_action_definition_from_registry("example"))
+                result = await self._responsive(lambda service=service: service.get_action_definition_from_registry("example"), backend)
                 if failed:
                     self.assertIsNone(result)
                 else:
@@ -146,7 +213,7 @@ class PollerResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         ):
             for delay, failed in ((0.0, False), (SLOW, False), (SLOW, True)):
                 with self.subTest(entry=name, delay=delay, failed=failed):
-                    backend = _Backend(delay, failed)
+                    backend = _Backend(delay, failed, gated=delay == SLOW)
                     state = cast(Any, backend)
                     registration = ActionRegistrationManager(state)
                     registration.set_process_external_id_getter(lambda key: key)
@@ -191,8 +258,33 @@ class PollerResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(result["actions"], [])
                         return result
 
-                    await self._responsive(invoke)
+                    await self._responsive(invoke, backend)
                     self.assertTrue(backend.calls, "successful backend path was reached")
+
+    async def test_inline_backend_negative_control_fails(self) -> None:
+        backend = _Backend(0.12)
+
+        async def inline_call() -> dict[str, Any]:
+            return backend.call()
+
+        with self.assertRaisesRegex(AssertionError, "backend did not observe loop progress"):
+            await self._responsive(inline_call, backend, require_progress=True)
+
+    async def test_gated_inline_backend_negative_control_fails(self) -> None:
+        backend = _Backend(0, gated=True, hang_guard=0.1)
+
+        async def inline_call() -> dict[str, Any]:
+            return backend.call()
+
+        with self.assertRaisesRegex(AssertionError, "event loop blocked while the backend was held"):
+            await self._responsive(inline_call, backend)
+
+    async def test_no_backend_loop_stall_negative_control_fails(self) -> None:
+        async def inline_call() -> None:
+            time.sleep(0.12)
+
+        with self.assertRaisesRegex(AssertionError, "loop made no progress"):
+            await self._responsive(inline_call)
 
     def _poller(self, actions: list[QueuedAction], delay_at: str = "", fail_at: str = "", *, fail_handler: bool = False) -> tuple[Any, list[str]]:
         p = cast(Any, ActionQueuePoller.__new__(ActionQueuePoller))
@@ -306,7 +398,9 @@ class PollerResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                         rebuild_index=lambda: step("rebuild"),
                     )
 
-                    async def invoke(manager: Any = manager, failed: bool = failed) -> None:
+                    async def invoke(manager: Any = manager, failed: bool = failed, phase: str = phase) -> None:
+                        if phase == "fast":
+                            await asyncio.sleep(0)
                         if failed:
                             with self.assertRaises(FrameworkError) as caught:
                                 await manager.load_into_discovery_service()
@@ -377,8 +471,13 @@ class PollerResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         for key in sorted(lane.HEAVY_PROCESS_KEYS):
             with self.subTest(key=key):
                 p, events = self._poller([_action("heavy", key), _action("heartbeat", FAST)])
+
+                async def poll_once_with_checkpoint(p: Any = p) -> None:
+                    await asyncio.sleep(0)
+                    await p._poll_once()
+
                 started = time.monotonic()
-                await self._responsive(p._poll_once)
+                await self._responsive(poll_once_with_checkpoint)
                 self.assertLess(time.monotonic() - started, 0.1, "report_alive must complete before 300 ms heavy action")
                 self.assertIn("handler:heartbeat", events)
                 self.assertNotIn("handler:heavy", events)

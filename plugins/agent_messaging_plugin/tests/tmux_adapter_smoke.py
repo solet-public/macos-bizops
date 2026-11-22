@@ -48,17 +48,18 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ananta" / "src"))
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agent_messaging_plugin" / "src"))
 
-from _register_unit_double import FIXTURE_UNIT_ID, fixture_assignment_record  # noqa: E402
 from composer_tmux_fixture import FixtureSession  # noqa: E402
+from tmux_adapter_private_server_smoke import _private_tmux_server, session_on_default_server, test_real_tier_leaves_the_default_server_alone  # noqa: E402
 
 from agent_messaging_plugin import headless_adapter  # noqa: E402
+from agent_messaging_plugin.channel_support import THIRD_PARTY_PROVIDER_ENV_MARKERS, provider_ignores_dev_channels  # noqa: E402
 from agent_messaging_plugin.headless_adapter import (  # noqa: E402
     _ALLOW_MANAGED_PERMISSION_RULES_ONLY_KEY,
     _WORKER_INJECTED_HOOK_FILENAMES,
 )
+from agent_messaging_plugin.host_end_notice import session_closed_hook_command  # noqa: E402
 from agent_messaging_plugin.session_hosts import DriverChannelSendError, HostCannotSpawnError  # noqa: E402
 from agent_messaging_plugin.tmux_adapter import (  # noqa: E402
-    _THIRD_PARTY_PROVIDER_ENV_MARKERS,
     DEFAULT_PASTE_STABLE_SAMPLES_REQUIRED,
     DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS,
     DEFAULT_SEND_BOUNDARY_TIMEOUT_SECONDS,
@@ -67,7 +68,6 @@ from agent_messaging_plugin.tmux_adapter import (  # noqa: E402
     _emit_role_tag_path,
     _needs_dev_channels_confirmation,
     _parse_tmux_version,
-    _provider_ignores_dev_channels,
     _sanitize_session_name,
     _tmux_denied_tools,
     _TmuxSendKeysDriverChannel,
@@ -302,8 +302,7 @@ def test_verify_config_mcp_config_required_only_for_mcp_transport() -> None:
     ``self._mcp_config_path`` when the resolved transport is ``'mcp'`` -- a
     ``'watch'`` spawn passes an inline literal empty MCP config
     (``'{"mcpServers":{}}'``) and never touches the file. A born clone ships
-    no ``.mcp.json`` at all, so every watch-transport tmux spawn (the charter
-    default) refused for a file it was never going to read -- and tmux is the
+    no ``.mcp.json`` at all, so every watch-transport tmux spawn (the default transport) refused for a file it was never going to read -- and tmux is the
     swap-durable host, so the durable substrate was exactly what went missing.
 
     FAILING MUTATION: drop the ``resolved_transport == "mcp"`` conjunct from
@@ -332,7 +331,7 @@ def test_verify_config_mcp_config_required_only_for_mcp_transport() -> None:
         )
         _check(
             driver.verify_config() == [],
-            "bare verify_config() with no transport arg resolves through the same floor spawn() would ('' -> charter default 'watch') and likewise does not require .mcp.json",
+            "bare verify_config() with no transport arg resolves through the same floor spawn() would (default 'watch') and likewise does not require .mcp.json",
         )
         _check(
             any("MCP config" in r for r in driver.verify_config(transport="mcp")),
@@ -368,7 +367,7 @@ def test_spawn_watch_transport_succeeds_without_mcp_json_present() -> None:
             sleep_fn=lambda _seconds: None,
         )
         session_name = driver.spawn(
-            {**fixture_assignment_record(), "agent_instance_id": "agi-bornclone-1", "transport": "watch"},
+            {"agent_instance_id": "agi-bornclone-1", "transport": "watch"},
         )
         _check(
             bool(session_name),
@@ -429,7 +428,7 @@ def test_spawn_refuses_when_unconfigured() -> None:
         )
         refused = False
         try:
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-x"})
+            driver.spawn({"agent_instance_id": "agi-x"})
         except HostCannotSpawnError:
             refused = True
         _check(refused, "spawn() refuses (HostCannotSpawnError) before ever calling run_fn")
@@ -440,7 +439,7 @@ def test_spawn_refuses_without_agent_instance_id() -> None:
         driver = _configured_driver(Path(tmp), run_fn=lambda *a, **k: _FakeCompleted())
         refused = False
         try:
-            driver.spawn({**fixture_assignment_record(), "lane_id": "lane-x"})
+            driver.spawn({"label": "lane-x"})
         except HostCannotSpawnError as exc:
             refused = True
             _check("agent_instance_id" in str(exc), "the refusal names the missing agent_instance_id")
@@ -454,15 +453,14 @@ def test_spawn_command_and_env_wiring() -> None:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
         host_ref = driver.spawn(
             {
-                **fixture_assignment_record(),
                 "agent_instance_id": "agi-abc123ef",
-                "lane_id": "lane-x",
+                "label": "lane-x",
                 "model": "opus",
                 "effort": "high",
             },
         )
         _check(
-            host_ref == "fleet-lane-x-abc123ef",
+            host_ref == "fleet-testhom-lane-x-abc123ef",
             f"spawn() returns the sanitized session name as host_ref (got {host_ref!r})",
         )
         new_session_calls = [c for c in calls if "new-session" in c]
@@ -474,7 +472,7 @@ def test_spawn_command_and_env_wiring() -> None:
             "AGENT_SESSION_ID=ases-agi-abc123ef" in env_str,
             "AGENT_SESSION_ID is derived from agent_instance_id",
         )
-        _check("AGENT_SESSION_LABEL=lane-x" in env_str, "label prefers lane_id when given")
+        _check("AGENT_SESSION_LABEL=lane-x" in env_str, "the spec label names the worker when no local_name is given")
         _check("SOLET_NAME=testhom" in env_str, "SOLET_NAME flows from driver config")
         designated_reporter = next(
             (value.split("=", 1)[1] for value in cmd if value.startswith("AGENT_CONTEXT_GAUGE_REPORTER_PATH=")),
@@ -487,7 +485,7 @@ def test_spawn_command_and_env_wiring() -> None:
         _check_wake_cli_and_path(cmd)
         _check(
             "FLEET_TRANSPORT=watch" in env_str,
-            "an unspecified transport resolves to the charter's default 'watch' (fleet-watch-transport-migration phase 2 slice 1, 2026-08-06 -- non-MCP is now the fleet's PRIMARY transport, not 'mcp')",
+            "an unspecified transport resolves to the default transport 'watch'",
         )
         pane_command = cmd[-1]
         _check(
@@ -513,19 +511,11 @@ def test_spawn_command_and_env_wiring() -> None:
             [driver._tmux_bin, "set", "-as", "terminal-features", "xterm*:extkeys"] in calls,
             "every managed tmux spawn declares xterm extended-key capability",
         )
-
-
-def _fake_lane_worktree(root: Path, name: str) -> Path:
-    """A provisioned lane worktree in exactly the shape ``spawn_worktree_cwd``
-    checks for: a real directory carrying a ``.git`` entry. A linked worktree's
-    ``.git`` is a FILE (a ``gitdir:`` pointer), which is the shape this builds
-    -- the main checkout's directory form is the case the helper also accepts,
-    and neither is what the pre-fix driver looked at, because it looked at
-    nothing."""
-    worktree = root / "lane_worktrees" / name
-    worktree.mkdir(parents=True, exist_ok=True)
-    (worktree / ".git").write_text(f"gitdir: {root}/.git/worktrees/{name}\n")
-    return worktree
+        # The fake captures both commands after server creation. Check the
+        # inspection and count the exact write, so a missing arm or a duplicate
+        # hook added by one spawn fails on the command that caused it.
+        _check([driver._tmux_bin, "show-hooks", "-g", "session-closed"] in calls, "spawn inspects session-closed hooks")
+        _check(calls.count([driver._tmux_bin, "set-hook", "-ga", "session-closed", session_closed_hook_command("testhom", driver._solet_bin)]) == 1, "spawn arms exactly one end notice")
 
 
 def _spawn_cwd_and_import_root(cmd: list[str]) -> tuple[str, str]:
@@ -539,111 +529,37 @@ def _spawn_cwd_and_import_root(cmd: list[str]) -> tuple[str, str]:
     return cwd_arg, pythonpath.split(os.pathsep)[0]
 
 
-def test_spawn_runs_in_the_provisioned_lane_worktree() -> None:
-    """iss_2236d297 (2026-09-07): ``spawn_session`` provisions a lane worktree
-    and hands it to the host driver as ``worktree_path``. Every other driver
-    honours it (``codex_tmux``, ``codex_app_server``, ``headless_adapter``);
-    this one passed its OWN default cwd to ``tmux new-session -c``, so the
-    worktree was created, registered and silently abandoned and every Claude
-    lane's WIP landed in the shared checkout instead.
+def test_spawn_workspace() -> None:
+    """Check the cwd encoded in tmux's launch command for both forms of the spec.
 
-    FAILING MUTATIONS, one per leg: restoring ``"-c", str(self._cwd)`` in
-    :meth:`TmuxHostDriver.spawn` reds the cwd leg; dropping the ``PYTHONPATH``
-    entry from ``_env_pairs`` reds the import-root leg -- a pane whose cwd is
-    the lane tree but whose imports still resolve out of the shared tree is
-    the same contamination, quieter."""
-    calls: list[list[str]] = []
-
+    A plain directory is sufficient. The worker's import search path is
+    managed by the host independently of the pane's working directory.
+    """
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        worktree = _fake_lane_worktree(root, "lane-x--agi-abc123ef")
+        root = Path(tmp).resolve()
+        workspace = root / "ordinary directory"
+        workspace.mkdir()
+        calls: list[list[str]] = []
+        identity = {"agent_instance_id": "agi-abc123ef"}
+        for fields, expected in (({"workspace": str(workspace)}, workspace), ({}, root)):
+            calls.clear()
+            driver = _configured_driver(root, run_fn=_confirm_flow_run_fn(calls))
+            driver.spawn({**identity, **fields})
+            cmd = next(cmd for cmd in calls if "new-session" in cmd)
+            cwd_arg, import_root = _spawn_cwd_and_import_root(cmd)
+            _check(cwd_arg == str(expected), f"pane starts in {expected} (got {cwd_arg!r})")
+            _check(import_root != cwd_arg, f"host manages PYTHONPATH independently of {cwd_arg!r}")
+
+        calls.clear()
         driver = _configured_driver(root, run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn(
-            {
-                **fixture_assignment_record(),
-                "agent_instance_id": "agi-abc123ef",
-                "lane_id": "lane-x",
-                "worktree_path": str(worktree),
-            },
-        )
-        cmd = next(c for c in calls if "new-session" in c)
-        cwd_arg, import_root = _spawn_cwd_and_import_root(cmd)
-        _check(
-            cwd_arg == str(worktree.resolve()),
-            f"tmux new-session -c is the PROVISIONED lane worktree (got {cwd_arg!r}, wanted {str(worktree.resolve())!r})",
-        )
-        _check(
-            cwd_arg != str(root.resolve()),
-            "the pane does NOT open in the driver's own shared checkout when a worktree was provisioned -- the defect's exact signature was every Claude pane's pane_current_path being the shared root",
-        )
-        _check(
-            import_root == str(worktree.resolve()),
-            f"PYTHONPATH is anchored at the lane worktree ahead of anything inherited -- a worktree isolates FILES, not IMPORTS (got {import_root!r})",
-        )
-
-
-def test_spawn_without_a_worktree_keeps_the_drivers_default_cwd() -> None:
-    """The other half of the same contract, held to the shape the Codex
-    drivers are already held to: no ``worktree_path`` in the spec means the
-    driver's own configured cwd, unchanged. This is the leg that proves the
-    fix is a resolution, not an unconditional redirect.
-
-    FAILING MUTATION: making the cwd/PYTHONPATH resolution require a
-    ``worktree_path`` (or defaulting it to some other root) reds this."""
-    calls: list[list[str]] = []
-
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        driver = _configured_driver(root, run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-abc123ef", "lane_id": "lane-x"})
-        cmd = next(c for c in calls if "new-session" in c)
-        cwd_arg, import_root = _spawn_cwd_and_import_root(cmd)
-        _check(
-            cwd_arg == str(root.resolve()),
-            f"a spawn with no declared worktree keeps the driver's own cwd (got {cwd_arg!r}, wanted {str(root.resolve())!r})",
-        )
-        _check(
-            import_root == str(root.resolve()),
-            f"PYTHONPATH follows the same root the pane opened in, with no worktree in play (got {import_root!r})",
-        )
-
-
-def test_spawn_refuses_a_declared_worktree_that_is_not_a_checkout() -> None:
-    """A declared-but-unusable worktree must fail the spawn LOUDLY. Falling
-    back to the shared root here would reproduce the original defect with the
-    ledger still recording a worktree -- the silent-abandonment shape this
-    unit exists to remove.
-
-    FAILING MUTATION: catching ``LaneWorktreeError`` in ``_resolve_spawn_cwd``
-    and returning ``self._cwd`` reds both legs."""
-    calls: list[list[str]] = []
-
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        not_a_checkout = root / "lane_worktrees" / "lane-x--agi-abc123ef"
-        not_a_checkout.mkdir(parents=True)
-        driver = _configured_driver(root, run_fn=_confirm_flow_run_fn(calls))
-        refused = False
+        missing = root / "missing"
         try:
-            driver.spawn(
-                {
-                    **fixture_assignment_record(),
-                    "agent_instance_id": "agi-abc123ef",
-                    "lane_id": "lane-x",
-                    "worktree_path": str(not_a_checkout),
-                },
-            )
+            driver.spawn({**identity, "workspace": str(missing)})
         except HostCannotSpawnError as exc:
-            refused = True
-            _check(
-                str(not_a_checkout.resolve()) in str(exc),
-                "the refusal names the worktree it could not use",
-            )
-        _check(refused, "a declared worktree that is not a checkout refuses the spawn")
-        _check(
-            not [c for c in calls if "new-session" in c],
-            "no pane is created at all -- never one silently opened in the shared checkout",
-        )
+            _check(str(missing) in str(exc), "refusal identifies the missing directory")
+        else:
+            _check(False, "host refuses an explicit missing directory")
+        _check(all("new-session" not in cmd for cmd in calls), "missing workspace refused before opening a pane")
 
 
 def test_spawn_omits_retired_controller_name() -> None:
@@ -654,7 +570,7 @@ def test_spawn_omits_retired_controller_name() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-git-controller-1"})
+            driver.spawn({"agent_instance_id": "agi-git-controller-1"})
     finally:
         if previous is None:
             os.environ.pop("GIT_CONTROLLER_NAME", None)
@@ -674,7 +590,7 @@ def test_spawn_exports_bash_shell() -> None:
     calls: list[list[str]] = []
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-bash-shell-1"})
+        driver.spawn({"agent_instance_id": "agi-bash-shell-1"})
     pane_command = next(call for call in calls if "new-session" in call)[-1]
     argv = _extract_claude_argv_from_pane_command(pane_command)
     _check(
@@ -684,7 +600,7 @@ def test_spawn_exports_bash_shell() -> None:
 
 
 def test_spawn_local_name_drives_label_session_name_and_claude_name() -> None:
-    """W6 (#13 §44.3): a local_name replaces lane_id as the worker's label,
+    """W6 (#13 §44.3): a local_name replaces the spec label as the worker's label,
     and reaches all three places that matter — the tmux session name, the
     AGENT_SESSION_LABEL env var, and (Z-Q4 ruling) claude's own --name, which
     is what populates the file the Git-Controller mutation guard reads."""
@@ -694,15 +610,14 @@ def test_spawn_local_name_drives_label_session_name_and_claude_name() -> None:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
         host_ref = driver.spawn(
             {
-                **fixture_assignment_record(),
                 "agent_instance_id": "agi-abc123ef",
-                "lane_id": "lane-x",
+                "label": "lane-x",
                 "local_name": "Git-Controller",
             },
         )
         _check(
-            host_ref == "fleet-Git-Controller-abc123ef",
-            f"the tmux session name derives from local_name, not lane_id (got {host_ref!r})",
+            host_ref == "fleet-testhom-Git-Controller-abc123ef",
+            f"the tmux session name derives from local_name, not the spec label (got {host_ref!r})",
         )
         cmd = next(c for c in calls if "new-session" in c)
         _check(
@@ -720,7 +635,7 @@ def test_spawn_local_name_drives_label_session_name_and_claude_name() -> None:
         )
 
 
-def test_spawn_without_local_name_keeps_lane_id_behaviour() -> None:
+def test_spawn_without_local_name_falls_back_to_the_label() -> None:
     """The compatibility half: a caller that sends no local_name gets exactly
     the previous behaviour, so no existing lane's naming changes."""
     calls: list[list[str]] = []
@@ -728,16 +643,16 @@ def test_spawn_without_local_name_keeps_lane_id_behaviour() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
         host_ref = driver.spawn(
-            {**fixture_assignment_record(), "agent_instance_id": "agi-abc123ef", "lane_id": "lane-x"},
+            {"agent_instance_id": "agi-abc123ef", "label": "lane-x"},
         )
         _check(
-            host_ref == "fleet-lane-x-abc123ef",
-            f"no local_name -> the session name still derives from lane_id (got {host_ref!r})",
+            host_ref == "fleet-testhom-lane-x-abc123ef",
+            f"no local_name -> the session name falls back to the spec label (got {host_ref!r})",
         )
         pane_command = next(c for c in calls if "new-session" in c)[-1]
         _check(
             "--name lane-x" in pane_command.replace("'", ""),
-            "and --name falls back to the lane_id label",
+            "and --name falls back to the spec label",
         )
 
 
@@ -748,9 +663,8 @@ def test_spawn_threads_allowed_tools_into_env() -> None:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
         driver.spawn(
             {
-                **fixture_assignment_record(),
                 "agent_instance_id": "agi-allow1",
-                "lane_id": "lane-allow",
+                "label": "lane-allow",
                 "allowed_tools": ["mcp__testhom__peer_register", "mcp__testhom__process_call"],
             },
         )
@@ -770,7 +684,7 @@ def test_spawn_transport_mcp_override_uses_real_mcp_config() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         driver = _configured_driver(tmp_dir, run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-mcp-1", "transport": "mcp"})
+        driver.spawn({"agent_instance_id": "agi-mcp-1", "transport": "mcp"})
         new_session_call = next(c for c in calls if "new-session" in c)
         env_str = " ".join(new_session_call)
         _check("FLEET_TRANSPORT=mcp" in env_str, "an explicit transport='mcp' flows into the env var")
@@ -794,7 +708,7 @@ def test_spawn_transport_watch_uses_explicit_empty_mcp_config() -> None:
     calls: list[list[str]] = []
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-watch-1", "transport": "watch"})
+        driver.spawn({"agent_instance_id": "agi-watch-1", "transport": "watch"})
         new_session_call = next(c for c in calls if "new-session" in c)
         env_str = " ".join(new_session_call)
         _check(
@@ -829,11 +743,11 @@ def _extract_claude_argv_from_pane_command(pane_command: str) -> list[str]:
     return tokens[exec_idx + 1 :]
 
 
-def test_spawn_settings_json_wires_all_three_hooks_and_the_deny_rule() -> None:
+def test_spawn_settings_json_omits_heartbeat_and_keeps_coordination_hooks() -> None:
     calls: list[list[str]] = []
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-settings-1"})
+        driver.spawn({"agent_instance_id": "agi-settings-1"})
         new_session_call = next(c for c in calls if "new-session" in c)
         pane_command = new_session_call[-1]
         claude_argv = _extract_claude_argv_from_pane_command(pane_command)
@@ -849,22 +763,21 @@ def test_spawn_settings_json_wires_all_three_hooks_and_the_deny_rule() -> None:
             session_start_command.endswith("capture_session_mapping.py"),
             "the tmux driver's --settings ALSO injects the T1 usage-capture SessionStart hook, merged alongside the PreToolUse gate",
         )
-        post_tool_use_command = settings_json["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        post_tool_use_hooks = settings_json["hooks"]["PostToolUse"][0]["hooks"]
         _check(
-            post_tool_use_command.endswith("heartbeat_report_alive.py"),
-            "the tmux driver's --settings ALSO injects the T2 heartbeat PostToolUse hook, merged alongside the other two",
+            "heartbeat_report_alive.py" not in json.dumps(settings_json),
+            "the tmux driver's --settings does not inject the retired heartbeat hook",
         )
-        rotation_due_command = settings_json["hooks"]["PostToolUse"][0]["hooks"][1]["command"]
         _check(
-            rotation_due_command.endswith("rotation_due_watch.py"),
-            "the tmux driver's --settings ALSO injects the rotation-due watch PostToolUse hook (rotation-systematization P2 slice B), SECOND in the same PostToolUse group as the heartbeat hook, not replacing it",
+            len(post_tool_use_hooks) == 1 and post_tool_use_hooks[0]["command"].endswith("rotation_due_watch.py"),
+            "the tmux driver's --settings keeps exactly the rotation-due PostToolUse hook",
         )
         _check(
             settings_json["permissions"]["deny"] == ["Agent", "Task", "AskUserQuestion"],
             "the tmux driver's --settings ALSO injects the Agent/Task/AskUserQuestion "
             "tool deny rule (capability-tier guardrail redesign, 2026-08-06; "
             "AskUserQuestion default-deny, operator ruling 2026-08-14), merged "
-            "alongside the three hooks -- 'Agent' is the live-registry-confirmed "
+            "alongside the remaining hooks -- 'Agent' is the live-registry-confirmed "
             "name, 'Task' a defensive alias, AskUserQuestion denied by default "
             "because this driver launches a real interactive claude CLI where the "
             "tool's blocking picker can actually render",
@@ -879,7 +792,7 @@ def test_spawn_allow_askuserquestion_omits_it_from_the_deny_list() -> None:
     calls: list[list[str]] = []
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-settings-2", "allow_askuserquestion": True})
+        driver.spawn({"agent_instance_id": "agi-settings-2", "allow_askuserquestion": True})
         new_session_call = next(c for c in calls if "new-session" in c)
         pane_command = new_session_call[-1]
         claude_argv = _extract_claude_argv_from_pane_command(pane_command)
@@ -902,7 +815,7 @@ def test_spawn_env_session_mapping_spool_dir() -> None:
         os.environ["APP_HOME"] = str(app_home)
         try:
             driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-spool-tmux-1"})
+            driver.spawn({"agent_instance_id": "agi-spool-tmux-1"})
         finally:
             if orig is None:
                 os.environ.pop("APP_HOME", None)
@@ -922,7 +835,7 @@ def test_spawn_env_session_mapping_spool_dir() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-spool-tmux-2"})
+            driver.spawn({"agent_instance_id": "agi-spool-tmux-2"})
     finally:
         if orig is None:
             os.environ.pop("APP_HOME", None)
@@ -936,9 +849,9 @@ def test_spawn_env_session_mapping_spool_dir() -> None:
     )
 
 
-def test_spawn_env_heartbeat_marker_dir() -> None:
-    """Same declared-not-derived contract as the spool-dir env var, rooted
-    under a SEPARATE APP_HOME subdirectory."""
+def test_spawn_env_has_no_heartbeat_marker_dir() -> None:
+    """The heartbeat hook is gone, so a spawned session carries no marker-dir
+    environment variable, with APP_HOME set or unset."""
     calls: list[list[str]] = []
     orig = os.environ.get("APP_HOME")
     with tempfile.TemporaryDirectory() as tmp:
@@ -946,7 +859,7 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
         os.environ["APP_HOME"] = str(app_home)
         try:
             driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-hb-tmux-1"})
+            driver.spawn({"agent_instance_id": "agi-hb-tmux-1"})
         finally:
             if orig is None:
                 os.environ.pop("APP_HOME", None)
@@ -954,10 +867,9 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
                 os.environ["APP_HOME"] = orig
     new_session_call = next(c for c in calls if "new-session" in c)
     env_str = " ".join(new_session_call)
-    expected = str(app_home / "data" / "heartbeat_marker")
     _check(
-        f"AGENT_HEARTBEAT_MARKER_DIR={expected}" in env_str,
-        "AGENT_HEARTBEAT_MARKER_DIR is rooted under APP_HOME's data dir",
+        "AGENT_HEARTBEAT_MARKER_DIR" not in env_str,
+        "APP_HOME set -> the deleted heartbeat hook's marker dir env var is absent from the tmux new-session -e pairs",
     )
     _check(
         f"AGENT_COORDINATION_RECEIPT_PATH={app_home}/data/coordination-hooks/claude/installation.v1.json" in env_str,
@@ -970,7 +882,7 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp:
             driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-hb-tmux-2"})
+            driver.spawn({"agent_instance_id": "agi-hb-tmux-2"})
     finally:
         if orig is None:
             os.environ.pop("APP_HOME", None)
@@ -980,41 +892,12 @@ def test_spawn_env_heartbeat_marker_dir() -> None:
     env_str = " ".join(new_session_call)
     _check(
         "AGENT_HEARTBEAT_MARKER_DIR" not in env_str,
-        "APP_HOME unset -> the heartbeat marker dir env var is ENTIRELY ABSENT from the tmux new-session -e pairs",
+        "APP_HOME unset -> the heartbeat marker dir env var is still absent from the tmux new-session -e pairs",
     )
     _check(
         "AGENT_COORDINATION_RECEIPT_PATH" not in env_str,
         "APP_HOME unset -> tmux does not inject a guessed ownership receipt path",
     )
-
-
-def test_spawn_wires_authority_system_prompt_with_full_substitution() -> None:
-    """T2 authority-template: same full-substitution proof as the headless
-    adapter's own test, through the tmux driver's pane-command argv."""
-    calls: list[list[str]] = []
-    with tempfile.TemporaryDirectory() as tmp:
-        driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn(
-            {
-                **fixture_assignment_record(),
-                "agent_instance_id": "agi-authority-tmux-1",
-                "lane_id": "fleet-authority-test",
-                "role_class": "project",
-                "unit_id": FIXTURE_UNIT_ID,
-                "spawned_by_role": "Coordinator-Main",
-            },
-        )
-        new_session_call = next(c for c in calls if "new-session" in c)
-        pane_command = new_session_call[-1]
-        claude_argv = _extract_claude_argv_from_pane_command(pane_command)
-        idx = claude_argv.index("--append-system-prompt")
-        rendered = claude_argv[idx + 1]
-        _check("agi-authority-tmux-1" in rendered, "the rendered prompt carries agent_instance_id")
-        _check("'project'" in rendered, "the rendered prompt carries role_class")
-        _check("'fleet-authority-test'" in rendered, "the rendered prompt carries lane_id")
-        _check("drv_fixture-revision" in rendered, "the rendered prompt carries registered revision")
-        _check("'Coordinator-Main'" in rendered, "the rendered prompt carries spawned_by_role")
-        _check("{role_class}" not in rendered, "no unresolved placeholder ships into the command")
 
 
 def test_spawn_wraps_run_fn_failure() -> None:
@@ -1025,7 +908,7 @@ def test_spawn_wraps_run_fn_failure() -> None:
         driver = _configured_driver(Path(tmp), run_fn=_raiser)
         wrapped = False
         try:
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-y"})
+            driver.spawn({"agent_instance_id": "agi-y"})
         except HostCannotSpawnError:
             wrapped = True
         _check(wrapped, "a run_fn OSError is wrapped as HostCannotSpawnError, never leaks raw")
@@ -1041,7 +924,7 @@ def test_spawn_wraps_nonzero_exit() -> None:
         driver = _configured_driver(Path(tmp), run_fn=_fail)
         refused = False
         try:
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-dup"})
+            driver.spawn({"agent_instance_id": "agi-dup"})
         except HostCannotSpawnError as exc:
             refused = True
             _check("duplicate session" in str(exc), "a tmux new-session failure's stderr reaches the caller")
@@ -1135,9 +1018,8 @@ def test_driver_channel_fails_open_when_baseline_never_changes() -> None:
 
     def run_fn(cmd: list[str], **_kw: Any) -> _FakeCompleted:
         calls.append(cmd)
-        if "capture-pane" in cmd:
-            return _FakeCompleted(stdout=constant_screen)
-        return _FakeCompleted()
+        assert "-t" not in cmd or cmd[cmd.index("-t") + 1] == "=repro-baseline-unchanged:"
+        return _FakeCompleted(stdout=constant_screen)
 
     channel = _TmuxSendKeysDriverChannel(
         tmux_bin="tmux",
@@ -1228,7 +1110,7 @@ def _third_party_provider_run_fn(calls: list[list[str]]) -> Any:
     return _fake
 
 
-def test_provider_ignores_dev_channels_predicate() -> None:
+def test_dev_channels_provider_predicate() -> None:
     """The pure predicate, §39.1/§40.1 -- adopter's shape, keyed on OUR
     effective spawn environment. Only the literal ``"1"`` counts: Claude Code's
     own switch is a 1/unset flag, and treating any truthy-looking string as
@@ -1239,31 +1121,31 @@ def test_provider_ignores_dev_channels_predicate() -> None:
     Return a constant ``True`` -> every remaining leg reds.
     """
     _check(
-        _provider_ignores_dev_channels({_BEDROCK_MARKER: "1"}) is True,
+        provider_ignores_dev_channels({_BEDROCK_MARKER: "1"}) is True,
         "marker set to '1' -> the flag is inert, omit it",
     )
     _check(
-        _provider_ignores_dev_channels({_BEDROCK_MARKER: " 1 "}) is True,
+        provider_ignores_dev_channels({_BEDROCK_MARKER: " 1 "}) is True,
         "surrounding whitespace is stripped before comparison",
     )
     _check(
-        _provider_ignores_dev_channels({}) is False,
+        provider_ignores_dev_channels({}) is False,
         "no marker at all -> Anthropic path, keep the flag",
     )
     _check(
-        _provider_ignores_dev_channels({_BEDROCK_MARKER: "0"}) is False,
+        provider_ignores_dev_channels({_BEDROCK_MARKER: "0"}) is False,
         "marker explicitly disabled ('0') -> keep the flag",
     )
     _check(
-        _provider_ignores_dev_channels({_BEDROCK_MARKER: ""}) is False,
+        provider_ignores_dev_channels({_BEDROCK_MARKER: ""}) is False,
         "empty marker -> keep the flag",
     )
     _check(
-        _provider_ignores_dev_channels({_BEDROCK_MARKER: "true"}) is False,
+        provider_ignores_dev_channels({_BEDROCK_MARKER: "true"}) is False,
         "only the literal '1' counts -- 'true' is not the vendor's switch value",
     )
     _check(
-        _BEDROCK_MARKER in _THIRD_PARTY_PROVIDER_ENV_MARKERS,
+        _BEDROCK_MARKER in THIRD_PARTY_PROVIDER_ENV_MARKERS,
         "the field-verified marker is the one the predicate actually reads",
     )
 
@@ -1313,7 +1195,7 @@ def test_third_party_provider_spawn_omits_flag_and_skips_confirm_loop() -> None:
     swap-durable tmux fleet unspawnable on that provider. This asserts all three
     halves of the fix: flag omitted, loop never entered, spawn succeeds.
 
-    FAILING MUTATION: revert ``_provider_ignores_dev_channels`` to a constant
+    FAILING MUTATION: revert ``provider_ignores_dev_channels`` to a constant
     ``False`` -> the flag returns, the loop runs against a pane that never shows
     the prompt, and this whole leg reds with the original kill.
     """
@@ -1324,7 +1206,7 @@ def test_third_party_provider_spawn_omits_flag_and_skips_confirm_loop() -> None:
             run_fn=_third_party_provider_run_fn(calls),
         )
         session_name = driver.spawn(
-            {**fixture_assignment_record(), "agent_instance_id": "agi-bedrock-1", "transport": "watch", "permission_mode": "default"},
+            {"agent_instance_id": "agi-bedrock-1", "transport": "watch", "permission_mode": "default"},
         )
         _check(
             bool(session_name),
@@ -1359,13 +1241,13 @@ def test_anthropic_path_keeps_flag_and_confirm_loop_byte_for_byte() -> None:
     SCRUBBED rather than merely assumed absent (this smoke may run inside a
     spawned worker whose environment is inherited, not clean).
 
-    FAILING MUTATION: make ``_provider_ignores_dev_channels`` return a constant
+    FAILING MUTATION: make ``provider_ignores_dev_channels`` return a constant
     ``True`` -> the flag disappears from the Anthropic path and this leg reds.
     """
     calls: list[list[str]] = []
     with tempfile.TemporaryDirectory() as tmp, _effective_env_marker(None):
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-anthropic-1", "transport": "watch"})
+        driver.spawn({"agent_instance_id": "agi-anthropic-1", "transport": "watch"})
         new_session_call = next(c for c in calls if "new-session" in c)
         claude_argv = _extract_claude_argv_from_pane_command(new_session_call[-1])
         idx = claude_argv.index("--dangerously-load-development-channels")
@@ -1397,9 +1279,9 @@ def test_spawn_confirms_dev_channels_prompt_before_returning() -> None:
     calls: list[list[str]] = []
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-        host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-confirm01", "lane_id": "lane-confirm"})
+        host_ref = driver.spawn({"agent_instance_id": "agi-confirm01", "label": "lane-confirm"})
         _check(
-            host_ref == "fleet-lane-confirm-onfirm01",
+            host_ref == "fleet-testhom-lane-confirm-onfirm01",
             f"spawn() returns the sanitized host_ref once the prompt is confirmed (got {host_ref!r})",
         )
         enter_indices = [i for i, c in enumerate(calls) if _is_send_enter(c)]
@@ -1443,7 +1325,7 @@ def test_spawn_kills_pane_and_fails_closed_when_prompt_never_appears() -> None:
         )
         refused = False
         try:
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-hang01", "lane_id": "lane-hang"})
+            driver.spawn({"agent_instance_id": "agi-hang01", "label": "lane-hang"})
         except HostCannotSpawnError as exc:
             refused = True
             _check(
@@ -1484,7 +1366,7 @@ def test_spawn_kills_pane_and_fails_closed_when_prompt_never_clears() -> None:
         )
         refused = False
         try:
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-stuck01", "lane_id": "lane-stuck"})
+            driver.spawn({"agent_instance_id": "agi-stuck01", "label": "lane-stuck"})
         except HostCannotSpawnError as exc:
             refused = True
             _check(
@@ -1556,7 +1438,7 @@ def test_real_tmux_spawn_alive_driver_channel_terminate() -> None:
         print("  SKIP  no 'tmux' binary on this machine -- real-tmux tier skipped, not failed")
         _tmux_tier_skipped = True
         return
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, _private_tmux_server(Path(tmp)) as tmux_bin:
         tmp_dir = Path(tmp)
         fake_claude = tmp_dir / "fake-claude"
         # Plays the real --dangerously-load-development-channels confirmation
@@ -1591,49 +1473,37 @@ def test_real_tmux_spawn_alive_driver_channel_terminate() -> None:
             cwd=tmp_dir,
             run_fn=recording_run,
         )
-        host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-realtmux01", "lane_id": "smoke-real"})
-        try:
-            pane_command = next(command[-1] for command in spawn_commands)
-            _check(
-                "solet-bridge watch" not in pane_command,
-                "the MCP-only real-tmux fixture does not arm a live watch sidecar",
-            )
-            deadline = time.monotonic() + 5
-            while not driver.alive(host_ref) and time.monotonic() < deadline:
-                time.sleep(0.1)
-            _check(driver.alive(host_ref), "a freshly-spawned real tmux session reports alive=True")
-            _check(driver.alive("no-such-session-xyz") is False, "a nonexistent session is never alive")
+        host_ref = driver.spawn({"agent_instance_id": f"agi-realtmux-{os.getpid()}-{time.monotonic_ns() % 10**8}", "label": "smoke-real"})
+        _check(not session_on_default_server(host_ref), "the spawned real-tier session is absent from the default server")
+        pane_command = next(command[-1] for command in spawn_commands)
+        _check(
+            "solet-bridge watch" not in pane_command,
+            "the MCP-only real-tmux fixture does not arm a live watch sidecar",
+        )
+        deadline = time.monotonic() + 5
+        while not driver.alive(host_ref) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        _check(driver.alive(host_ref), "a freshly-spawned real tmux session reports alive=True")
+        _check(driver.alive("no-such-session-xyz") is False, "a nonexistent session is never alive")
 
-            channel = driver.driver_channel(host_ref)
-            _check(channel is not None, "driver_channel() returns a live channel for an alive session")
-            assert channel is not None
-            channel.send("hello from the smoke")
-            time.sleep(0.5)
-            capture = subprocess.run(  # noqa: S603
-                [tmux_bin, "capture-pane", "-t", host_ref, "-p"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            _check(
-                "GOT:hello from the smoke" in capture.stdout,
-                f"the pane's process received exactly the text send() delivered, via literal keystrokes (captured: {capture.stdout!r})",
-            )
+        channel = driver.driver_channel(host_ref)
+        _check(channel is not None, "driver_channel() returns a live channel for an alive session")
+        assert channel is not None
+        channel.send("hello from the smoke")
+        time.sleep(0.5)
+        capture = subprocess.run([tmux_bin, "capture-pane", "-t", host_ref, "-p"], capture_output=True, text=True, check=True)
+        _check(
+            "GOT:hello from the smoke" in capture.stdout,
+            f"the pane's process received exactly the text send() delivered, via literal keystrokes (captured: {capture.stdout!r})",
+        )
 
-            driver.terminate(host_ref, grace_seconds=2)
-            time.sleep(0.3)
-            _check(not driver.alive(host_ref), "terminate() leaves the tmux session dead")
-            _check(
-                driver.driver_channel(host_ref) is None,
-                "driver_channel() is None once terminate() has killed the session",
-            )
-        finally:
-            subprocess.run(  # noqa: S603
-                [tmux_bin, "kill-session", "-t", host_ref],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+        driver.terminate(host_ref, grace_seconds=2)
+        time.sleep(0.3)
+        _check(not driver.alive(host_ref), "terminate() leaves the tmux session dead")
+        _check(
+            driver.driver_channel(host_ref) is None,
+            "driver_channel() is None once terminate() has killed the session",
+        )
 
 
 def test_real_tmux_driver_channel_declines_an_occupied_composer_and_sends_nothing() -> None:
@@ -1676,7 +1546,7 @@ def test_real_tmux_pane_shell_is_bash() -> None:
         print("  SKIP  no 'tmux' binary on this machine -- real-tmux tier skipped, not failed")
         _tmux_tier_skipped = True
         return
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, _private_tmux_server(Path(tmp)) as tmux_bin:
         tmp_dir = Path(tmp)
         shell_out = tmp_dir / "shell.out"
         stub_claude = tmp_dir / "stub-claude"
@@ -1694,28 +1564,19 @@ def test_real_tmux_pane_shell_is_bash() -> None:
             cwd=tmp_dir,
         )
         spec = {
-            **fixture_assignment_record(),
-            "agent_instance_id": "agi-realtmux-shell",
-            "lane_id": "smoke-shell",
+            "agent_instance_id": f"agi-realtmux-{os.getpid()}-{time.monotonic_ns() % 10**8}",
+            "label": "smoke-shell",
             "provider_env": {_BEDROCK_MARKER: "1"},
         }
-        host_ref = driver.spawn(spec)
-        try:
-            deadline = time.monotonic() + 5
-            while not shell_out.exists() and time.monotonic() < deadline:
-                time.sleep(0.1)
-            observed = shell_out.read_text() if shell_out.exists() else None
-            _check(
-                observed == "/bin/bash",
-                f"real tmux pane: claude sees SHELL=/bin/bash (observed {observed!r})",
-            )
-        finally:
-            subprocess.run(  # noqa: S603
-                [tmux_bin, "kill-session", "-t", host_ref],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+        driver.spawn(spec)
+        deadline = time.monotonic() + 5
+        while not shell_out.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        observed = shell_out.read_text() if shell_out.exists() else None
+        _check(
+            observed == "/bin/bash",
+            f"real tmux pane: claude sees SHELL=/bin/bash (observed {observed!r})",
+        )
 
 
 def test_real_tmux_terminate_is_idempotent_on_already_dead_session() -> None:
@@ -1725,13 +1586,14 @@ def test_real_tmux_terminate_is_idempotent_on_already_dead_session() -> None:
         print("  SKIP  no 'tmux' binary on this machine -- real-tmux tier skipped, not failed")
         _tmux_tier_skipped = True
         return
-    driver = TmuxHostDriver(tmux_bin=tmux_bin)
-    raised = False
-    try:
-        driver.terminate("no-such-session-never-existed", grace_seconds=1)
-    except Exception:  # noqa: BLE001 -- the exact thing under test: nothing escapes
-        raised = True
-    _check(not raised, "terminate() on an already-dead/nonexistent session is a no-op, never raises")
+    with tempfile.TemporaryDirectory() as tmp, _private_tmux_server(Path(tmp)) as wrapper:
+        driver = TmuxHostDriver(tmux_bin=wrapper)
+        raised = False
+        try:
+            driver.terminate("no-such-session-never-existed", grace_seconds=1)
+        except Exception:  # noqa: BLE001 -- the exact thing under test: nothing escapes
+            raised = True
+        _check(not raised, "terminate() on an already-dead/nonexistent session is a no-op, never raises")
 
 
 # --- managed-policy preflight on the tmux host ------------------------------
@@ -1903,7 +1765,7 @@ def test_tmux_denied_tools_is_the_settings_blob_source_of_truth() -> None:
     calls: list[list[str]] = []
     with tempfile.TemporaryDirectory() as tmp:
         driver = _configured_driver(Path(tmp), run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-denysrc"})
+        driver.spawn({"agent_instance_id": "agi-denysrc"})
         new_session_call = next(c for c in calls if "new-session" in c)
         claude_argv = _extract_claude_argv_from_pane_command(new_session_call[-1])
         settings_json = json.loads(claude_argv[claude_argv.index("--settings") + 1])
@@ -1941,7 +1803,7 @@ def test_tmux_spawn_warns_on_a_permissions_inert_host_and_still_spawns() -> None
             # instance id -- so the host assertion below passed against a
             # mutant that named the WRONG host. An instrument blind to the
             # question confirms nothing; the id is part of the instrument.
-            host_ref = driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-inert-host"})
+            host_ref = driver.spawn({"agent_instance_id": "agi-inert-host"})
         _check(bool(host_ref), "the tmux spawn PROCEEDS on a permissions-inert host")
         inert = [r for r in records if "PERMISSION DENIES INERT" in r.getMessage()]
         _check(len(inert) == 1, f"exactly one inert-permissions warning (got {len(inert)})")
@@ -1994,7 +1856,7 @@ def test_optional_absence_allows_tmux_spawn_construction() -> None:
         for target in (root / ".claude/hooks").glob("*.py"):
             if target.name != "headless_tool_allowlist_gate.py":
                 target.unlink()
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-optional", "allowed_tools": ["Read"]})
+        driver.spawn({"agent_instance_id": "agi-optional", "allowed_tools": ["Read"]})
         assert any("new-session" in call for call in calls), "tmux optional absence permits next spawn"
         _check(True, "tmux optional absence proceeds with guard present")
 
@@ -2041,7 +1903,7 @@ def test_spawn_applies_provider_env_to_the_worker_pane() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         driver = _configured_driver(tmp_dir, run_fn=_confirm_flow_run_fn(calls))
-        driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-provider-env-1", "provider_env": overlay})
+        driver.spawn({"agent_instance_id": "agi-provider-env-1", "provider_env": overlay})
         new_session_call = next(c for c in calls if "new-session" in c)
         pair = "ANTHROPIC_BASE_URL=https://provider.example.invalid"
         _check(
@@ -2058,7 +1920,7 @@ def test_spawn_applies_provider_env_to_the_worker_pane() -> None:
         )
         before = len(calls)
         try:
-            driver.spawn({**fixture_assignment_record(), "agent_instance_id": "agi-provider-env-2", "provider_env": {"PATH": "/tmp/overlay-path-value"}})
+            driver.spawn({"agent_instance_id": "agi-provider-env-2", "provider_env": {"PATH": "/tmp/overlay-path-value"}})
         except HostCannotSpawnError as exc:
             _check(
                 "PATH" in str(exc) and "/tmp/overlay-path-value" not in str(exc),
@@ -2082,7 +1944,7 @@ def main() -> int:
     # legs' meaning. Scrub the marker once for the whole process; the two legs
     # that genuinely care set and restore it themselves via
     # _effective_env_marker.
-    for marker in _THIRD_PARTY_PROVIDER_ENV_MARKERS:
+    for marker in THIRD_PARTY_PROVIDER_ENV_MARKERS:
         os.environ.pop(marker, None)
     test_tmux_managed_policy_hooks_plugin_only_refuses_spawn()
     test_tmux_managed_policy_acknowledged_degraded_proceeds()
@@ -2100,30 +1962,27 @@ def main() -> int:
     test_spawn_refuses_when_unconfigured()
     test_spawn_refuses_without_agent_instance_id()
     test_spawn_command_and_env_wiring()
-    test_spawn_runs_in_the_provisioned_lane_worktree()
-    test_spawn_without_a_worktree_keeps_the_drivers_default_cwd()
-    test_spawn_refuses_a_declared_worktree_that_is_not_a_checkout()
+    test_spawn_workspace()
     test_spawn_omits_retired_controller_name()
     test_spawn_exports_bash_shell()
     test_spawn_local_name_drives_label_session_name_and_claude_name()
-    test_spawn_without_local_name_keeps_lane_id_behaviour()
+    test_spawn_without_local_name_falls_back_to_the_label()
     test_spawn_threads_allowed_tools_into_env()
     test_spawn_transport_mcp_override_uses_real_mcp_config()
     test_spawn_transport_watch_uses_explicit_empty_mcp_config()
     test_tmux_oversized_command_uses_stdin()
     test_optional_absence_allows_tmux_spawn_construction()
-    test_spawn_settings_json_wires_all_three_hooks_and_the_deny_rule()
+    test_spawn_settings_json_omits_heartbeat_and_keeps_coordination_hooks()
     test_spawn_allow_askuserquestion_omits_it_from_the_deny_list()
     test_spawn_env_session_mapping_spool_dir()
-    test_spawn_env_heartbeat_marker_dir()
-    test_spawn_wires_authority_system_prompt_with_full_substitution()
+    test_spawn_env_has_no_heartbeat_marker_dir()
     test_spawn_wraps_run_fn_failure()
     test_spawn_wraps_nonzero_exit()
     test_capability_report_shape()
     test_driver_channel_enter_waits_for_baseline_change()
     test_driver_channel_fails_open_when_baseline_never_changes()
     test_needs_dev_channels_confirmation_guard()
-    test_provider_ignores_dev_channels_predicate()
+    test_dev_channels_provider_predicate()
     test_effective_spawn_env_is_process_env_plus_optional_overlay()
     test_third_party_provider_spawn_omits_flag_and_skips_confirm_loop()
     test_anthropic_path_keeps_flag_and_confirm_loop_byte_for_byte()
@@ -2131,6 +1990,7 @@ def main() -> int:
     test_spawn_kills_pane_and_fails_closed_when_prompt_never_appears()
     test_spawn_kills_pane_and_fails_closed_when_prompt_never_clears()
     test_emit_role_tag_wrapped_vs_raw()
+    test_real_tier_leaves_the_default_server_alone(_check)
     test_real_tmux_spawn_alive_driver_channel_terminate()
     test_real_tmux_driver_channel_declines_an_occupied_composer_and_sends_nothing()
     test_real_tmux_pane_shell_is_bash()

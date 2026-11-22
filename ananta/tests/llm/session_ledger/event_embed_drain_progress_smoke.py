@@ -45,7 +45,6 @@ Run:
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from collections.abc import Callable
@@ -331,8 +330,6 @@ class _FaultState(StubStateService):
         self.write_keys.append(key)
         if self.fail == ("write", key):
             return dict(_err("kv.write", "unavailable"))
-        if isinstance(value, dict | list):
-            value = json.dumps(value)
         return super().set_key_value(namespace, key, value, scope, ttl)
 
     def delete_key_value(self, namespace: str, key: str, scope: str = "GLOBAL") -> dict[str, Any]:
@@ -477,7 +474,8 @@ def _restart(world: _World) -> None:
 
 
 def _schedule(world: _World) -> None:
-    raw = world.state.key_values.get(("session_ledger", "event_embed_drain_fires", "GLOBAL"), "0")
+    stored = world.state.get_key_value("session_ledger", "event_embed_drain_fires")["data"]["value"]
+    raw = "0" if stored is None else stored
     for _ in range((_RECONCILE_EVERY_FIRES - 1 - int(str(raw))) % _RECONCILE_EVERY_FIRES):
         world.repo.bump_event_embed_drain_counter()
 

@@ -54,7 +54,7 @@ from g_suite_plugin.gmail_settings_spec import BOOL, INT, INT64, OBJECT_LIST, ST
 from g_suite_plugin.gmail_sharing_processes import GmailSharingProcesses  # noqa: E402
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
 from googleapiclient.discovery import build  # noqa: E402
-from gsuite_fakes import connect_accounts  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import connect_accounts  # noqa: E402
 
 KB_DIR = REPO_ROOT / "plugins" / "g_suite_plugin" / "knowledge_base" / "processes"
 DISCOVERY = json.loads((Path(__file__).parent / "fixtures" / "gmail_settings_discovery.json").read_text())
@@ -492,8 +492,8 @@ def check_registration() -> None:
 
 
 def main() -> int:
-    from gmail_settings_entity_query_cases import GmailSettingsEntityQueryTests  # pyright: ignore[reportMissingImports]
-    from gmail_settings_rework_cases import GmailSettingsReworkTests  # pyright: ignore[reportMissingImports]
+    from gmail_settings_entity_query_cases import GmailSettingsEntityQueryTests
+    from gmail_settings_rework_cases import GmailSettingsReworkTests
 
     print("\ng_suite_plugin Gmail build 2 smoke (settings, push; real client, recorded HTTP)")
     print("=" * 60)

@@ -18,6 +18,8 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "salesforce_plugin" / "src"))
 from salesforce_plugin import async_jobs, completion_templates, request_actions  # noqa: E402
 from salesforce_plugin.client import SalesforceCliExecutor  # noqa: E402
 from salesforce_plugin.errors import SalesforceServiceError  # noqa: E402
+from salesforce_plugin.org_service import ResolvedOrg  # noqa: E402
+from salesforce_plugin.orgs import OrgBinding  # noqa: E402
 from salesforce_plugin.plugin import SalesforcePlugin  # noqa: E402
 
 
@@ -238,6 +240,11 @@ class AuthenticatedRequestTests(unittest.TestCase):
     def test_registration_and_deferred_completion(self) -> None:
         plugin = SalesforcePlugin()
         plugin._cli_executor = self.executor  # noqa: SLF001
+        # Build 6: the worker runs the request against the bound org it resolves.
+        binding = OrgBinding(org_id="00DR0000000Q7PqMAK", alias="prod", target_org="bound-org", username="operator@example.com", instance_host="example.my.salesforce.com")
+        orgs = MagicMock()
+        orgs.resolve.return_value = ResolvedOrg(binding=binding, executor=self.executor)
+        plugin._orgs = orgs  # noqa: SLF001
         manager = MagicMock()
         manager.create_job.return_value = {"action_status": "completed", "data": {"job_id": "job", "status": "queued"}}
         params = {"method": "DELETE", "path": "/services/data/v62.0/sobjects/Account/001x"}
@@ -248,6 +255,7 @@ class AuthenticatedRequestTests(unittest.TestCase):
         manager.get_job_payload.return_value = {"action_status": "completed", "data": {"payload": params}}
         async_jobs._process_job(plugin, manager, "job", "authenticated_request")  # noqa: SLF001
         self.assertEqual(manager.update_job.call_args.args[1]["result"]["status"], 204)
+        self.assertEqual((manager.update_job.call_args.args[1]["result"]["org"], manager.update_job.call_args.args[1]["result"]["org_id"]), ("prod", binding.org_id))
         self.assertIn("authenticated_request", plugin.get_edge_process_definitions())
         guidance = " ".join(completion_templates._instructions("authenticated_request", "result"))  # noqa: SLF001
         self.assertIn("may have changed vendor state", guidance)

@@ -18,10 +18,10 @@ from unittest.mock import patch
 REPO_ROOT = Path(__file__).resolve().parents[3]
 COMMON = Path(os.environ.get("RECOVERY_TEST_COMMON", str(REPO_ROOT / "plugins/github_midwife_plugin/coordination_hooks_common")))
 sys.path.insert(0, str(COMMON))
-import recovery_git as git_module  # noqa: E402  # pyright: ignore[reportMissingImports]
-import recovery_refs as ref_module  # noqa: E402  # pyright: ignore[reportMissingImports]
-import recovery_rules as rules_module  # noqa: E402  # pyright: ignore[reportMissingImports]
-import working_tree_recovery as recovery  # noqa: E402  # pyright: ignore[reportMissingImports] - standalone sibling modules
+import recovery_git as git_module  # noqa: E402
+import recovery_refs as ref_module  # noqa: E402
+import recovery_rules as rules_module  # noqa: E402
+import working_tree_recovery as recovery  # noqa: E402 - standalone sibling modules
 
 Json = dict[str, Any]
 CANARY = b"C4_IGNORED_GITIGNORE_CANARY_6e34d91b"

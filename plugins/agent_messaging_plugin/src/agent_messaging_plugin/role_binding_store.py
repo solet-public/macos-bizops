@@ -47,7 +47,6 @@ from ananta.llm.agent_messaging.role_binding import (
     COL_ORIGIN,
     COL_PROPERTIES,
     COL_ROLE,
-    COL_ROLE_CLASS,
     COL_SESSION_LABEL,
     HOLDER_KIND_INFERENCE_PROVIDER,
     HOLDER_KIND_SESSION,
@@ -153,7 +152,8 @@ class RoleBindingVacantError(Exception):
 
 
 def resolve_role_binding(
-    state: StateManagementInterface, name: str,
+    state: StateManagementInterface,
+    name: str,
 ) -> ResolvedRole:
     """Resolve a role name to its current routing target (single state read).
 
@@ -196,14 +196,17 @@ def _coerce_identity(name: str, identity_raw: object) -> dict[str, object]:
             parsed = json.loads(identity_raw)
         except (ValueError, TypeError) as exc:
             raise RoleBindingMalformedError(
-                name, f"holder_identity is not valid JSON: {exc}",
+                name,
+                f"holder_identity is not valid JSON: {exc}",
             ) from exc
         return parsed if isinstance(parsed, dict) else {}
     return {}
 
 
 def _parse_holder_identity(
-    name: str, holder_kind: str, identity_raw: object,
+    name: str,
+    holder_kind: str,
+    identity_raw: object,
 ) -> tuple[str, str, dict[str, object]]:
     """Typed, fail-loud per-``holder_kind`` parse of ``holder_identity`` (§4.6).
 
@@ -226,7 +229,8 @@ def _parse_holder_identity(
 
 
 def resolve_role_binding_v4(
-    state: StateManagementInterface, name: str,
+    state: StateManagementInterface,
+    name: str,
 ) -> ResolvedRole:
     """Resolve a role via the v4 ``role_binding`` table — one read + typed parse.
 
@@ -258,7 +262,9 @@ def resolve_role_binding_v4(
     row = records[0]
     holder_kind = str(row.get(COL_HOLDER_KIND) or HOLDER_KIND_SESSION)
     agent_id, session_label, identity = _parse_holder_identity(
-        name, holder_kind, row.get(COL_HOLDER_IDENTITY),
+        name,
+        holder_kind,
+        row.get(COL_HOLDER_IDENTITY),
     )
     return ResolvedRole(
         name=name,
@@ -272,7 +278,8 @@ def resolve_role_binding_v4(
 
 
 def list_roles_for_agent_instance(
-    state: StateManagementInterface, agent_instance_id: str,
+    state: StateManagementInterface,
+    agent_instance_id: str,
 ) -> list[str]:
     """Return role names currently bound to ``agent_instance_id``.
 
@@ -303,7 +310,8 @@ def list_roles_for_agent_instance(
 
 
 def sole_role_for_reply_address(
-    state: StateManagementInterface | None, agent_instance_id: str,
+    state: StateManagementInterface | None,
+    agent_instance_id: str,
 ) -> str:
     """The sender's role when it is usable as a durable REPLY ADDRESS, else ``""``.
 
@@ -330,8 +338,7 @@ def sole_role_for_reply_address(
         roles = list_roles_for_agent_instance(state, agent_instance_id)
     except Exception:  # noqa: BLE001 — a reply-address hint never breaks a send
         logger.warning(
-            "reply-address role lookup failed for agent_instance_id=%s; "
-            "falling back to the instance reply-to",
+            "reply-address role lookup failed for agent_instance_id=%s; falling back to the instance reply-to",
             agent_instance_id,
             exc_info=True,
         )
@@ -342,8 +349,7 @@ def sole_role_for_reply_address(
         # Named, not counted: whoever builds DEF-3 needs the population, and a
         # bare "2 roles" line would make them go find out which.
         logger.info(
-            "agent_instance_id=%s holds %d roles %r — using the instance "
-            "reply-to, not an arbitrary role (DEF-3)",
+            "agent_instance_id=%s holds %d roles %r — using the instance reply-to, not an arbitrary role (DEF-3)",
             agent_instance_id,
             len(roles),
             roles,
@@ -363,8 +369,7 @@ class RoleClaimContendedError(Exception):
     def __init__(self, name: str, attempts: int, last_detail: str) -> None:
         self.name = name
         super().__init__(
-            f"role_claim_contended: role {name!r} did not converge in "
-            f"{attempts} attempts; last state-op detail: {last_detail}",
+            f"role_claim_contended: role {name!r} did not converge in {attempts} attempts; last state-op detail: {last_detail}",
         )
 
 
@@ -390,7 +395,10 @@ def _binding_record(name: str, claim: HolderClaim) -> dict[str, object]:
 
 
 def _outcome(
-    action: str, name: str, agent_instance_id: str, prior: ResolvedRole | None,
+    action: str,
+    name: str,
+    agent_instance_id: str,
+    prior: ResolvedRole | None,
 ) -> dict[str, object]:
     """Uniform claim outcome envelope (``prior`` drives the §5.4 notify)."""
     return {
@@ -408,14 +416,14 @@ def _require_inserted(result: object) -> bool:
     inserted = inner.get("inserted") if isinstance(inner, dict) else None
     if not isinstance(inserted, bool):
         raise StateOperationError(
-            "state upsert role_binding returned no bool 'inserted' "
-            f"(got {inserted!r})",
+            f"state upsert role_binding returned no bool 'inserted' (got {inserted!r})",
         )
     return inserted
 
 
 def _read_binding_row(
-    state: StateManagementInterface, external_id: str,
+    state: StateManagementInterface,
+    external_id: str,
 ) -> dict[str, object] | None:
     """Read the live ``role_binding`` row (``is_deleted=0``) or ``None`` if vacant.
 
@@ -512,16 +520,17 @@ def _attempt_claim_existing(
     session it displaced.
     """
     epoch = _row_epoch(row)
-    is_self = bool(claim.agent_session_id) and (
-        str(row.get(COL_AGENT_SESSION_ID) or "") == claim.agent_session_id
-    )
+    is_self = bool(claim.agent_session_id) and (str(row.get(COL_AGENT_SESSION_ID) or "") == claim.agent_session_id)
     new_epoch = epoch if is_self else epoch + 1
-    if _cas_write(
-        state,
-        external_id=role_binding_external_id(name),
-        expected_epoch=epoch,
-        updates=_holder_fields(claim, claim_epoch=new_epoch),
-    ) != 1:
+    if (
+        _cas_write(
+            state,
+            external_id=role_binding_external_id(name),
+            expected_epoch=epoch,
+            updates=_holder_fields(claim, claim_epoch=new_epoch),
+        )
+        != 1
+    ):
         return None
     if is_self:
         return _outcome("refreshed", name, claim.agent_instance_id, None)
@@ -529,7 +538,10 @@ def _attempt_claim_existing(
 
 
 def claim_role_binding_v4(
-    state: StateManagementInterface, *, name: str, claim: HolderClaim,
+    state: StateManagementInterface,
+    *,
+    name: str,
+    claim: HolderClaim,
 ) -> dict[str, object]:
     """Race-safe claim/displace of the v4 ``role_binding`` row (§5.1).
 
@@ -587,7 +599,9 @@ def claim_role_binding_v4(
 
 
 def holds_role(
-    state: StateManagementInterface, name: str, agent_session_id: str,
+    state: StateManagementInterface,
+    name: str,
+    agent_session_id: str,
 ) -> bool:
     """§5.0 act-time ownership re-check: does ``agent_session_id`` STILL hold ``name``?
 
@@ -610,7 +624,10 @@ def holds_role(
 
 
 def holds_role_for_instance(
-    state: StateManagementInterface, name: str, agent_session_id: str, agent_instance_id: str,
+    state: StateManagementInterface,
+    name: str,
+    agent_session_id: str,
+    agent_instance_id: str,
 ) -> bool:
     """Registration readback requires both the stable session and current instance.
 
@@ -623,11 +640,7 @@ def holds_role_for_instance(
         resolved = resolve_role_binding_v4(state, name)
     except RoleBindingVacantError:
         return False
-    return (
-        resolved.holder_kind == HOLDER_KIND_SESSION
-        and resolved.agent_session_id == agent_session_id
-        and resolved.agent_instance_id == agent_instance_id
-    )
+    return resolved.holder_kind == HOLDER_KIND_SESSION and resolved.agent_session_id == agent_session_id and resolved.agent_instance_id == agent_instance_id
 
 
 def upsert_role_entity(
@@ -667,116 +680,6 @@ def upsert_role_entity(
         ),
         "upsert role entity",
     )
-
-
-class RoleClassConflictError(Exception):
-    """A governance act tried to legislate ``name`` with a role_class DIFFERENT
-    from the one already on record — never silently reassigned.
-
-    §3.1 Q1 corollary: class-assignment is a governance act, never an ambient
-    side-effect, so a conflicting re-run is a genuine policy refusal (the same
-    posture ``session_lifecycle_verbs._validate_spawn_role``'s
-    ``role_class_conflict`` already takes at spawn time), not idempotency.
-    """
-
-    def __init__(self, name: str, existing_class: str, requested_class: str) -> None:
-        self.name = name
-        self.existing_class = existing_class
-        self.requested_class = requested_class
-        super().__init__(
-            f"role_class_conflict: role {name!r} is already legislated "
-            f"role_class={existing_class!r}, not the requested {requested_class!r}.",
-        )
-
-
-def _read_role_entity_row(
-    state: StateManagementInterface, external_id: str,
-) -> dict[str, object] | None:
-    records = require_records(
-        state.query_state(
-            AGENT_ROLE_BINDING_NAMESPACE,
-            {"table": TABLE_ROLE, "filters": {_COL_EXTERNAL_ID: external_id}},
-        ),
-    )
-    return records[0] if records else None
-
-
-def legislate_role_class(
-    state: StateManagementInterface,
-    *,
-    name: str,
-    role_class: str,
-    directed_by: str,
-    unit_id: str,
-    revision_id: str,
-) -> str:
-    """Governance-act creation of the ``role`` entity row with ``role_class``
-    stamped AT BIRTH — the ONE sanctioned path that assigns an authority-
-    carrying class (§3.1 Q1: claim-time is enforce-by-class, never
-    class-assignment; ``upsert_role_entity``'s record deliberately excludes
-    ``role_class`` so ordinary claim traffic structurally cannot touch it —
-    the only other writer is ``role_class_backfill.py``'s one-shot, same-shaped
-    targeted ``update_state``).
-
-    Race-safe first-write: an INSERT race primitive
-    (``on_conflict='do_nothing'``, the same device ``claim_role_binding_v4``
-    uses for its first-claim). A lost race re-reads the live row: the SAME
-    class already on record is an idempotent no-op re-run
-    (``'already_legislated'``); a DIFFERENT class raises
-    :class:`RoleClassConflictError` rather than silently reassigning it.
-
-    ``directed_by`` / registered Unit revision are best-effort provenance on the row's
-    ``description``/``properties`` (NOT the durable audit trail — those two
-    columns are overwritten by every subsequent ordinary claim's
-    ``upsert_role_entity(state, name=name)`` call, which is pre-existing D1
-    behavior, out of this act's scope to change); the loud log line below and
-    the platform's own action/session-ledger record of this call are the
-    actual audit trail (the settled ruling: "audit is the record").
-
-    Returns ``'legislated'`` (fresh) or ``'already_legislated'`` (idempotent
-    re-run).
-    """
-    external_id = role_binding_external_id(name)
-    record = {
-        _COL_EXTERNAL_ID: external_id,
-        COL_ROLE: name,
-        COL_ROLE_CLASS: role_class,
-        COL_ORIGIN: ROLE_ORIGIN_USER,
-        COL_DESCRIPTION: f"legislated role_class={role_class}",
-        COL_PROPERTIES: json.dumps(
-            {"directed_by": directed_by, "unit_id": unit_id, "revision_id": revision_id, "legislated_at": _now_iso()},
-        ),
-    }
-    insert_result = require_completed(
-        state.upsert_state(
-            AGENT_ROLE_BINDING_NAMESPACE,
-            {
-                "table": TABLE_ROLE,
-                "record": record,
-                "conflict_columns": [_COL_EXTERNAL_ID],
-                "on_conflict": "do_nothing",
-            },
-        ),
-        "legislate role entity",
-    )
-    inner = insert_result.get("result")
-    inserted = bool(inner.get("inserted")) if isinstance(inner, dict) else False
-    if inserted:
-        logger.warning(
-            "GOVERNANCE ACT: role %r legislated role_class=%r directed_by=%r "
-            "unit_id=%r revision_id=%r", name, role_class, directed_by, unit_id, revision_id,
-        )
-        return "legislated"
-    existing = _read_role_entity_row(state, external_id)
-    existing_class = str((existing or {}).get(COL_ROLE_CLASS) or "")
-    if existing_class == role_class:
-        logger.info(
-            "GOVERNANCE ACT: role %r already legislated role_class=%r — "
-            "idempotent re-run, directed_by=%r unit_id=%r revision_id=%r",
-            name, role_class, directed_by, unit_id, revision_id,
-        )
-        return "already_legislated"
-    raise RoleClassConflictError(name, existing_class, role_class)
 
 
 def ingest_role_entity(
@@ -837,13 +740,18 @@ def refresh_role_binding_cas(
     if evidence.contradicts(new_agent_instance_id):
         logger.error(
             "role refresh contradiction: session=%s expected=%s new=%s predecessor_parent=%s registering_parent=%s",
-            agent_session_id, evidence.expected_agent_instance_id, new_agent_instance_id,
-            evidence.predecessor_parent_pid, evidence.registering_parent_pid,
+            agent_session_id,
+            evidence.expected_agent_instance_id,
+            new_agent_instance_id,
+            evidence.predecessor_parent_pid,
+            evidence.registering_parent_pid,
         )
         return 0
     advise_missing_attribution(
-        state, agent_session_id=agent_session_id,
-        new_agent_instance_id=new_agent_instance_id, evidence=evidence,
+        state,
+        agent_session_id=agent_session_id,
+        new_agent_instance_id=new_agent_instance_id,
+        evidence=evidence,
     )
     filters: dict[str, object] = {
         COL_AGENT_SESSION_ID: agent_session_id,
@@ -867,7 +775,8 @@ def refresh_role_binding_cas(
 
 
 def release_role_binding(
-    state: StateManagementInterface, name: str,
+    state: StateManagementInterface,
+    name: str,
 ) -> dict[str, object]:
     """HARD-delete the single ``role:{name}`` binding (``peer_release_role``).
 
@@ -892,7 +801,8 @@ def release_role_binding(
 
 
 def release_role_binding_v4(
-    state: StateManagementInterface, name: str,
+    state: StateManagementInterface,
+    name: str,
 ) -> dict[str, object]:
     """§9/§6.1 v4 release — HARD-delete the single ``role:{name}`` ``role_binding`` row.
 
@@ -951,7 +861,9 @@ def _migrated_binding_record(name: str, legacy_row: dict[str, object]) -> dict[s
 
 
 def _migrate_role_entity(
-    state: StateManagementInterface, name: str, memory_service: object | None,
+    state: StateManagementInterface,
+    name: str,
+    memory_service: object | None,
 ) -> None:
     """Upsert the ``role`` entity for a migrated name + best-effort memory ingest (§7)."""
     memory_id = ingest_role_entity(memory_service, name=name) or ""
@@ -971,7 +883,8 @@ def _legacy_row_is_migratable(row: dict[str, object]) -> bool:
 
 
 def migrate_agent_role_binding_to_v4(
-    state: StateManagementInterface, memory_service: object | None = None,
+    state: StateManagementInterface,
+    memory_service: object | None = None,
 ) -> dict[str, object]:
     """§9.3 idempotent migration copy: ``agent_role_binding`` → ``role`` + ``role_binding``.
 
@@ -1007,9 +920,7 @@ def migrate_agent_role_binding_to_v4(
         if not _legacy_row_is_migratable(row):
             skipped_malformed += 1
             logger.warning(
-                "slice-D migration: SKIP malformed legacy role %r (empty agent_id — "
-                "not a valid v4 session holder; it becomes vacant/re-claimable rather "
-                "than a live-routing throw).",
+                "slice-D migration: SKIP malformed legacy role %r (empty agent_id — not a valid v4 session holder; it becomes vacant/re-claimable rather than a live-routing throw).",
                 name,
             )
             continue
@@ -1032,9 +943,7 @@ def migrate_agent_role_binding_to_v4(
             # diagnosable from a name + the raw result, never silently bucketed.
             skipped_rejected += 1
             logger.error(
-                "slice-D migration: role %r REJECTED by the role_binding write and no "
-                "v4 row exists — a genuine write fault (schema drift / constraint), NOT "
-                "an idempotent conflict. Result: %s",
+                "slice-D migration: role %r REJECTED by the role_binding write and no v4 row exists — a genuine write fault (schema drift / constraint), NOT an idempotent conflict. Result: %s",
                 name,
                 insert_result,
             )
@@ -1102,9 +1011,7 @@ class CutoverParityError(RuntimeError):
     def __init__(self, parity: dict[str, object], migrate_result: dict[str, object]) -> None:
         self.parity = parity
         super().__init__(
-            f"§9 cutover parity FAILED — legacy bindings absent from v4: "
-            f"{parity.get('missing')} (migrate={migrate_result}). Re-run the "
-            f"idempotent migrate until parity passes.",
+            f"§9 cutover parity FAILED — legacy bindings absent from v4: {parity.get('missing')} (migrate={migrate_result}). Re-run the idempotent migrate until parity passes.",
         )
 
 
@@ -1118,7 +1025,8 @@ def _cutover_migration_done(state: StateManagementInterface) -> bool:
 
 
 def run_cutover_migration_at_readiness(
-    state: StateManagementInterface, memory_service: object | None = None,
+    state: StateManagementInterface,
+    memory_service: object | None = None,
 ) -> dict[str, object]:
     """§9 one-shot cutover migration for GREEN READINESS — a PRE-SERVE HARD GATE.
 
@@ -1157,7 +1065,6 @@ __all__ = [
     "RoleBindingMalformedError",
     "RoleBindingVacantError",
     "RoleClaimContendedError",
-    "RoleClassConflictError",
     "claim_role_binding_v4",
     "holds_role",
     "holds_role_for_instance",
@@ -1170,7 +1077,6 @@ __all__ = [
     "resolve_role_binding",
     "resolve_role_binding_v4",
     "run_cutover_migration_at_readiness",
-    "legislate_role_class",
     "session_claim_requires_session_id",
     "upsert_role_entity",
     "verify_migration_parity",

@@ -57,33 +57,35 @@ COMPACTION_RESERVE_FRACTION: float = 0.10
 DEFAULT_HARD_CLEAR_TOKENS: int = 400_000
 NOTICE_MODEL_WINDOWS: dict[tuple[str, str | None], NoticeModelWindow] = {
     ("claude-fable-5", None): NoticeModelWindow(
-        1_000_000, "Anthropic model catalog; tracked 2026-08-07",
+        1_000_000,
+        "Anthropic model catalog; tracked 2026-08-07",
     ),
     ("claude-fable-5-1", None): NoticeModelWindow(
-        None, "unverified-model-window",
+        None,
+        "unverified-model-window",
     ),
     ("claude-sonnet-5", None): NoticeModelWindow(
-        1_000_000, "Anthropic model catalog; tracked 2026-08-07",
+        1_000_000,
+        "Anthropic model catalog; tracked 2026-08-07",
     ),
     ("claude-opus-5", None): NoticeModelWindow(
-        1_000_000, "Anthropic model catalog; tracked 2026-08-07",
+        1_000_000,
+        "Anthropic model catalog; tracked 2026-08-07",
     ),
     ("claude-haiku-4-5", None): NoticeModelWindow(
-        200_000, "Anthropic model catalog; tracked 2026-08-07",
+        200_000,
+        "Anthropic model catalog; tracked 2026-08-07",
     ),
     ("claude-haiku-4-5-20251001", None): NoticeModelWindow(
-        200_000, "Anthropic model catalog; tracked 2026-08-07",
+        200_000,
+        "Anthropic model catalog; tracked 2026-08-07",
     ),
 }
 
 # Known catalog IDs whose context window is not verified remain in the notice
 # table with a None value and an explicit source marker. They are excluded from
 # the integer ceiling map but remain distinguishable from unknown models.
-UNVERIFIED_MODEL_IDS: frozenset[str] = frozenset(
-    model
-    for (model, effort), entry in NOTICE_MODEL_WINDOWS.items()
-    if effort is None and entry.window_tokens is None
-)
+UNVERIFIED_MODEL_IDS: frozenset[str] = frozenset(model for (model, effort), entry in NOTICE_MODEL_WINDOWS.items() if effort is None and entry.window_tokens is None)
 
 
 class UnverifiedModelWindowWarning(UserWarning):
@@ -92,11 +94,7 @@ class UnverifiedModelWindowWarning(UserWarning):
 
 # Legacy capacity callers retain this public map, derived from the declarative
 # notice table so a static window is never defined twice.
-MODEL_CONTEXT_CEILINGS: dict[str, int] = {
-    model: entry.window_tokens
-    for (model, effort), entry in NOTICE_MODEL_WINDOWS.items()
-    if effort is None and entry.window_tokens is not None
-}
+MODEL_CONTEXT_CEILINGS: dict[str, int] = {model: entry.window_tokens for (model, effort), entry in NOTICE_MODEL_WINDOWS.items() if effort is None and entry.window_tokens is not None}
 
 # Conservative fallback for any model NOT present in MODEL_CONTEXT_CEILINGS
 # above (e.g. a future release not yet added). Chosen deliberately small so
@@ -186,10 +184,10 @@ ROTATION_THRESHOLD_FRACTION: float = 0.5
 #
 # THE ONE THING IN THE FORMULA THAT LEGITIMATELY VARIES IS CACHE TTL, not
 # model -- see CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE.
-WARM_BAND_KEEP_WORKING_TOKENS: int = 150_000      # under this: keep working
-WARM_BAND_TASK_BOUNDARY_TOKENS: int = 200_000     # 150-200K: next natural boundary
-WARM_BAND_SAFE_CHECKPOINT_TOKENS: int = 300_000   # over 200K: first safe checkpoint
-                                                  # over 300K: immediately
+WARM_BAND_KEEP_WORKING_TOKENS: int = 150_000  # under this: keep working
+WARM_BAND_TASK_BOUNDARY_TOKENS: int = 200_000  # 150-200K: next natural boundary
+WARM_BAND_SAFE_CHECKPOINT_TOKENS: int = 300_000  # over 200K: first safe checkpoint
+# over 300K: immediately
 
 # ---------------------------------------------------------------------------
 # CAPACITY BANDS (2026-08-17). The genuine model-dependence, on its own axis.
@@ -237,7 +235,7 @@ CAPACITY_BAND_CRITICAL_FRACTION: float = 0.90
 # (see below): the seat pickup prompt was replaced wholesale by the
 # pointer-card protocol, and 102,665 prices the PRE-pointer-card pickup.
 # Source data: the SURFACE-1 RESULT entries in the 2026-08-19 H-reduction
-# link-first charter under workbench/, nine live link-first seat pickups,
+# link-first brief under workbench/, nine live link-first seat pickups,
 # v21 through v29, all on 2026-08-19:
 #
 #   v21 36,999 · v22 40,573 · v23 58,513 · v24 38,415 · v25 43,586
@@ -401,74 +399,15 @@ CACHE_WRITE_PREMIUM_MULTIPLIER: int = 20
 # `classify_cache_state` ALREADY DETECTS THAT and already returns
 # `overage_signature` as a field distinct from `cold`. The measurement existed
 # and nothing consumed it for this purpose until 2026-08-17.
-CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE: float = (
-    CACHE_WRITE_MULTIPLIER_5M / CACHE_READ_MULTIPLIER
-)
+CACHE_WRITE_PREMIUM_MULTIPLIER_OVERAGE: float = CACHE_WRITE_MULTIPLIER_5M / CACHE_READ_MULTIPLIER
 
 # Prompt-cache lifetimes. The policy's words are "idle" and "in usage overage";
 # the code measures CACHE EXPIRY, because overage MANIFESTS as cache expiry and
 # the account state itself is not observable to this platform (searched
 # 2026-08-16: no signal found -- which is not the same claim as none existing).
-CACHE_TTL_SECONDS: int = 3_600        # nominal 1-hour prompt-cache TTL
-OVERAGE_TTL_SECONDS: int = 300        # TTL collapses to ~5 min while in overage
-OVERAGE_MIN_COLD_CALLS: int = 2       # "repeated", never a single cold call
-
-# P4 -- idle-boundary seat watcher thresholds (P4(a) ratification, condition 4,
-# 2026-08-07). The watcher polls the seat's idle state out-of-process; these
-# four constants are its only tunable surface.
-#
-# Early-vs-late rotation trade-off (documentation REQUIRED by ratification
-# condition 4, not optional commentary): IDLE_ROTATE_THRESHOLD_SECONDS fires
-# BEFORE the measured ~45-60 minute prompt-cache TTL, not at or after it.
-#   - Rotating EARLY (pre-expiry) spends some of the still-warm cache on a
-#     rotation that technically didn't NEED to happen yet -- the session was
-#     still inside its warm window. The payoff: it GUARANTEES that any poke
-#     fired after this point lands in a freshly-cleared, cheap context rather
-#     than risking a poke landing just past the expiry boundary and paying a
-#     full cold re-warm on the very message that was time-sensitive enough to
-#     need a poke in the first place.
-#   - Rotating LATE (at/after expiry) preserves the warm window for longer
-#     (more turns before any rotation cost is paid at all), but risks exactly
-#     the 2026-08-07 incident this watcher exists to prevent: a poke or an
-#     operator turn arriving just after expiry pays the full re-warm cost
-#     regardless, with no advance warning and no cheaper alternative available.
-# The chosen threshold (2100s = 35 min) trades a small amount of warm-window
-# time for eliminating that late-poke worst case -- deliberate, not a rounding
-# choice. See the per-constant comment below for the specific margin math.
-WATCH_POLL_INTERVAL_SECONDS = 60
-"""How often the watcher wakes to check idle state. Cheap per tick (one
-`ps eww`, one file stat, occasionally one iTerm2 read or one `peer_inbox`
-call) -- 60s balances promptness against the watcher's own steady-state cost,
-never spending a model/inference call at any interval."""
-
-IDLE_POKE_THRESHOLD_SECONDS = 300
-"""Idle duration (5 min) past which, IF the seat's role inbox has pending
-entries, the watcher injects a short wake turn (poke) rather than waiting for
-the rotate threshold. Deliberately much shorter than the rotate threshold --
-draining real pending mail promptly is the point of the poke path; a poke
-also naturally resets the idle clock, deferring the rotate question."""
-
-IDLE_ROTATE_THRESHOLD_SECONDS = 2100
-"""Idle duration (35 min) past which the watcher fires the full rotation
-helper, with no pending-inbox precondition. Margined below the fleet's own
-measured ~45-60 minute prompt-cache TTL (memory:
-no-session-idles-past-cache-expiry) by roughly a 10-minute floor under the
-conservative 45-minute figure -- room for the watcher's own poll latency
-(<=WATCH_POLL_INTERVAL_SECONDS) plus the rotation sequence's own worst-case
-run time (settle timeout up to 120s + the submit-confirm step), so the
-rotation completes and lands the seat in a fresh session BEFORE the cache
-would have expired anyway. See the trade-off note above for why firing
-before expiry, not at it, is the entire point of this threshold existing at
-all. Not live-measured against a real cache-expiry event this pass --
-proposed with rationale (P4(a).4), ratified as-is (condition 4)."""
-
-POKE_COOLDOWN_SECONDS = 1800
-"""After a poke fires, the watcher holds off re-poking for 30 min even if the
-inbox still shows pending entries -- prevents spamming a seat that is idle
-for a reason (e.g. the operator stepped away) with repeated pokes for the
-same still-unread mail. A successful poke that produces activity naturally
-resets the idle clock anyway; this cooldown covers the case where the poke
-lands but the seat stays idle regardless."""
+CACHE_TTL_SECONDS: int = 3_600  # nominal 1-hour prompt-cache TTL
+OVERAGE_TTL_SECONDS: int = 300  # TTL collapses to ~5 min while in overage
+OVERAGE_MIN_COLD_CALLS: int = 2  # "repeated", never a single cold call
 
 
 def resolve_ceiling(model: str) -> int:
@@ -480,8 +419,7 @@ def resolve_ceiling(model: str) -> int:
     ceiling, provenance = resolve_ceiling_with_provenance(model)
     if provenance == "unverified-model-window":
         warnings.warn(
-            f"context window for recognized model {model!r} is unverified; "
-            f"using conservative ceiling {ceiling}",
+            f"context window for recognized model {model!r} is unverified; using conservative ceiling {ceiling}",
             UnverifiedModelWindowWarning,
             stacklevel=2,
         )
@@ -546,7 +484,10 @@ def configured_hard_clear_tokens() -> int:
 
 
 def resolve_notice_window(
-    *, model: str, effort: str, runtime_window_tokens: int | None,
+    *,
+    model: str,
+    effort: str,
+    runtime_window_tokens: int | None,
 ) -> tuple[int | None, str, bool]:
     """Prefer a runtime window; otherwise return a sourced static fallback.
 
@@ -601,25 +542,29 @@ def rotation_notice_decision(input: RotationNoticeInput) -> RotationNoticeDecisi
 
 
 def rotation_notice_verdict(
-    *, model: str, effort: str, current_tokens: int,
-    runtime_window_tokens: int | None, configured_hard_clear_tokens: int | None = None,
+    *,
+    model: str,
+    effort: str,
+    current_tokens: int,
+    runtime_window_tokens: int | None,
+    configured_hard_clear_tokens: int | None = None,
 ) -> RotationNoticeDecision:
     """Resolve notice evidence then call the pure strategy entry point."""
     window, source, unrecognized = resolve_notice_window(
-        model=model, effort=effort, runtime_window_tokens=runtime_window_tokens,
-    )
-    decision = rotation_notice_decision(RotationNoticeInput(
         model=model,
         effort=effort,
-        window_tokens=window,
-        current_tokens=current_tokens,
-        configured_hard_clear_tokens=(
-            configured_hard_clear_tokens
-            if configured_hard_clear_tokens is not None
-            else configured_hard_clear_tokens_from_runtime()
-        ),
-        window_source=source,
-    ))
+        runtime_window_tokens=runtime_window_tokens,
+    )
+    decision = rotation_notice_decision(
+        RotationNoticeInput(
+            model=model,
+            effort=effort,
+            window_tokens=window,
+            current_tokens=current_tokens,
+            configured_hard_clear_tokens=(configured_hard_clear_tokens if configured_hard_clear_tokens is not None else configured_hard_clear_tokens_from_runtime()),
+            window_source=source,
+        )
+    )
     if decision.unrecognized_model != unrecognized:
         raise ValueError("notice window recognition changed during decision")
     return decision
@@ -631,7 +576,10 @@ def configured_hard_clear_tokens_from_runtime() -> int:
 
 
 def is_rotation_due(
-    *, model: str, current_tokens: int, cache_cold: bool | None = None,
+    *,
+    model: str,
+    current_tokens: int,
+    cache_cold: bool | None = None,
 ) -> bool:
     """``True`` when either rotation axis says rotate, against ``model``'s
     resolved ceiling (:func:`resolve_ceiling`).
@@ -697,12 +645,8 @@ __all__ = [
     "rotation_due_verdict",
     "rotation_surface_verdict",
     "write_premium_multiplier",
-    "IDLE_POKE_THRESHOLD_SECONDS",
-    "IDLE_ROTATE_THRESHOLD_SECONDS",
     "MODEL_CONTEXT_CEILINGS",
-    "POKE_COOLDOWN_SECONDS",
     "ROTATION_THRESHOLD_FRACTION",
-    "WATCH_POLL_INTERVAL_SECONDS",
     "is_rotation_due",
     "is_rotation_due_for_ceiling",
     "resolve_ceiling",
@@ -797,37 +741,21 @@ def _action_evaluation(
     action = calibration.action
     if calibration.post_action_prefix_tokens <= 0:
         raise ValueError(
-            f"{action}.post_action_prefix_tokens must be positive, got "
-            f"{calibration.post_action_prefix_tokens}",
+            f"{action}.post_action_prefix_tokens must be positive, got {calibration.post_action_prefix_tokens}",
         )
     if calibration.one_time_cost_units < 0:
         raise ValueError(
-            f"{action}.one_time_cost_units must be non-negative, got "
-            f"{calibration.one_time_cost_units}",
+            f"{action}.one_time_cost_units must be non-negative, got {calibration.one_time_cost_units}",
         )
     if calibration.post_action_prefix_tokens >= ceiling:
         raise ValueError(
             f"{action}.post_action_prefix_tokens must be below ceiling {ceiling}",
         )
-    if (
-        not calibration.calibration_profile_id.strip()
-        or not calibration.calibration_profile_version.strip()
-    ):
+    if not calibration.calibration_profile_id.strip() or not calibration.calibration_profile_version.strip():
         raise ValueError(f"{action} calibration needs profile id and version")
-    recurring = (
-        expected_calls_after
-        * calibration.post_action_prefix_tokens
-        * cache_read_multiplier
-    )
-    denominator = (
-        (current_tokens - calibration.post_action_prefix_tokens)
-        * cache_read_multiplier
-    )
-    horizon = (
-        calibration.one_time_cost_units / denominator
-        if denominator > 0
-        else None
-    )
+    recurring = expected_calls_after * calibration.post_action_prefix_tokens * cache_read_multiplier
+    denominator = (current_tokens - calibration.post_action_prefix_tokens) * cache_read_multiplier
+    horizon = calibration.one_time_cost_units / denominator if denominator > 0 else None
     return CalculatedActionEvaluation(
         action=action,
         post_action_prefix_tokens=calibration.post_action_prefix_tokens,
@@ -858,16 +786,8 @@ def _choose_calculated_action(
         evaluations,
         key=lambda evaluation: (evaluation.projected_total_cost_units, evaluation.action),
     )
-    economic_choice = (
-        economic_action.action
-        if economic_action.projected_total_cost_units < keep_cost
-        else "keep"
-    )
-    chosen = (
-        economic_choice
-        if capacity_band_name != "capacity_critical"
-        else economic_action.action
-    )
+    economic_choice = economic_action.action if economic_action.projected_total_cost_units < keep_cost else "keep"
+    chosen = economic_choice if capacity_band_name != "capacity_critical" else economic_action.action
     return economic_choice, chosen
 
 
@@ -941,10 +861,7 @@ def calculated_context_verdict(
         return unresolved(evidence_error, None)
     if cache_state not in {"observed_warm", "observed_cold"}:
         return unresolved(
-            (
-                f"cache state is {cache_state!r}; keep/action carriage cannot be "
-                "priced without observed_warm or observed_cold evidence"
-            ),
+            (f"cache state is {cache_state!r}; keep/action carriage cannot be priced without observed_warm or observed_cold evidence"),
             None,
         )
     if cache_read_multiplier is None or cache_read_multiplier <= 0:
@@ -956,9 +873,7 @@ def calculated_context_verdict(
     missing = [action for action in required_actions if action not in by_action]
     if missing:
         return unresolved(
-            (
-                "missing measured action calibration for " + ", ".join(missing)
-            ),
+            ("missing measured action calibration for " + ", ".join(missing)),
             expected_calls_after * current_tokens * cache_read_multiplier,
         )
     evaluations = [
@@ -981,16 +896,7 @@ def calculated_context_verdict(
         resolved=True,
         chosen_action=chosen,
         economic_choice=economic_choice,
-        economic_cause=(
-            f"keep={keep_cost:.3f}; "
-            + "; ".join(
-                f"{evaluation.action}={evaluation.projected_total_cost_units:.3f} "
-                f"with H={evaluation.post_action_prefix_tokens} and "
-                f"break_even_N={evaluation.break_even_horizon_calls}"
-                for evaluation in evaluations
-            )
-            + "; actions must be strictly cheaper than keep"
-        ),
+        economic_cause=(f"keep={keep_cost:.3f}; " + "; ".join(f"{evaluation.action}={evaluation.projected_total_cost_units:.3f} with H={evaluation.post_action_prefix_tokens} and break_even_N={evaluation.break_even_horizon_calls}" for evaluation in evaluations) + "; actions must be strictly cheaper than keep"),
         keep_projected_cost_units=keep_cost,
         action_evaluations=tuple(evaluations),
         capacity_band=cap_band,
@@ -1009,7 +915,10 @@ def calculated_context_verdict(
 
 
 def rotation_band(
-    current_tokens: int, *, cache_cold: bool, overage: bool = False,
+    current_tokens: int,
+    *,
+    cache_cold: bool,
+    overage: bool = False,
 ) -> tuple[str, str]:
     """``(band, guidance)`` for a measured context size and cache state.
 
@@ -1033,39 +942,21 @@ def rotation_band(
     """
     if cache_cold:
         if current_tokens > POLICY_H_TOKENS:
-            return ("cold_above_h", (
-                f"cache is cold and context ({current_tokens:,}) exceeds H "
-                f"({POLICY_H_TOKENS:,}) -- rotate: the carried context will be "
-                "re-paid at full price either way"))
-        return ("cold_below_h", (
-            f"cache is cold but context ({current_tokens:,}) is under H "
-            f"({POLICY_H_TOKENS:,}) -- keep working, a clear would cost more "
-            "than it saves"))
+            return ("cold_above_h", (f"cache is cold and context ({current_tokens:,}) exceeds H ({POLICY_H_TOKENS:,}) -- rotate: the carried context will be re-paid at full price either way"))
+        return ("cold_below_h", (f"cache is cold but context ({current_tokens:,}) is under H ({POLICY_H_TOKENS:,}) -- keep working, a clear would cost more than it saves"))
     if current_tokens < WARM_BAND_KEEP_WORKING_TOKENS:
-        return ("warm_keep", (
-            f"keep working -- at {current_tokens:,} a clear would not pay for "
-            f"itself unless you still had "
-            f"{_horizon_prose(current_tokens, overage=overage)} to make"))
+        return ("warm_keep", (f"keep working -- at {current_tokens:,} a clear would not pay for itself unless you still had {_horizon_prose(current_tokens, overage=overage)} to make"))
     if current_tokens < WARM_BAND_TASK_BOUNDARY_TOKENS:
-        return ("warm_task_boundary", (
-            f"rotate at the next natural task boundary -- at {current_tokens:,} "
-            f"a clear pays for itself with as few as "
-            f"{_horizon_prose(current_tokens, overage=overage)} left to make"))
+        return ("warm_task_boundary", (f"rotate at the next natural task boundary -- at {current_tokens:,} a clear pays for itself with as few as {_horizon_prose(current_tokens, overage=overage)} left to make"))
     if current_tokens < WARM_BAND_SAFE_CHECKPOINT_TOKENS:
-        return ("warm_safe_checkpoint", (
-            f"rotate at the first safe checkpoint -- at {current_tokens:,} "
-            f"a clear pays for itself with as few as "
-            f"{_horizon_prose(current_tokens, overage=overage)} left to make"))
+        return ("warm_safe_checkpoint", (f"rotate at the first safe checkpoint -- at {current_tokens:,} a clear pays for itself with as few as {_horizon_prose(current_tokens, overage=overage)} left to make"))
     # The ratified instruction for this band is kept VERBATIM and leads the
     # string. The 2026-08-17 reframe attaches each band's justification to it;
     # it does not soften what any band asks for, and this is the band where
     # softening would cost the most -- an earlier draft of that reframe
     # accidentally restated the safe-checkpoint action here, collapsing two
     # bands that ask for different things into one.
-    return ("warm_immediate", (
-        f"rotate immediately -- finish only the in-flight tool action; at "
-        f"{current_tokens:,} a clear pays for itself with as few as "
-        f"{_horizon_prose(current_tokens, overage=overage)} left to make"))
+    return ("warm_immediate", (f"rotate immediately -- finish only the in-flight tool action; at {current_tokens:,} a clear pays for itself with as few as {_horizon_prose(current_tokens, overage=overage)} left to make"))
 
 
 def write_premium_multiplier(*, overage: bool) -> float:
@@ -1085,7 +976,10 @@ def write_premium_multiplier(*, overage: bool) -> float:
 
 
 def clearing_wins(
-    current_tokens: int, expected_calls_after: int, *, overage: bool = False,
+    current_tokens: int,
+    expected_calls_after: int,
+    *,
+    overage: bool = False,
 ) -> bool:
     """``C > H + kH/N`` -- whether a clear pays for itself.
 
@@ -1105,9 +999,7 @@ def clearing_wins(
     """
     if expected_calls_after <= 0:
         return False
-    threshold = POLICY_H_TOKENS + (
-        write_premium_multiplier(overage=overage) * POLICY_H_TOKENS
-    ) / expected_calls_after
+    threshold = POLICY_H_TOKENS + (write_premium_multiplier(overage=overage) * POLICY_H_TOKENS) / expected_calls_after
     return current_tokens > threshold
 
 
@@ -1127,9 +1019,7 @@ def break_even_horizon(current_tokens: int, *, overage: bool = False) -> float |
     """
     if current_tokens <= POLICY_H_TOKENS:
         return None
-    return (
-        write_premium_multiplier(overage=overage) * POLICY_H_TOKENS
-    ) / (current_tokens - POLICY_H_TOKENS)
+    return (write_premium_multiplier(overage=overage) * POLICY_H_TOKENS) / (current_tokens - POLICY_H_TOKENS)
 
 
 def _horizon_prose(current_tokens: int, *, overage: bool) -> str:
@@ -1144,10 +1034,7 @@ def _horizon_prose(current_tokens: int, *, overage: bool) -> str:
     """
     horizon = break_even_horizon(current_tokens, overage=overage)
     if horizon is None:
-        return (
-            f"no number of calls -- it is under H ({POLICY_H_TOKENS:,}), the "
-            "prefix a clear would rewrite"
-        )
+        return f"no number of calls -- it is under H ({POLICY_H_TOKENS:,}), the prefix a clear would rewrite"
     return f"~{horizon:.0f} more call(s)"
 
 
@@ -1174,18 +1061,10 @@ def capacity_band(current_tokens: int, ceiling: int) -> tuple[str, str]:
         raise ValueError(f"capacity_band needs a positive ceiling, got {ceiling}")
     fraction = current_tokens / ceiling
     if fraction >= CAPACITY_BAND_CRITICAL_FRACTION:
-        return ("capacity_critical", (
-            f"{current_tokens:,} is {fraction:.0%} of this model's "
-            f"{ceiling:,}-token window -- rotate ahead of new work: this is "
-            "room running out, which no amount of cache economics offsets"))
+        return ("capacity_critical", (f"{current_tokens:,} is {fraction:.0%} of this model's {ceiling:,}-token window -- rotate ahead of new work: this is room running out, which no amount of cache economics offsets"))
     if fraction >= CAPACITY_BAND_APPROACHING_FRACTION:
-        return ("capacity_approaching", (
-            f"{current_tokens:,} is {fraction:.0%} of this model's "
-            f"{ceiling:,}-token window -- rotate at the next task boundary "
-            "while there is still room to finish one"))
-    return ("capacity_ok", (
-        f"{current_tokens:,} is {fraction:.0%} of this model's "
-        f"{ceiling:,}-token window -- room is not the constraint"))
+        return ("capacity_approaching", (f"{current_tokens:,} is {fraction:.0%} of this model's {ceiling:,}-token window -- rotate at the next task boundary while there is still room to finish one"))
+    return ("capacity_ok", (f"{current_tokens:,} is {fraction:.0%} of this model's {ceiling:,}-token window -- room is not the constraint"))
 
 
 class TimestampAwarenessError(ValueError):
@@ -1230,7 +1109,8 @@ class CacheState:
 
 
 def _scored_calls(
-    calls: list[AssistantCall], cleared_at: datetime | None,
+    calls: list[AssistantCall],
+    cleared_at: datetime | None,
 ) -> list[AssistantCall]:
     """Calls that count as evidence of cache behaviour.
 
@@ -1255,15 +1135,14 @@ def _short_gap_cold_count(scored: list[AssistantCall]) -> int:
     what usage overage looks like from outside -- the account state is not
     observable to this platform, but its consequence is.
     """
-    return sum(
-        1
-        for older, newer in zip(scored, scored[1:], strict=False)
-        if newer.was_cold and (newer.at - older.at).total_seconds() <= CACHE_TTL_SECONDS
-    )
+    return sum(1 for older, newer in zip(scored, scored[1:], strict=False) if newer.was_cold and (newer.at - older.at).total_seconds() <= CACHE_TTL_SECONDS)
 
 
 def classify_cache_state(
-    calls: list[AssistantCall], now: datetime, *, cleared_at: datetime | None,
+    calls: list[AssistantCall],
+    now: datetime,
+    *,
+    cleared_at: datetime | None,
 ) -> CacheState:
     """Prompt-cache state, from the transcript's own usage blocks.
 
@@ -1277,15 +1156,16 @@ def classify_cache_state(
     idle_seconds = (now - scored[-1].at).total_seconds()
     if idle_seconds > CACHE_TTL_SECONDS:
         return CacheState(
-            True, False,
+            True,
+            False,
             f"last call {idle_seconds:.0f}s ago, past the {CACHE_TTL_SECONDS}s TTL",
         )
     short_gap_colds = _short_gap_cold_count(scored)
     if short_gap_colds >= OVERAGE_MIN_COLD_CALLS:
         return CacheState(
-            True, True,
-            f"{short_gap_colds} cold calls across sub-TTL gaps -- the cache is not "
-            "surviving its nominal window (the overage signature)",
+            True,
+            True,
+            f"{short_gap_colds} cold calls across sub-TTL gaps -- the cache is not surviving its nominal window (the overage signature)",
         )
     if scored[-1].was_cold:
         return CacheState(False, False, "one cold call, cache re-warmed since -- warm bands apply")
@@ -1347,7 +1227,10 @@ def band_is_actionable(band: str) -> bool:
 
 
 def is_rotation_due_for_ceiling(
-    *, ceiling: int, current_tokens: int, cache_cold: bool | None,
+    *,
+    ceiling: int,
+    current_tokens: int,
+    cache_cold: bool | None,
 ) -> bool:
     """THE ROTATION-DUE PREDICATE (GAU-08, ruled 2026-08-18): the ECONOMICS
     BAND is actionable, OR ``current_tokens`` has crossed
@@ -1407,7 +1290,9 @@ def is_rotation_due_for_ceiling(
     using a window size nobody measured.
     """
     return rotation_due_verdict(
-        ceiling=ceiling, current_tokens=current_tokens, cache_cold=cache_cold,
+        ceiling=ceiling,
+        current_tokens=current_tokens,
+        cache_cold=cache_cold,
     ).due
 
 
@@ -1437,7 +1322,10 @@ class RotationDueVerdict:
 
 
 def rotation_due_verdict(
-    *, ceiling: int, current_tokens: int, cache_cold: bool | None,
+    *,
+    ceiling: int,
+    current_tokens: int,
+    cache_cold: bool | None,
 ) -> RotationDueVerdict:
     """Compatibility view of the single rotation-notice decision.
 
@@ -1451,7 +1339,9 @@ def rotation_due_verdict(
             f"rotation_due_verdict needs a positive ceiling, got {ceiling}",
         )
     decision = rotation_notice_verdict(
-        model="", effort="", current_tokens=current_tokens,
+        model="",
+        effort="",
+        current_tokens=current_tokens,
         runtime_window_tokens=ceiling,
     )
     return RotationDueVerdict(
@@ -1467,13 +1357,14 @@ def rotation_due_verdict(
 class RotationVerdict:
     """Both rotation axes for one measured session, plus the headline.
 
-    ``effective_band`` is what the notice latches on, and it is a BAND NAME,
-    never a fraction of a ceiling. That is the whole point of this landing:
-    `sweep_rotation_due_sessions` gates on `fraction >= 0.5`, which on a
-    1M-ceiling model is 500,000 -- so a session sitting anywhere between
-    300,000 and 500,000 is in the saturated `warm_immediate` band while the
-    fraction gate still reads False, and the notice is silent exactly where it
-    is most needed. Keying on the band closes that window by construction.
+    ``effective_band`` is a BAND NAME, never a fraction of a ceiling. That was
+    the whole point of this landing: the fraction gate it replaced
+    (``fraction >= 0.5``, which on a 1M-ceiling model is 500,000) read False
+    for a session anywhere between 300,000 and 500,000 although it sat in the
+    saturated `warm_immediate` band, so a rotation signal built on that
+    fraction was silent exactly where it was most needed. Keying on the band
+    closes that window by construction. The sweep that applied the fraction
+    gate and the notice that latched on this band no longer exist.
     """
 
     economics_band: str
@@ -1500,7 +1391,9 @@ def rotation_surface_verdict(
     get a capacity verdict against a ceiling it never checked.
     """
     econ_band, econ_guidance = rotation_band(
-        current_tokens, cache_cold=cache_cold, overage=overage,
+        current_tokens,
+        cache_cold=cache_cold,
+        overage=overage,
     )
     cap_band, cap_guidance = capacity_band(current_tokens, ceiling)
     econ_rank = _BAND_URGENCY[econ_band]
@@ -1538,10 +1431,7 @@ def _assert_premium_matches_its_derivation() -> None:
     derived = CACHE_WRITE_MULTIPLIER_1H / CACHE_READ_MULTIPLIER
     if abs(derived - CACHE_WRITE_PREMIUM_MULTIPLIER) > 1e-6:
         raise ValueError(
-            f"CACHE_WRITE_PREMIUM_MULTIPLIER={CACHE_WRITE_PREMIUM_MULTIPLIER} no "
-            f"longer equals CACHE_WRITE_MULTIPLIER_1H/CACHE_READ_MULTIPLIER="
-            f"{derived}; the bands' stated break-even horizons are derived from "
-            "this ratio and would silently describe retired pricing",
+            f"CACHE_WRITE_PREMIUM_MULTIPLIER={CACHE_WRITE_PREMIUM_MULTIPLIER} no longer equals CACHE_WRITE_MULTIPLIER_1H/CACHE_READ_MULTIPLIER={derived}; the bands' stated break-even horizons are derived from this ratio and would silently describe retired pricing",
         )
 
 

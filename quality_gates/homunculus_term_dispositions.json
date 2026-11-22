@@ -1,0 +1,203 @@
+{
+  "policy": "Internal names, prose and new identifiers say solet. The word homunculus stays only in wire_protocol, cloud_resource_name, persisted_schema, legacy_detection or cited_path uses. External identifiers change only after a recorded protocol-migration decision; none exists. No knowledge-base article records this policy (unit unt_6b640f0b event 1), so this file is its record.",
+  "entries": [
+    {
+      "path": "ananta/src/ananta/core/config/environment_config.py",
+      "class": "legacy_detection",
+      "count": 2,
+      "reason": "Recognize legacy installations and environment names during migration."
+    },
+    {
+      "path": "ananta/src/ananta/core/root_manifest/classifier.py",
+      "class": "legacy_detection",
+      "count": 2,
+      "reason": "Recognize legacy installations and environment names during migration."
+    },
+    {
+      "path": "ananta/src/ananta/interfaces/cloud_self_deployment_service_interface.py",
+      "class": "cloud_resource_name",
+      "count": 1,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "ananta/src/ananta/interfaces/midwife_service_interface.py",
+      "class": "cloud_resource_name",
+      "count": 1,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "ananta/src/ananta/interfaces/undertaker_service_interface.py",
+      "class": "cloud_resource_name",
+      "count": 1,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "ananta/src/ananta/services/context_management/context_registry.py",
+      "class": "persisted_schema",
+      "count": 2,
+      "reason": "Preserve persisted context-kind values and their schema constraints."
+    },
+    {
+      "path": "ananta/src/ananta/services/context_management/schema.py",
+      "class": "persisted_schema",
+      "count": 1,
+      "reason": "Preserve persisted context-kind values and their schema constraints."
+    },
+    {
+      "path": "ananta/src/ananta/services/context_management/types.py",
+      "class": "persisted_schema",
+      "count": 1,
+      "reason": "Preserve persisted context-kind values and their schema constraints."
+    },
+    {
+      "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/env_contract.py",
+      "class": "legacy_detection",
+      "count": 4,
+      "reason": "Recognize legacy installations and environment names during migration."
+    },
+    {
+      "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/local_cli/__init__.py",
+      "class": "cited_path",
+      "count": 1,
+      "reason": "Retain the exact historical artifact name cited for provenance."
+    },
+    {
+      "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/local_cli/cli.py",
+      "class": "legacy_detection",
+      "count": 1,
+      "reason": "Recognize legacy installations and environment names during migration."
+    },
+    {
+      "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/local_cli/wake.py",
+      "class": "legacy_detection",
+      "count": 1,
+      "reason": "Recognize legacy installations and environment names during migration."
+    },
+    {
+      "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/mcp_bridge/__main__.py",
+      "class": "wire_protocol",
+      "count": 3,
+      "reason": "Preserve the notification method consumed by existing bridge clients."
+    },
+    {
+      "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/mcp_bridge/forwarder.py",
+      "class": "wire_protocol",
+      "count": 4,
+      "reason": "Preserve the notification method consumed by existing bridge clients."
+    },
+    {
+      "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/mcp_streamable/notifications.py",
+      "class": "wire_protocol",
+      "count": 1,
+      "reason": "Preserve the notification method consumed by existing bridge clients."
+    },
+    {
+      "path": "plugins/agent_messaging_plugin/src/agent_messaging_plugin/mcp_streamable/tools.py",
+      "class": "wire_protocol",
+      "count": 1,
+      "reason": "Preserve the notification method consumed by existing bridge clients."
+    },
+    {
+      "path": "plugins/aws_midwife_plugin/src/aws_midwife_plugin/constants.py",
+      "class": "cloud_resource_name",
+      "count": 3,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_midwife_plugin/src/aws_midwife_plugin/idempotency.py",
+      "class": "cloud_resource_name",
+      "count": 2,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_midwife_plugin/src/aws_midwife_plugin/phases/_constants.py",
+      "class": "cloud_resource_name",
+      "count": 2,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_midwife_plugin/src/aws_midwife_plugin/phases/_helpers.py",
+      "class": "cloud_resource_name",
+      "count": 1,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_midwife_plugin/src/aws_midwife_plugin/phases/cloudwatch.py",
+      "class": "cloud_resource_name",
+      "count": 1,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_midwife_plugin/src/aws_midwife_plugin/phases/ecs.py",
+      "class": "cloud_resource_name",
+      "count": 5,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_midwife_plugin/src/aws_midwife_plugin/phases/vpc_endpoints.py",
+      "class": "cloud_resource_name",
+      "count": 1,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_self_deployment_plugin/src/aws_self_deployment_plugin/aws_clients.py",
+      "class": "cloud_resource_name",
+      "count": 1,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_self_deployment_plugin/src/aws_self_deployment_plugin/constants.py",
+      "class": "cloud_resource_name",
+      "count": 2,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_self_deployment_plugin/src/aws_self_deployment_plugin/dry_run_planner.py",
+      "class": "cloud_resource_name",
+      "count": 2,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_self_deployment_plugin/src/aws_self_deployment_plugin/version_parsing.py",
+      "class": "cloud_resource_name",
+      "count": 1,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_undertaker_plugin/src/aws_undertaker_plugin/aws_clients.py",
+      "class": "cloud_resource_name",
+      "count": 2,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_undertaker_plugin/src/aws_undertaker_plugin/constants.py",
+      "class": "cloud_resource_name",
+      "count": 3,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/aws_undertaker_plugin/src/aws_undertaker_plugin/phases.py",
+      "class": "cloud_resource_name",
+      "count": 2,
+      "reason": "Preserve deployed AWS resource names and tags used by existing installations."
+    },
+    {
+      "path": "plugins/github_midwife_plugin/src/github_midwife_plugin/credential_seed.py",
+      "class": "cited_path",
+      "count": 1,
+      "reason": "Retain the exact historical artifact name cited for provenance."
+    },
+    {
+      "path": "plugins/github_midwife_plugin/src/github_midwife_plugin/existing_install_migrations.py",
+      "class": "legacy_detection",
+      "count": 10,
+      "reason": "Recognize legacy installations and environment names during migration."
+    },
+    {
+      "path": "plugins/macos_self_deployment_plugin/src/macos_self_deployment_plugin/constants.py",
+      "class": "cited_path",
+      "count": 1,
+      "reason": "Retain the exact historical artifact name cited for provenance."
+    }
+  ]
+}

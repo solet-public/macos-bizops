@@ -2,6 +2,108 @@
 
 Newest release first. Earlier releases follow below the divider.
 
+## 2026-11-19 — r74: session start carries the solet's own principles, the project work model and role legislation are removed, fleet sweeps no longer run on a clock, and solets run without the external work register
+
+**Solet Manager manager-v0.1.0-r74.**
+
+### Updating from r73
+
+- A solet whose LaunchAgent runs the blue-green supervisor is not updated to r74 by the Manager: the update preview stops with `supervisor_launch_needs_hand_route`, because r74 removes database columns and the router's cutover installs only additive schema changes; a solet made by `solet create` updates as usual, and a supervisor-launched solet installs r74 by the steps in `plugins/default_thinking_plugin/knowledge_base_joseki/deploy_local_blue_green_release.md`, section "Installing a release the cutover refuses".
+- A solet on stable r73 can update to r74 through the Manager.
+- When the cutover refuses a schema change, deploy by rule stops and names the hand route, instead of failing partway through the deploy.
+
+### Session start and principles
+
+- Session-start hooks carry the solet's own principle block and answer a compaction with it; an over-budget digest is cut at a row boundary.
+- Concurrent session-start reads are admitted within the host deadline.
+- The shipped Claude Code and Codex session-start hooks read the principle statement from the solet's own file, which a loaded host does not slow, and call the bridge only when no file is found; their timeout is 30 seconds instead of 8.
+- The principles skill and its principle articles are published, each with a retrieval test, for the thirteen designated principles; three superseded principles are retired.
+- The memory article says what session memory is for: facts and the user's decisions, not lessons.
+- Claude Code sessions the solet spawns, headless or in tmux, now compact their context at 500,000 tokens.
+- Claude Code sessions the solet spawns, headless or in tmux, give their session-start hook 40 seconds instead of 8.
+
+### Jobs, messages and model selection
+
+- More operations return owned job receipts: ledger schedule installs, memory schedule setup, Thinking playbook creation, and the installed-schema read.
+- A message read by id says what happened to a peer send, and a send receipt says not delivered yet until its outcome is read.
+- A refused bridge call prints as a refusal alone, and peer-send has the one name peer_send.
+- A faint prompt suggestion in a Claude Code composer counts as an empty composer, so a message can still be typed into it.
+- Operator preference weights from the cell policy apply to model selection under every billing objective, and work-kind rules apply before capability selection.
+- The strongest eligible model cell is returned with any capability shortfall named, and a session is priced from the model it ran.
+- Model cell rules carry a kind, words and an expiry.
+- The solet's usage plan chooses the cost objective for dispatch-tier selection, and a caller-supplied objective is refused.
+
+### Session and role verbs
+
+- The work-model tables and columns are removed from the messaging schema and the session store, and the session writer no longer writes the former classifier column.
+- The legislate_role verb is removed. Roles no longer carry a class declaration, and the role-authority contract is published in the knowledge base.
+- retire_role accepts a retirement from any registered session and records the caller's instance id; a call with no caller identity is refused. The reserved Main-name claim refusals are removed.
+
+### Managed work and lane verbs
+
+- The verb that dispatched managed work is removed: dispatch_managed_work.
+- The six verbs that reported, resolved and listed dispatched work are removed: four reads of its status, events, inventory and uptake rate, and the report and resolve writes.
+- The verbs that recorded a lane's instructions, preserved and read its evidence, and retired completed lane sessions are removed: preserve_lane_evidence, read_lane_evidence and retire_completed_lane_sessions, and the verb that recorded the instructions.
+- The verbs that provisioned a role session and read a unit's usage are removed: provision_role_session and read_unit_usage.
+
+### Side effects and plugin declarations
+
+- Process cards across the plugins and core services declare side_effect_class; it is read and validated at registration, and a measurement tool and the create-process step check it.
+
+### Fleet without a clock
+
+- Clock-driven sweeps and their notices are removed: the stale-worktree sweep schedule, the fleet stall sweep and its status verbs, the managed-dispatch supervisor sweep, the rotation-due and gauge notices, the seat idle watcher, and the goal-keeper Stop hook.
+- Wake skills that woke sessions on a clock are deleted.
+- The seat heartbeat and its report-alive hook are removed, and managed Claude sessions no longer wire the heartbeat hook.
+- A session's end has one writer, the session_host_closed and session_ended verbs.
+- A session's watch and wake files in the runtime folder are removed when the session ends, and a solet's start removes those of every session no longer live; files whose watcher still holds its lock are kept until a later start.
+- Session limits are set and listed with their own verbs, and a room function says whether a session may start.
+- The delivery-waiting pane notice is skipped when the recipient's live channel carries the message.
+- fleet_status reports recorded facts instead of a stalled verdict.
+- Headless child processes notify the solet when they exit.
+- A read-only process measures per-session coordination activity over a time window.
+- Session launches use the caller's workspace, and the Claude seat launcher decides nothing by session name.
+- Codex and tmux sessions are targeted by their exact solet-scoped names, and reconciliation touches only sessions the solet's records name.
+- The host disk headroom check is removed with its schedule: check_host_disk_headroom, check_host_disk_headroom_cron and ensure_host_disk_guard_schedule. A deployment that installed the disk check with ensure_host_disk_guard_schedule has lost it.
+- The verb that scheduled the full smoke battery is removed: ensure_full_smoke_schedule. A full-battery schedule left by an earlier release is cleared at late boot.
+
+### Recovery
+
+- The Claude Code and Codex recovery adapters save uncommitted work before a discarding command and at turn end, and name the paths a pruned-stash restore kept out.
+- An empty recovery root is treated as unset, and the recovery security documents are corrected.
+
+### Solets without the external work register
+
+- Solets no longer depend on the external work register: the external app client plugin is retired, and its names are removed from shipped code, knowledge and fixtures.
+- The seed build refuses any file that names the external work register, at the landing gate and at seal.
+- Shipped guidance no longer presents Git-Controller or a git gate as live to adopter solets.
+- The register-authority Git guard installs from setup only when that register's tooling is present.
+- The solet keeps its own work-folder tables and lifecycle operations, and its own deployment records, read through its own verbs.
+- The run_deploy_rule verb starts the solet's own guarded deploy rule as a detached process and answers at once with an attempt id; a later call with that id reads the attempt's outcome: deployed, skipped, deferred or failed.
+- Maintenance duty passes persist in the solet's own state, and model-catalog drift is recorded there rather than filed.
+- The fleet maintenance plugin's work-folder sweep duty runs the solet's own work-folder sweep every hour, as a backstop for a work folder whose creator never ended it, instead of calling the external work register.
+- Sessions are metered and filtered by label, and budget reports read label usage.
+
+### Connectors
+
+- Salesforce binds many orgs at once and runs scratch org and sandbox lifecycles through the sf CLI.
+- Schwab covers every Market Data and Trader REST operation, with confirmed order writes and grant tracking.
+
+### Tools, knowledge and storage
+
+- Key-value values are returned as written through one shared codec, and typed values render in template variable substitution.
+- Knowledge chunks are embedded without their metadata preamble, and the stored text is unchanged.
+- An oversize ACT-R memory is indexed in provider-budgeted segments, and every segment hit maps back to its memory.
+- A named file list is held to the manifest's include and exclude patterns.
+- Claude cloud credential reads go through the vault.
+- A plugin schema can retire a table by name, and the update preflight accepts a table the new release retires.
+- Leaderboard rows accept any number of value columns, and failed catalog refreshes are reported.
+- A runtime port file is created private (mode 0600) in one step.
+- A slow tool probe is qualified as slow, and every skipped tool's verdict is named.
+- A full smoke campaign that fails sends the solet's main session one notice, and the failed run stays in its campaign record.
+- Setup now builds pgvector for PostgreSQL 17 from checksummed source when Homebrew has none for 17; it needs the Command Line Tools (`xcode-select --install`).
+- The coordination-hooks plugin is version 0.10.1.
+
 ## 2026-11-10 — r73: faster job admission, safer credential use, broader connectors, tracked work folders, and simpler bridge results
 
 **Solet Manager manager-v0.1.0-r73.**
@@ -89,7 +191,7 @@ Newest release first. Earlier releases follow below the divider.
 - Fix below-profile host gate refusal wording.
 - docs: correct session summary origin source references.
 - docs(lifecycle): correct apply_manifest binding contract.
-- docs: correct lifecycle unit dispatch example.
+- docs: correct lifecycle session-dispatch example.
 - Continue release smoke checks after optional Ruby skip.
 - test: guard launchd PATH copies across packages.
 - Isolate blue-green smoke runtime state.
@@ -120,7 +222,7 @@ Newest release first. Earlier releases follow below the divider.
 - post-registration step isolation.
 - fix(git-controller): the authorization hook's stop directive needs its target immediately after STOP/HOLD/RETRACT, and a first-party PROCEED-with-batch handoff lifts an earlier HOLD.
 - fix(git-controller): single-unit and release-batch pre-merge digests bind the --branch commit tree, and a single-unit authorization carries base_commit_sha and candidate_digest_sha256.
-- fix(agent-messaging): a managed dispatch's first turn is its charter, so lanes start their assigned work instead of waiting for a separate START.
+- fix(agent-messaging): a session launch's first turn carries its initial context, so sessions start their assigned work instead of waiting for a separate START.
 - fix(git-controller): landing intake authorizes from ticket status and typed register readiness, removing sender-role checks, operator delegation and the 14-day horizon.
 - fix(gates): slow smokes get measured, finite per-entry budgets and the coding-agent FSEvents watcher waits for real native readiness, so the landing battery's run_smokes entry stops timing out on base.
 - fix(quality-gates): Git-Controller gate re-homing handles setuptools finder-style editable installs, so a re-homed candidate venv provisions from the live shared venv.
@@ -130,19 +232,19 @@ Newest release first. Earlier releases follow below the divider.
 - fix(agent-messaging): model capability refresh roster covers the available models.
 - fix(hooks): disable the checkout wiring of the git gate hook.
 - docs: CLAUDE.md and AGENTS.md agree that a landing is authorized by the landing-authorization receipt.
-- fix(agent-messaging): the platform launches a lane by unit id; brief_ref and brief_sha256 are removed, with a cancel-only path for historical dispatch rows, and the consumer docs, cards and census name the Unit.
+- fix(agent-messaging): the platform launches a session from its opaque work reference; obsolete brief fields are removed, with a cancel-only path for historical launch rows, and the consumer docs, cards and census use the session reference.
 - docs(instructions): the two root instruction files say the git rules are written procedure that no hook checks in this checkout, and use plain wording for the destructive-form citation and the single-session exemption.
 - docs(skill): Step 7.5 runs the focused smoke register for text-only landings and the landing-sequence smoke pins the new skill sha.
 - docs(skills): correct the 2026-10-10 skills audit findings for author-kb-content, author-sfx-kb-article, create-process and options-report.
 - docs(skill): fix the 20 findings of the 2026-10-10 skills audit in git-controller-commit and run-test.
 - fix(model-catalog): catalog reads page and truncate with a named warning instead of raising at 100 rows.
 - fix(agent-messaging): the dispatch selector excludes and counts unknown-effort catalog rows instead of raising.
-- docs(skills): correct the 2026-10-10 skills audit findings for project-solet-steward, register-issue-grouping and register-backlog-reconciliation.
+- docs(skills): correct the 2026-10-10 skills audit findings for project stewardship, issue grouping and backlog reconciliation.
 - docs(skill): the liveness step 4 drain retries once from the first page and the cursor smoke pins the new operative section.
 - feat(agent-messaging): model_capability_harness reads the Codex and Claude harness model lists and holds the runtime adapters, the join key and the one alias row.
 - feat(agent-messaging): withdraw_model_capability_cell, reinstate_model_capability_cell and read_model_capability_history complete the capability cell lifecycle.
-- fix(gates): the Git-Controller authorization helper takes one --checkout per repository a unit spans, at Step 0 and at the pre-merge guard.
-- fix(fleet-maintenance): every psolet filed names a standing group, with a loud fallback.
+- fix(gates): the Git-Controller authorization helper takes one --checkout per repository a candidate spans, at Step 0 and at the pre-merge guard.
+- fix(fleet-maintenance): every filing names a standing group, with a loud fallback.
 - feat(agent-messaging): the model catalog refresh learns which models exist from the harness lists and takes score and cost from the leaderboard rows; the hand-kept roster is deleted.
 - feat(agent-messaging): the model catalog refresh runs a harness pass: an absence clock, reversible automatic withdrawal and reinstatement, and a refresh never reverses a withdrawal.
 - Integrated release landing: git-text gate removal and hook interpreter pin carry across a changed hooks.json, one composed tree, one full battery.
@@ -152,13 +254,13 @@ Newest release first. Earlier releases follow below the divider.
 - docs(root-instructions): a lane commits in its own worktree, only the shared checkout is Git-Controller-only.
 - docs(relay): promote native candidate handoff verbs.
 - fix(messaging): recover missed Codex inbox doorbells.
-- fix(messaging): assign native spawned Unit owner before first turn.
+- fix(messaging): assign the native spawned session owner before first turn.
 - fix(oauth): forward record_oauth_client_token_use through VaultServiceProxy.
 - docs(controller): record gate verdicts before landing preflight.
 - fix(smoke): pin only the landing script the fixture executes.
 - Narrow LM Studio references in service smoke.
 - Document native landing commands for Git-Controller.
-- Reject missing unit id before evidence path creation.
+- Reject a missing session reference before evidence path creation.
 - Clarify inbox horizon option requirements.
 - Fix parser flags in fleet liveness inbox instructions.
 - Use a neutral directory name in the quoted hook pin fixture.
@@ -177,7 +279,7 @@ Newest release first. Earlier releases follow below the divider.
 - Prove delivery drive queue slots release after completion.
 - Treat resolved issues as terminal when rendering goal items.
 - Remove redundant issue category follow-up.
-- Start lane worktrees from the integration head.
+- Start workspaces from the integration head.
 - Include loaded factory source in Step7 fixture cache keys.
 - Prune expired Step7 cache and scratch directories on mint.
 - Retain per-smoke outcomes and bounded output in battery receipts.
@@ -189,7 +291,7 @@ Newest release first. Earlier releases follow below the divider.
 - Detach measured embedding and search actions from the serial poller.
 - Report explicit code-quality paths without narrowing whole-tree checks.
 - Authorize coordinator rotation through typed session continuity.
-- Run the Main pickup digest from the Project Solet root.
+- Run the Main pickup digest from the primary checkout.
 - Split unusable-name notice coverage into a focused smoke.
 - Require fresh parity evidence for seed assembly authorization.
 - Key run-smokes receipts by candidate HEAD.
@@ -201,7 +303,7 @@ Newest release first. Earlier releases follow below the divider.
 - Page past held embedding and search rows in bounded queue reads.
 - Bound latest-job retrieval to ordered pages.
 - Preserve CRLF tails when refreshing rendered sections.
-- Allow canceling failed-start managed dispatches.
+- Allow canceling failed-start session launches.
 - Require confirmed poller completion writes before acknowledgement.
 - Clarify wrong-slot peer inbox identity errors.
 - Emit a non-refusing polling advisory from the Main-seat Stop hook.
@@ -257,7 +359,7 @@ Newest release first. Earlier releases follow below the divider.
 - Require effective typed verdicts for composite landing authorization.
 - Bootstrap the static review smoke for isolated execution.
 - Expose peer inbox page coverage and cursor safety.
-- Require managed dispatch acknowledgement before starting work.
+- Require session-launch acknowledgement before starting work.
 - Recognize recoverable lane bytes and empty runtime scaffolds before retirement.
 - Clarify detached deploy and dispatch starvation diagnostics.
 - Checkpoint failed ledger embedding sweeps and preserve outage retries.
@@ -288,7 +390,7 @@ Newest release first. Earlier releases follow below the divider.
 - Add verified deploy notices and bound hourly polling diagnostics.
 - Record append-only session cron observations.
 - Preserve retirement outcomes and verify host teardown.
-- Record causal managed-dispatch Unit observations.
+- Record causal dispatch observations.
 - Document native reviewer evidence preservation workflow.
 - fix(seed-factory): validate manager release note public text.
 - Require complete closing fences in feedback heading validation.
@@ -304,7 +406,7 @@ Newest release first. Earlier releases follow below the divider.
 - Run registered smokes to their natural exit through the owned-process collector.
 - style(ledger): format Claude block advisory regression fixtures.
 - Refresh unknown Claude metadata fixtures and guidance.
-- docs: correct issue lifecycle unit dispatch guidance.
+- docs: correct issue lifecycle session-dispatch guidance.
 - Rewrite filing templates to typed parent form.
 - Design measured capability and expected-cost model selection.
 - Migrate fleet maintenance filing to typed parent flags.
@@ -342,8 +444,8 @@ Newest release first. Earlier releases follow below the divider.
 - Clarify landed-work proof and reviewed commits in the grooming skill.
 - Document composite Issue division in grooming skill.
 - Clarify grooming scores and cross-repository issue placement.
-- Sweep terminal lane worktrees when a lane retires.
-- Retire lanes whose assigned Unit is provably finished.
+- Sweep terminal workspaces when a session retires.
+- Retire sessions whose assigned work is provably finished.
 - Let a candidate register a gate smoke in its own fragment file.
 - Make the tmux driver channel wait for an empty composer before it sends.
 - Let a candidate declare a shipped-smoke contract row and its manifest exclusion in its own fragment files.
@@ -1952,7 +2054,7 @@ Changes since r44:
   transitions.
 - Peer messaging routes no longer run on the solet's event loop, removing
   multi-second stalls and the mass reconnects they caused.
-- A managed dispatch mints its work-register unit atomically.
+- A session launch records its work context atomically.
 
 Fresh-guest installation is a separate post-publish operation. This release
 does not claim a fresh-guest install, solet doctor, or E3 result.
@@ -2051,10 +2153,10 @@ the current install guide, known gaps, and reinstall guidance.
 **Solet Manager `manager-v0.1.0-r41`** (`solet 0.1.0_27`) was published to
 `solet-public/macos-bizops` and `solet-public/homebrew-tap` on 2026-09-16,
 built from source pin `5c5aec1965befd824b71ad66458ee70025c2d2a7` ("require
-explicit Project Solet register CLI"). This entry is added retroactively on
+explicit internal coordination CLI"). This entry is added retroactively on
 2026-09-19, during the r43 cut, after r43's own predecessor-conflict check
 found this publish live on GitHub with no corresponding release note. r41's
-source commit is internal Project Solet register tooling with **no
+source commit is internal coordination tooling with **no
 user-facing manager or install-surface change** — this is presumably why no
 customer-facing note was written for it at the time. Recorded here so the
 release history stays honest: every published round gets an entry, even one

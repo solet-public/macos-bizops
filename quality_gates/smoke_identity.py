@@ -1,8 +1,8 @@
 """Frozen Git input identities for platform-smoke-proof/v1.
 
-Git is read only. Missing ancillary identities disable reuse; a contradictory
-immutable request is an integrity error. Candidate attribution is deliberately
-outside the reusable content key.
+Git is read only. An input a smoke's closure cannot list widens that smoke's key
+to the whole tree; a contradictory immutable request is an integrity error.
+Candidate attribution and the repository id are deliberately outside the key.
 """
 
 from __future__ import annotations
@@ -15,18 +15,24 @@ import os
 import platform
 import subprocess
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from quality_gates import private_test_pg
 from quality_gates.focused_smoke_selector import REGISTER_RELPATH
-from quality_gates.gate_smoke_register import is_fragment_relpath
+from quality_gates.gate_smoke_register import is_fragment_relpath, parse_register_text
 
 SCHEMA = "platform-smoke-proof/v1"
-RULE_VERSION = "platform-focused-union/v2"
+RULE_VERSION = "platform-focused-union/v3"
 REPOSITORY_SCAN = "@repository-scan"
+NEVER_REUSE_RELPATH = "quality_gates/smoke_never_reuse.txt"
+RECORDED_SCOPE = "recorded"
+# The recorder runs as a worker launched by path, so no import reaches it: these are tool inputs on their own,
+# and a change to any of them moves every key by moving the profile.
+_RECORDER_INPUTS = ("quality_gates/smoke_read_hooks.py", "quality_gates/smoke_read_worker.py", "quality_gates/smoke_reads.py")
 _ROUTING = {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"}
 
 
@@ -38,6 +44,15 @@ def canonical(value: object) -> bytes:
 def digest(value: object) -> str:
     """SHA-256 of a canonical structured value."""
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def recorded_key(smoke: str, certificate: str, profile: Mapping[str, Any]) -> str:
+    """The key of a smoke whose recorded inputs hold: its certificate's digest and the tool profile.
+
+    The certificate digest covers every observation, the resolved root's digest and the recorder's rule;
+    the candidate commit and tree, the attempt and the root's name are not in it.
+    """
+    return digest({"schema": SCHEMA, "smoke": smoke, "scope": RECORDED_SCOPE, "certificate": certificate, "profile": profile})
 
 
 def safe_path(value: str) -> str:
@@ -110,7 +125,8 @@ def read_sources(root: Path, tree: FrozenTree) -> dict[str, bytes]:
 def _source_input(path: str, row: Mapping[str, str]) -> bool:
     """Whether a frozen-tree row is a selection input whose bytes must be read.
 
-    The gate-smoke register is an input because the selection is computed from
+    The never-reuse list is an input because a smoke's key depends on it. The
+    gate-smoke register is an input because the selection is computed from
     it, and so is every fragment under ``gate_smokes.d/``: those carry register
     entries on exactly the same terms (prb_ae6d81ea). Admitting the register
     without its fragments would hand ``smoke_proof`` a sources map in which the
@@ -119,7 +135,28 @@ def _source_input(path: str, row: Mapping[str, str]) -> bool:
     """
     if row["mode"] not in ("100644", "100755"):
         return False
-    return path.endswith(".py") or path == REGISTER_RELPATH or is_fragment_relpath(REGISTER_RELPATH, path)
+    return path.endswith(".py") or path in (REGISTER_RELPATH, NEVER_REUSE_RELPATH) or is_fragment_relpath(REGISTER_RELPATH, path)
+
+
+def parse_never_reuse(body: bytes | None) -> dict[str, str]:
+    """The smokes that are never reused, each with its reason.
+
+    Register grammar (``path  # reason``) read by the register's own parser, so
+    there is one grammar. A path with no reason is refused: a list nobody can
+    justify is not a list.
+    """
+    if body is None:
+        return {}
+    never: dict[str, str] = {}
+    for line in body.decode("utf-8").splitlines():
+        paths = parse_register_text(line)
+        if not paths:
+            continue
+        reason = line.partition("#")[2].strip()
+        if not reason:
+            raise ValueError(f"never-reuse entry without a reason: {paths[0]}")
+        never.setdefault(paths[0], reason)
+    return never
 
 
 def delta_entries(root: Path, base: FrozenTree, candidate: FrozenTree) -> list[dict[str, Any]]:
@@ -167,12 +204,65 @@ def validate_request(root: Path, request: Mapping[str, Any]) -> tuple[FrozenTree
     return base, candidate
 
 
-def tool_profile(root: Path, tree: FrozenTree) -> dict[str, Any]:
-    """Effective interpreter, installed dependencies, routing and runner policy."""
+_TOOL_SEEDS = ("quality_gates/run_smokes.py", "quality_gates/smoke_proof.py")
+
+
+def _imported_modules(node: ast.AST) -> list[str]:
+    """Dotted names one import statement can bring in: the module and, for ``from``, each imported name under it."""
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        base = node.module or ""
+        return ([base] if base else []) + [f"{base}.{alias.name}" if base else alias.name for alias in node.names]
+    return []
+
+
+def _sibling_imports(path: str, body: bytes, sources: Mapping[str, bytes]) -> set[str]:
+    try:
+        tree = ast.parse(body, filename=path)
+    except (SyntaxError, ValueError):
+        return set()  # an unparsed tool file is still an input; the run itself fails on it
+    siblings = {f"quality_gates/{name.removeprefix('quality_gates.').split('.')[0]}.py" for node in ast.walk(tree) for name in _imported_modules(node)}
+    return siblings & sources.keys()
+
+
+def tool_inputs(sources: Mapping[str, bytes]) -> list[str]:
+    """The ``quality_gates`` files the runner and the proof tool import, at any depth, and the recorder's own files.
+
+    Breadth-first over every import statement, those inside functions too: the
+    runner imports siblings by bare name and several only inside a function, and a
+    change to one of them must move every key. A name that is not a
+    ``quality_gates/<name>.py`` file in ``sources`` is a library; its version is in the profile.
+    The recorder's files are added by name: its worker is started by path, never imported.
+    """
+    reached: set[str] = set()
+    pending = deque(seed for seed in _TOOL_SEEDS if seed in sources)
+    while pending:
+        path = pending.popleft()
+        if path not in reached:
+            reached.add(path)
+            pending.extend(sorted(_sibling_imports(path, sources[path], sources) - reached))
+    return sorted(reached | {path for path in _RECORDER_INPUTS if path in sources})
+
+
+def _postgres_identity() -> str:
+    """``pg_ctl --version`` of the fixture's first PostgreSQL bin directory; a word when there is none or it cannot be read."""
+    try:
+        pg_ctl = private_test_pg.pg_binary("pg_ctl")
+    except FileNotFoundError:
+        return "absent"
+    try:
+        result = subprocess.run((str(pg_ctl), "--version"), capture_output=True, text=True, check=False, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unreadable"
+    return result.stdout.strip() if result.returncode == 0 else "unreadable"
+
+
+def tool_profile(root: Path, tree: FrozenTree, sources: Mapping[str, bytes]) -> dict[str, Any]:
+    """Interpreter, dependency versions (each installed (name, version) listed once), the closed child environment, PostgreSQL and the files the runner imports."""
     from quality_gates.run_smokes import _CHILD_ENVIRONMENT_KEYS, _import_roots
 
-    dependencies = sorted((dist.metadata.get("Name", "unknown"), dist.version) for dist in importlib.metadata.distributions())
-    inputs = {path: row for path, row in tree.entries.items() if path.startswith("quality_gates/") and not path.startswith("quality_gates/tests/") or Path(path).name in ("pyproject.toml", "uv.lock", "requirements.txt", "poetry.lock")}
+    dependencies = sorted({(dist.metadata.get("Name", "unknown"), dist.version) for dist in importlib.metadata.distributions()})
     paths = [str(path.resolve()).replace(str(root.resolve()), "<repository>") for path in _import_roots(root)]
     environment = {key: digest(os.environ.get(key)) for key in _CHILD_ENVIRONMENT_KEYS if key not in ("TMPDIR", "TMP", "TEMP")}
     return {
@@ -183,9 +273,9 @@ def tool_profile(root: Path, tree: FrozenTree) -> dict[str, Any]:
         "dependencies": dependencies,
         "import_paths": paths,
         "child_environment_sha256": digest(environment),
-        "inputs": inputs,
+        "inputs": {path: tree.entries[path] for path in tool_inputs(sources)},
         "solet_name": os.environ.get("SOLET_NAME"),
-        "external_fixture_identity": os.environ.get("PLATFORM_SMOKE_FIXTURE_IDENTITY"),
+        "postgres": _postgres_identity(),
     }
 
 
@@ -219,7 +309,7 @@ def _dynamic_names(tree: ast.Module) -> tuple[set[str], list[str]]:
                 if isinstance(value, ast.Constant) and isinstance(value.value, str):
                     names.add(value.value)
                 else:
-                    unknown.append(f"dynamic {name} at line {node.lineno}")
+                    unknown.append(f"dynamic {name} at line {node.lineno} is not proven")
     return names, unknown
 
 
@@ -266,15 +356,13 @@ def _index_source(path: str, body: bytes, entries: Mapping[str, Any], resources:
 
 
 def _external_notices(tree: ast.Module) -> list[str]:
-    """Ancillary state cannot be inferred from repository bytes alone."""
+    """Inputs repository bytes cannot prove. The environment is not one: the runner's child environment is a closed list in the profile."""
     notices: set[str] = set()
     for node in ast.walk(tree):
         if _external_import(node):
-            notices.add("external process/network/database input is unmeasured; execute uncached")
+            notices.add("external process/network/database input is not proven")
         if _file_access(node):
-            notices.add("file/resource target is not fully proven by literal references; execute uncached")
-        if isinstance(node, ast.Attribute) and node.attr in ("environ", "getenv", "home", "gettempdir"):
-            notices.add("environment/host resource input is unmeasured; execute uncached")
+            notices.add("file/resource target is not proven by literal references")
     return sorted(notices)
 
 

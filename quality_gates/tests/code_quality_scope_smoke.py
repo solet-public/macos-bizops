@@ -194,7 +194,7 @@ def _wired_class_names() -> set[str]:
 
 
 def _assert_integration_merge_scopes_to_touched_files() -> None:
-    print("R1: an integration merge scopes syntax and radon to its two touched files, and plans all twenty-one classes")
+    print("R1: an integration merge scopes syntax and radon to its two touched files, and plans all twenty-two classes")
     with _scratch("code_quality_scope_r1_") as root:
         _build_repo(root, base={_EXISTING: _CLEAN}, topic={_ALPHA: _CLEAN, _BETA: _CLEAN})
         seam = getattr(cqc, "plan_run_scope", None)
@@ -203,7 +203,7 @@ def _assert_integration_merge_scopes_to_touched_files() -> None:
         touched = {path.relative_to(root).as_posix() for path in plan["syntax"].paths}
         assert touched == {_ALPHA, _BETA}, "TOUCHED_SET_IS_MERGE_DIFF"
         scope = _require_scope()
-        check("all twenty-one classes are planned", len(plan) == 21 and set(plan) == set(scope.CLASS_NAMES))
+        check("all twenty-two classes are planned", len(plan) == 22 and set(plan) == set(scope.CLASS_NAMES))
         check("syntax, radon_cc and radon_mi are scoped", all(plan[name].mode == "scoped" for name in scope.SCOPED_CLASSES))
         check("radon_cc is scoped to the same two files", {p.relative_to(root).as_posix() for p in plan["radon_cc"].paths} == {_ALPHA, _BETA})
         # D2 in code_quality_scope_dependents_smoke.py proves the direct-importer case; this fixture has none, so the expected set is the touched files.

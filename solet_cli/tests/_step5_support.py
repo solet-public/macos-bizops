@@ -95,7 +95,7 @@ def scrubbed_git_environment(overrides: Mapping[str, str] | None = None) -> dict
 
 _REPO_KB = _ROOT / KB
 HOOKS = "plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks"
-HOOK_FILES = ("coordination_owner.py", "heartbeat_report_alive.py", "rotation_due_watch.py", "wake_waiter.py", "hooks.json")
+HOOK_FILES = ("coordination_owner.py", "rotation_due_watch.py", "wake_waiter.py", "hooks.json")
 PATH_ENV = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 

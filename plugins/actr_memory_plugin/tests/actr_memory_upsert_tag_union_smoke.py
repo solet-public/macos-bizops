@@ -52,6 +52,11 @@ def _check(condition: object, label: str) -> None:
 
 
 class _FakeVector:
+    def find_missing_external_ids(self, namespace: str, candidate_external_ids: list[str]) -> dict[str, Any]:
+        # Holds no vectors, so no memory has segments beyond its own id.
+        del namespace
+        return {"action_status": "completed", "data": {"result": {"missing": list(candidate_external_ids)}}}
+
     def delete_by_external_ids(self, namespace: str, external_ids: list[str]) -> dict[str, Any]:
         del namespace, external_ids
         return {"action_status": "completed"}
@@ -111,9 +116,7 @@ def _make_backend(prior_ids: list[str]) -> tuple[ACTRMemoryBackend, dict[str, An
 
 def test_tag_union_slot_first_deduped() -> None:
     backend, captured, _ = _make_backend(prior_ids=[])
-    result = backend.upsert_memory_by_tag(
-        content="canonical text", tag=_SLOT, tags=[_UMBRELLA, _ORIGIN]
-    )
+    result = backend.upsert_memory_by_tag(content="canonical text", tag=_SLOT, tags=[_UMBRELLA, _ORIGIN])
 
     _check(
         captured["tags"] == [_SLOT, _UMBRELLA, _ORIGIN],
@@ -124,9 +127,7 @@ def test_tag_union_slot_first_deduped() -> None:
 
 def test_tag_union_dedupes_slot_when_passed_again() -> None:
     backend, captured, _ = _make_backend(prior_ids=[])
-    backend.upsert_memory_by_tag(
-        content="x", tag=_SLOT, tags=[_UMBRELLA, _SLOT, _ORIGIN, _UMBRELLA]
-    )
+    backend.upsert_memory_by_tag(content="x", tag=_SLOT, tags=[_UMBRELLA, _SLOT, _ORIGIN, _UMBRELLA])
     _check(
         captured["tags"] == [_SLOT, _UMBRELLA, _ORIGIN],
         f"duplicate slot/umbrella tags are collapsed, order preserved (got {captured['tags']})",

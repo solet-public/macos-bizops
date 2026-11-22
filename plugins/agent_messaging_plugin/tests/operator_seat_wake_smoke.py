@@ -81,6 +81,7 @@ _CHANNEL = _FakeChannel()
 def _operator_row() -> dict[str, Any]:
     return {
         "agent_instance_id": "agi-operator-seat",
+        "session_origin": "registered",
         "host": "operator",
         "host_ref": None,
         "agent_runtime": "claude_code",

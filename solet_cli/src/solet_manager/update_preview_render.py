@@ -12,6 +12,7 @@ from typing import cast
 
 from .colour_census import COLOUR_OUTSIDE_LAUNCHAGENT, colour_outside_guidance
 from .errors import HostRequirementError, SourceTransitionIncompleteError, UpdateBlockedError
+from .launch_topology import SUPERVISOR_LAUNCH_NEEDS_HAND_ROUTE, supervisor_hand_route_guidance
 from .models import ActiveOperation, CommandResult, ExitCode, InstanceInventoryRecordV2, JsonValue
 from .paths import ManagerPaths, update_candidate_cache
 from .update_enrollment import PendingEnrollment, plan_create_origin_enrollment
@@ -302,6 +303,8 @@ def _runtime_preview(request: UpdateRequest, record: InstanceInventoryRecordV2, 
         message, repair = "Runtime preview is blocked before any target write.", "Resolve every listed reason, then preview again."
         if plan.lifecycle.unproven_reason == COLOUR_OUTSIDE_LAUNCHAGENT:
             message, repair = colour_outside_guidance(context.seams.uid, plan.lifecycle.launchagent_label, cast(dict[str, JsonValue], plan.lifecycle.pre_transition))
+        elif plan.lifecycle.unproven_reason == SUPERVISOR_LAUNCH_NEEDS_HAND_ROUTE:
+            message, repair = supervisor_hand_route_guidance(plan.lifecycle.launchagent_label)
         return CommandResult(PREVIEW_KIND, "awaiting_user", message, ExitCode.FAILED if contradiction else ExitCode.HUMAN_ACTION, "runtime_plan_blocked", repair, data=data)
     return CommandResult(PREVIEW_KIND, "runtime_preview_ready", "Runtime preview completed; approve with --yes --approval-fingerprint <runtime fingerprint>.", ExitCode.OK, data=data)
 
@@ -325,5 +328,3 @@ def _blocked_runtime_preview(exc: UpdateBlockedError, journal: dict[str, JsonVal
             "preservation": {"target_byte_writes": 0, "manager_state_writes": 0},
         },
     )
-
-

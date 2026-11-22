@@ -1,17 +1,20 @@
-"""Salesforce org binding loaded from the address book.
+"""The single org binding that predates build 6, read from the address book.
 
-The plugin's ``target_org`` (the sf CLI alias or username every verb is
-invoked against, via `--target-org`) and ``instance_host`` (the pinned
-my-domain host that alias must resolve to) live in a single address-book
-entry named ``salesforce_org``. Both fields are literals — this plugin
-stores NO secret anywhere; the durable credential is the sf CLI's own
-keychain-backed refresh token, and no access token of any kind ever enters
-this process (full CLI delegation — see `client.py`).
+Before build 6 the plugin talked to exactly one org: the address-book entry
+named ``salesforce_org`` holds its ``target_org`` (the sf CLI alias or
+username every verb was invoked against, via `--target-org`) and its
+``instance_host`` (the pinned my-domain host that alias must resolve to). Both
+fields are literals; the entry holds no secret, so it is read with ordinary
+``resolve`` and nothing is taken from the vault.
+
+Build 6 binds many orgs through the vault index in ``orgs.py``. This entry is
+now only the source of the first binding: it is migrated into the index on
+first use and kept until that org is disconnected, so an existing solet keeps
+working without any operator step.
 
 ``instance_host`` is the foreign-target invariant made explicit: the CLI's
 alias cache can hold many orgs, and the pin guarantees the plugin only ever
-talks to the one the operator registered (the work scripts' hardcoded
-host-substring guard, promoted to operator config).
+talks to the org that was registered.
 """
 
 from __future__ import annotations
@@ -20,11 +23,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .constants import (
-    ADDRESS_BOOK_ENTRY_DESCRIPTION,
     ADDRESS_BOOK_ENTRY_NAME,
-    ADDRESS_BOOK_ENTRY_TYPE,
     ADDRESS_BOOK_FIELD_INSTANCE_HOST,
     ADDRESS_BOOK_FIELD_TARGET_ORG,
+    ADDRESS_BOOK_NOT_FOUND_CODE,
     ERROR_ADDRESS_BOOK_ENTRY_INCOMPLETE,
     ERROR_ADDRESS_BOOK_ENTRY_MISSING,
     ERROR_ADDRESS_BOOK_NOT_AVAILABLE,
@@ -41,14 +43,14 @@ class AppConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class SalesforceOrgConfig:
-    """Resolved Salesforce org binding — no secrets, both fields literal."""
+    """One org an executor talks to — no secrets, both fields literal."""
 
     target_org: str
     instance_host: str
 
 
 class AppConfigLoader:
-    """Resolve the Salesforce org binding from ``service_interface::address_book_service``.
+    """Resolve the pre-build-6 org binding from ``service_interface::address_book_service``.
 
     The service is duck-typed so this plugin never imports from
     ``default_address_book_plugin``.
@@ -63,14 +65,32 @@ class AppConfigLoader:
         self._address_book = address_book_service
 
     def load(self) -> SalesforceOrgConfig:
-        """Return the resolved org binding."""
-        result = self._address_book.resolve_with_secrets(name=ADDRESS_BOOK_ENTRY_NAME)
-        entries = self._extract_entries(result)
-        return self._build_config(entries)
-
-    def _extract_entries(self, result: Any) -> list[dict[str, Any]]:
-        if not isinstance(result, dict) or result.get("action_status") != "completed":
+        """Return the registered binding; a missing entry is an error."""
+        config = self.find()
+        if config is None:
             raise AppConfigError(ERROR_ADDRESS_BOOK_ENTRY_MISSING, _missing_entry_message())
+        return config
+
+    def find(self) -> SalesforceOrgConfig | None:
+        """Return the registered binding, or None when no ``salesforce_org`` entry exists.
+
+        Only the address book's own not-found answer means "no entry"; any
+        other failure to read it is raised, never taken as absence.
+        """
+        result = self._address_book.resolve(name=ADDRESS_BOOK_ENTRY_NAME)
+        if isinstance(result, dict) and result.get("action_status") == "completed":
+            return self._build_config(self._extract_entries(result))
+        failure = result.get("error") if isinstance(result, dict) else None
+        if isinstance(failure, dict) and failure.get("code") == ADDRESS_BOOK_NOT_FOUND_CODE:
+            return None
+        code = failure.get("code") if isinstance(failure, dict) else None
+        raise AppConfigError(ERROR_ADDRESS_BOOK_NOT_AVAILABLE, f"The address book could not be read for '{ADDRESS_BOOK_ENTRY_NAME}' ({code or 'no result'}).")
+
+    def delete(self) -> None:
+        """Remove the entry once the org it names is disconnected."""
+        self._address_book.delete(name=ADDRESS_BOOK_ENTRY_NAME)
+
+    def _extract_entries(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         data = result.get("data") or {}
         if not isinstance(data, dict):
             raise AppConfigError(
@@ -99,12 +119,7 @@ class AppConfigLoader:
         if missing:
             raise AppConfigError(
                 ERROR_ADDRESS_BOOK_ENTRY_INCOMPLETE,
-                (
-                    f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' is missing "
-                    f"field_type values: {missing}. Register with target_org (the "
-                    "sf CLI alias or username) and instance_host (the org's "
-                    "my-domain host)."
-                ),
+                (f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' is missing field_type values: {missing}. It needs target_org (the sf CLI alias or username) and instance_host (the org's my-domain host); or bind the org with bind_org instead."),
             )
         return SalesforceOrgConfig(target_org=target_org, instance_host=instance_host)
 
@@ -118,18 +133,4 @@ def _first_value(entries: list[dict[str, Any]], field_type: str) -> str:
 
 
 def _missing_entry_message() -> str:
-    return (
-        f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' not found. "
-        "Register it before running any salesforce verb. Example:\n"
-        "  process_call service_interface::address_book_service::register {\n"
-        f'    "name": "{ADDRESS_BOOK_ENTRY_NAME}",\n'
-        f'    "address_type": "{ADDRESS_BOOK_ENTRY_TYPE}",\n'
-        f'    "description": "{ADDRESS_BOOK_ENTRY_DESCRIPTION}",\n'
-        '    "entries": [\n'
-        f'      {{"field_type": "{ADDRESS_BOOK_FIELD_TARGET_ORG}", '
-        '"value": "<sf-cli-alias-or-username>"}},\n'
-        f'      {{"field_type": "{ADDRESS_BOOK_FIELD_INSTANCE_HOST}", '
-        '"value": "<org>.my.salesforce.com"}}\n'
-        "    ]\n"
-        "  }"
-    )
+    return f"Address book entry '{ADDRESS_BOOK_ENTRY_NAME}' not found. Bind an org with bind_org (an org the sf CLI is logged in to) or login."

@@ -80,14 +80,8 @@ def _encode_credential_value(value: bytes) -> str:
         text = value.decode("utf-8")
     except UnicodeDecodeError:
         b64 = base64.b64encode(value).decode("ascii")
-        return (
-            f"{_RFC2397_DATA_PREFIX}{_RFC2397_BINARY_MEDIATYPE}"
-            f"{_RFC2397_BASE64_SUFFIX},{b64}"
-        )
-    return (
-        f"{_RFC2397_DATA_PREFIX}{_RFC2397_TEXT_MEDIATYPE},"
-        f"{urllib.parse.quote(text, safe=_RFC2397_TEXT_SAFE)}"
-    )
+        return f"{_RFC2397_DATA_PREFIX}{_RFC2397_BINARY_MEDIATYPE}{_RFC2397_BASE64_SUFFIX},{b64}"
+    return f"{_RFC2397_DATA_PREFIX}{_RFC2397_TEXT_MEDIATYPE},{urllib.parse.quote(text, safe=_RFC2397_TEXT_SAFE)}"
 
 
 def _decode_credential_value(stored: str) -> bytes:
@@ -102,10 +96,9 @@ def _decode_credential_value(stored: str) -> bytes:
     header, sep, data = stored.partition(",")
     if not sep:
         raise ValueError(
-            f"malformed RFC 2397 vault value: {_RFC2397_DATA_PREFIX!r} prefix "
-            f"without a ',' separator (header={header!r})",
+            f"malformed RFC 2397 vault value: {_RFC2397_DATA_PREFIX!r} prefix without a ',' separator (header={header!r})",
         )
-    mediatype = header[len(_RFC2397_DATA_PREFIX):]
+    mediatype = header[len(_RFC2397_DATA_PREFIX) :]
     if mediatype.endswith(_RFC2397_BASE64_SUFFIX):
         return base64.b64decode(data)
     return urllib.parse.unquote_to_bytes(data)
@@ -157,7 +150,10 @@ class PerCredentialKeychain(Protocol):
         ...
 
     def store_credential(
-        self, plugin_name: str, credential: str, value: bytes,
+        self,
+        plugin_name: str,
+        credential: str,
+        value: bytes,
     ) -> None:
         """Store ``value`` at (service=``<solet>.<plugin_name>``, account=``<credential>``).
 
@@ -168,7 +164,9 @@ class PerCredentialKeychain(Protocol):
         ...
 
     def retrieve_credential(
-        self, plugin_name: str, credential: str,
+        self,
+        plugin_name: str,
+        credential: str,
     ) -> bytes | None:
         """Return the bytes at (service=``<solet>.<plugin_name>``, account=``<credential>``).
 
@@ -179,7 +177,9 @@ class PerCredentialKeychain(Protocol):
         ...
 
     def delete_credential(
-        self, plugin_name: str, credential: str,
+        self,
+        plugin_name: str,
+        credential: str,
     ) -> bool:
         """Delete (service=``<solet>.<plugin_name>``, account=``<credential>``).
 
@@ -189,7 +189,9 @@ class PerCredentialKeychain(Protocol):
         ...
 
     def exists_credential(
-        self, plugin_name: str, credential: str,
+        self,
+        plugin_name: str,
+        credential: str,
     ) -> bool:
         """Return whether an entry exists at (service=``<solet>.<plugin_name>``, account=``<credential>``)."""
         ...
@@ -230,9 +232,7 @@ class SystemKeychain:
         name = os.environ.get("SOLET_NAME", "").strip()
         if not name:
             raise RuntimeError(
-                "macos_vault_plugin.keychain: SOLET_NAME env var "
-                "is required to resolve the per-solet keychain "
-                "service name.",
+                "macos_vault_plugin.keychain: SOLET_NAME env var is required to resolve the per-solet keychain service name.",
             )
         self._service_name: str = f"{name}-vault"
         self._allow_user_interaction: bool = allow_user_interaction
@@ -317,14 +317,15 @@ class SystemKeychain:
         solet = os.environ.get("SOLET_NAME", "").strip()
         if not solet:
             raise RuntimeError(
-                "macos_vault_plugin.keychain: SOLET_NAME env var is "
-                "required to resolve the per-credential keychain service "
-                "name.",
+                "macos_vault_plugin.keychain: SOLET_NAME env var is required to resolve the per-credential keychain service name.",
             )
         return f"{solet}{PER_CREDENTIAL_SERVICE_SEPARATOR}{plugin_name}"
 
     def store_credential(
-        self, plugin_name: str, credential: str, value: bytes,
+        self,
+        plugin_name: str,
+        credential: str,
+        value: bytes,
     ) -> None:
         """Direct Keychain storage as an RFC 2397 data URI. The OS Keychain provides AES-256-GCM at rest."""
         import keyring
@@ -336,40 +337,49 @@ class SystemKeychain:
         )
 
     def retrieve_credential(
-        self, plugin_name: str, credential: str,
+        self,
+        plugin_name: str,
+        credential: str,
     ) -> bytes | None:
         import keyring
 
         with self._read_gate():
             stored = keyring.get_password(
-                self._scoped_service_name(plugin_name), credential,
+                self._scoped_service_name(plugin_name),
+                credential,
             )
         if stored is None:
             return None
         return _decode_credential_value(stored)
 
     def delete_credential(
-        self, plugin_name: str, credential: str,
+        self,
+        plugin_name: str,
+        credential: str,
     ) -> bool:
         import keyring
 
         try:
             keyring.delete_password(
-                self._scoped_service_name(plugin_name), credential,
+                self._scoped_service_name(plugin_name),
+                credential,
             )
             return True
         except keyring.errors.PasswordDeleteError:
             return False
 
     def exists_credential(
-        self, plugin_name: str, credential: str,
+        self,
+        plugin_name: str,
+        credential: str,
     ) -> bool:
         import keyring
 
         with self._read_gate():
             return (
                 keyring.get_password(
-                    self._scoped_service_name(plugin_name), credential,
+                    self._scoped_service_name(plugin_name),
+                    credential,
                 )
                 is not None
             )
@@ -390,8 +400,7 @@ class SystemKeychain:
         solet = os.environ.get("SOLET_NAME", "").strip()
         if not solet:
             raise RuntimeError(
-                "macos_vault_plugin.keychain.list_credentials_under_solet: "
-                "SOLET_NAME env var is required.",
+                "macos_vault_plugin.keychain.list_credentials_under_solet: SOLET_NAME env var is required.",
             )
         expected_service_prefix = f"{solet}{PER_CREDENTIAL_SERVICE_SEPARATOR}"
         dump = _security_dump_keychain()
@@ -403,18 +412,44 @@ class SystemKeychain:
         return sorted(seen)
 
 
+def read_generic_password_by_service(service: str) -> str | None:
+    """Read a service-only generic password under the daemon prompt policy.
+
+    External items use their owner's encoding and account name. The caller
+    authorizes the service before invoking this lookup.
+    """
+    import Security
+
+    query = {
+        Security.kSecClass: Security.kSecClassGenericPassword,
+        Security.kSecAttrService: service,
+        Security.kSecMatchLimit: Security.kSecMatchLimitOne,
+        Security.kSecReturnData: True,
+    }
+    with keychain_interaction.user_interaction_disallowed():
+        status, data = Security.SecItemCopyMatching(query, None)
+
+    if status == Security.errSecItemNotFound:
+        return None
+    if status != Security.errSecSuccess or data is None:
+        raise RuntimeError(f"Could not read external Keychain item (OSStatus {status}).")
+    return bytes(data).decode("utf-8")
+
+
 def _security_dump_keychain() -> str:
     """Run ``security dump-keychain`` and return its stdout, raising on non-zero exit."""
     import subprocess
 
     completed = subprocess.run(  # noqa: S603, S607
         ["security", "dump-keychain"],
-        capture_output=True, text=True, check=False, timeout=15,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
     )
     if completed.returncode != 0:
         raise RuntimeError(
-            f"`security dump-keychain` exited {completed.returncode}: "
-            f"{completed.stderr.strip()!r}",
+            f"`security dump-keychain` exited {completed.returncode}: {completed.stderr.strip()!r}",
         )
     return completed.stdout
 
@@ -434,7 +469,8 @@ def _split_keychain_dump_records(dump: str) -> list[str]:
 
 
 def _extract_canonical_credential(
-    record: str, expected_service_prefix: str,
+    record: str,
+    expected_service_prefix: str,
 ) -> tuple[str, str] | None:
     """Return ``(plugin_name, credential)`` iff record matches the canonical scheme."""
     import re
@@ -447,7 +483,7 @@ def _extract_canonical_credential(
     account = acct_match.group(1)
     if not service.startswith(expected_service_prefix):
         return None
-    plugin_segment = service[len(expected_service_prefix):]
+    plugin_segment = service[len(expected_service_prefix) :]
     if not plugin_segment or PER_CREDENTIAL_SERVICE_SEPARATOR in plugin_segment:
         return None
     if not account or account == service:
@@ -465,10 +501,7 @@ def get_keychain() -> KeychainBackend:
     keychain = SystemKeychain()
     if not keychain.is_available():
         raise RuntimeError(
-            "macos_vault_plugin: SystemKeychain reports no real keyring backend "
-            "available on this host. The local profile requires macOS Keychain "
-            "per [[solet-locality]]; non-macOS hosts use the cloud profile "
-            "bindings (secrets_manager_vault_plugin).",
+            "macos_vault_plugin: SystemKeychain reports no real keyring backend available on this host. The local profile requires macOS Keychain per [[solet-locality]]; non-macOS hosts use the cloud profile bindings (secrets_manager_vault_plugin).",
         )
     return keychain
 

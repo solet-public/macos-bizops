@@ -30,7 +30,7 @@ from platform_dev_surface_plugin.quality.operations import QualityGateError, Qua
 from quality_gates import run_smokes
 from quality_gates.smoke_proof import campaign_results
 
-VERBS = ("select_smokes", "run_selected_smokes", "get_smoke_proof", "list_smoke_proofs", "get_smoke_proof_history", "correct_smoke_proof", "clear_smoke_proof", "retire_smoke_proof", "reinstate_smoke_proof", "ensure_full_smoke_schedule", "trigger_full_smoke_battery")
+VERBS = ("select_smokes", "run_selected_smokes", "get_smoke_proof", "list_smoke_proofs", "get_smoke_proof_history", "correct_smoke_proof", "clear_smoke_proof", "retire_smoke_proof", "reinstate_smoke_proof", "trigger_full_smoke_battery", "list_full_smoke_campaigns")
 
 
 class SurfaceTests(unittest.TestCase):
@@ -126,7 +126,7 @@ class SurfaceTests(unittest.TestCase):
                 doc = json.loads((ROOT / f"ananta/knowledge_base/processes/quality_service/{verb}.json").read_text())
                 self.assertEqual(doc["process_key"], f"service_interface::quality_service::{verb}")
                 self.assertTrue(200 <= len(doc["embedding_description"]) <= 400)
-        self.assertEqual(QualityServiceInterface.INTERFACE_VERSION, "1.2.0")
+        self.assertEqual(QualityServiceInterface.INTERFACE_VERSION, "2.0.0")
 
     def test_operations_call_shared_producer_and_principal(self) -> None:
         ops = QualityOperations(ROOT, os.environ.get("SOLET_NAME", "fixture-solet"))
@@ -137,7 +137,7 @@ class SurfaceTests(unittest.TestCase):
         plugin._quality = ops
         with self.assertRaises(PermissionError):
             plugin.run_selected_smokes({"schema": "request"})
-        context = SimpleNamespace(calling_plugin="fixture", principal_id="owner", principal_kind="plugin")
+        context: Any = SimpleNamespace(calling_plugin="fixture", principal_id="owner", principal_kind="plugin")
         with patch("quality_gates.smoke_proof.run_selected_smokes", return_value={"status": "completed"}) as runner:
             self.assertEqual(plugin.run_selected_smokes({"schema": "request"}, call_context=context)["status"], "completed")
             self.assertEqual(runner.call_args.kwargs["principal"], "plugin:fixture")

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from ananta.core.actions.action_factory import UNKNOWN_ARGUMENTS_ERROR_CODE
 from ananta.core.domain.enums import ActionStatus
+from ananta.core.domain.error_codes import ErrorCode
 from ananta.core.result_processing import ErrorProcessorKind, ResultProcessorKind
 from ananta.core.state.job_completion_route import BRIDGE_WAIT_ATTACHED_KEY
 
@@ -66,6 +67,10 @@ ERR_PROCESS_CALL_FAILED: Final[str] = "bridge.process_call_failed"
 ERR_ACTION_RESULT_NOT_FOUND: Final[str] = "bridge.action_result_not_found"
 ERR_DEPENDENCIES_NOT_READY: Final[str] = "bridge.dependencies_not_ready"
 ERR_ATTACHMENT_MISSING: Final[str] = "bridge.attachment_missing"
+
+# The core code for a call that omits a required argument; it keeps the generic
+# bridge code but is answered with a 4xx (see ``_caller_error_status``).
+_MISSING_ARGUMENTS_ERROR_CODE: Final[str] = "action.missing_required_arguments"
 
 # Stable caller-input failures retain their public code across submission.
 _ARGUMENT_ERROR_PASSTHROUGH_CODES: Final[frozenset[str]] = frozenset(
@@ -147,12 +152,17 @@ class BridgeError(Exception):
     The ``code`` attribute carries a stable bridge or preserved argument token so
     the HTTP layer can map the failure to a status code (and the MCP
     client receives the same token verbatim).
+
+    ``status`` is set only when one code covers both a caller's mistake and a
+    server fault, so the code alone cannot say which; the HTTP layer then
+    answers with this status and leaves the body (code and message) as it was.
     """
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, status: int | None = None) -> None:
         super().__init__(message)
         self.code: str = code
         self.message: str = message
+        self.status: int | None = status
 
 
 _MCP_FAILURE_CONTEXT: ContextVar[tuple[str, str]] = ContextVar(
@@ -802,13 +812,31 @@ class PlatformSurface:
             error_code = getattr(exc, "error_code", None)
             if isinstance(error_code, str) and error_code in _ARGUMENT_ERROR_PASSTHROUGH_CODES:
                 raise BridgeError(error_code, str(exc)) from exc
-            raise BridgeError(ERR_PROCESS_CALL_FAILED, str(exc)) from exc
+            raise BridgeError(ERR_PROCESS_CALL_FAILED, str(exc), status=self._caller_error_status(error_code, process_key)) from exc
         return {
             "status": "queued",
             "action_id": action_id,
             "flow_id": flow_id,
             "process_key": process_key,
         }
+
+    def _caller_error_status(self, error_code: object, process_key: str) -> int | None:
+        """The 4xx for a refusal that is the caller's mistake, else ``None`` (a server fault, 500).
+
+        An unknown process and a missing required argument keep the generic
+        ``bridge.process_call_failed`` code and message (the seed-factory CI
+        matches that body), so the HTTP status is the only thing that tells the
+        caller its own request was wrong. An unknown process is the caller's
+        mistake only when the registry is intact and lacks the key; a registry
+        that is not a dict, or whose entry for the key is malformed, is a fault.
+        """
+        if error_code == _MISSING_ARGUMENTS_ERROR_CODE:
+            return 400
+        if error_code == ErrorCode.ACTION_PROCESS_NOT_FOUND:
+            registered = self._action_factory.process_registry.get("processes")
+            if isinstance(registered, dict) and process_key not in registered:
+                return 404
+        return None
 
     def _resolve_originating_role(self, bridge: BridgeSessionState) -> str:
         """◆R2: the durable role name held by the originating bridge, or "".

@@ -57,6 +57,8 @@ from ananta.llm.agent_messaging.service import role_message_external_id
 from ananta.llm.agent_messaging.state_results import StateOperationError
 
 from .bridge_sessions import BridgeNotFoundError, BridgeQueueFullError
+from .channel_support import channel_carries_message
+from .constants import SYSTEM_SCHEDULER_ID
 from .delivery_drive import CodexPickupStore, schedule_drive_on_delivery
 from .peer_registry import PeerAmbiguousError, PeerUnreachableError
 from .sender_provenance import (
@@ -151,12 +153,16 @@ DELIVERY_QUEUED_WATCHER: Final[str] = "queued_watcher"
 # durable and Control #5's repair loop re-delivers on the holder's next attach.
 DELIVERY_QUEUED_FOR_REPLAY: Final[str] = "queued_for_replay"
 
-# A stored message cannot start a turn through a watcher or replay-only
-# delivery unless the managed-session drive was actually handed to the
-# executor (or already completed). The send result stays ``completed`` (the
-# message IS stored and durable); it only gains ``send_status`` and
-# ``sender_notice`` so a sender can tell it will not be woken and must not
-# resend it.
+_NOT_DELIVERED_YET_OUTCOMES: Final[frozenset[str]] = frozenset({"driver_scheduled", "driver_pending"})
+
+# Two sender-visible answers for a stored send, each selected by its drive
+# outcome. A drive handed to the executor that has not reached the pane yet
+# (``_NOT_DELIVERED_YET_OUTCOMES``) gets ``stored_not_delivered_yet`` and an
+# ``outcome_read``: the one read that says whether the recipient was reached.
+# A send with no drive at all (``_NO_DRIVE_OUTCOMES``) on a watcher or replay
+# delivery cannot start a turn; it gets ``stored_no_wake``. Both keep the send
+# result ``completed`` (the message IS stored and durable) and tell the sender
+# not to resend it.
 _NO_DRIVE_OUTCOMES: Final[frozenset[str]] = frozenset(
     {
         "not_managed",
@@ -180,10 +186,12 @@ def _add_stored_no_wake_notice(
     delivery: str,
     drive_on_delivery: DriveOnDeliveryOutcome,
 ) -> dict[str, Any]:
-    """Annotate durable watcher/replay sends that have no successful drive."""
-    if drive_on_delivery == "driver_scheduled":
-        payload["send_status"] = "stored_wake_pending"
-        payload["sender_notice"] = f"The message is already stored as {payload['message_id']}; the driver is merely scheduled, wake confirmation is pending and turn start is unconfirmed. Do NOT resend it."
+    """Annotate a stored send whose recipient is not woken yet, or will not be woken by this send."""
+    if drive_on_delivery in _NOT_DELIVERED_YET_OUTCOMES:
+        message_id = payload["message_id"]
+        payload["send_status"] = "stored_not_delivered_yet"
+        payload["outcome_read"] = {"process": "plugin::agent_messaging_plugin::peer_send_outcome", "parameters": {"message_id": message_id}}
+        payload["sender_notice"] = f"NOT DELIVERED YET: the message is stored as {message_id} and the wake of the recipient is only queued; a busy pane gets nothing typed. Read plugin::agent_messaging_plugin::peer_send_outcome with this message_id to learn whether the recipient was reached. Do NOT resend it."
     elif delivery in _NO_WAKE_DELIVERIES and drive_on_delivery in _NO_DRIVE_OUTCOMES:
         payload["send_status"] = "stored_no_wake"
         payload["sender_notice"] = f"The message is already stored as {payload['message_id']}; no turn was scheduled, so the recipient will not be woken. Do NOT resend it; nudge the recipient's pane or tell the operator if it matters."
@@ -411,10 +419,10 @@ def dispatch_peer_send(
         )
         delivery_kind = DELIVERY_QUEUED_WATCHER if recipient.is_watcher else DELIVERY_QUEUED_NOTIFICATION
         delivered_bridge = recipient.bridge_id
-    # A4 (2026-08-04): the REL-05 direct-wake insurance outbox retired here —
-    # sweep_overdue_sessions + _notify_steward_of_overdue is its successor,
-    # keyed on the recipient's own report_by promise rather than a per-message
-    # consumption heuristic. See the architect memo, Amendment 4.
+    # A4 (2026-08-04): the REL-05 direct-wake insurance outbox retired here.
+    # Nothing replaces it: no timer or sweep watches for an unconsumed
+    # message. The message is durable in the ledger and the recipient reads
+    # its inbox when it chooses. See the architect memo, Amendment 4.
     # Drive-on-delivery (2026-08-04): a managed recipient's driver channel
     # gets an extra best-effort nudge ALONGSIDE the notify above (never
     # instead of it — this call cannot raise and cannot change delivery_kind).
@@ -433,23 +441,28 @@ def dispatch_peer_send(
     # not a fix, it is a control nobody can reason about — and an uninvoked one
     # is worse, because the next reader has to work out what it was for.
     #
-    # THE TRAP IT WAS WRITTEN TO DISARM IS REAL AND MOVED, NOT DROPPED: see
-    # ``rotation_self_notice._notify_rotation_self``, which now carries it at
-    # the call site where the decision lives. In short — ``drive_on_delivery``
+    # THE TRAP IT WAS WRITTEN TO DISARM IS REAL: ``drive_on_delivery``
     # NO-OPS for a session with no managed row (every operator-present seat) and
-    # fires on every managed watcher-held worker, so a notice routed through
-    # this default looks perfectly well behaved when hand-tested on a seat and
-    # injects a turn on exactly the population it was meant to protect.
+    # fires on every managed watcher-held worker, so a machine-generated notice
+    # routed through this default looks perfectly well behaved when hand-tested
+    # on a seat and injects a turn on exactly the population it was meant to
+    # protect. (The one sender that carried this, a session's own context-band
+    # notice, was removed; the trap stays for any future platform-sent notice.)
     #
     # iss_ab680764: the send returns once the message is durable. Only the
     # managed-row lookup runs here; the tmux drive itself runs on the bounded
     # delivery-drive executor and this result reads ``driver_scheduled``.
+    # prb_57c118ad: when the native wake adapter just queued the message on a
+    # live, wake_capable, non-watcher channel, the session surfaces it itself;
+    # the drive is skipped (``driver_not_needed``) because its notice would only
+    # repeat the message and cost that session a turn.
     drive_outcome = schedule_drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
         recipient_agent_session_id=recipient.agent_session_id,
         sender_label=sender_session_label,
         message_id=str(result.message_id),
+        channel_delivered=channel_carries_message(recipient, native_wake_adapter=delivery_kind == DELIVERY_QUEUED_WAKE),
         recipient_agent_id=recipient.agent_id,
     )
     return PeerSendOutcome(
@@ -719,14 +732,16 @@ def _deliver_important_to_binding(
     # two-way ROLE addressing works for them too — the SAME helper the native wake
     # envelope uses, so it is transport-agnostic and adds no role-coupling to the
     # forwarder. Empty ``reply_to_role`` yields the instance reply-to, matching the
-    # native path.
-    hinted_prose = f"{delivered_prose}\n\n" + build_wake_reply_hint(
+    # native path; the scheduler sentinel yields no reply-to at all, so the prose
+    # stays bare instead of ending in a blank line.
+    reply_hint = build_wake_reply_hint(
         reply_to_role=reply_to_role,
         sender_agent_id=sender_agent_id,
         sender_agent_instance_id=sender_agent_instance_id,
         thread_id=thread_id,
         message_id=message_id,
     )
+    hinted_prose = f"{delivered_prose}\n\n{reply_hint}" if reply_hint else delivered_prose
     bridge_manager.append_event(
         recipient.bridge_id,
         EVENT_PEER_MESSAGE,
@@ -889,12 +904,14 @@ def dispatch_role_send(
     # Drive-on-delivery (2026-08-04): ALONGSIDE the notify above, never
     # instead of it — best-effort, cannot raise, cannot change delivery_kind.
     # iss_ab680764: scheduled off the request path, as in dispatch_peer_send.
+    # prb_57c118ad: skipped when the channel carried the message, as there.
     drive_outcome = schedule_drive_on_delivery(
         state_service,
         recipient_agent_instance_id=recipient.agent_instance_id,
         recipient_agent_session_id=recipient.agent_session_id,
         sender_label=sender_session_label,
         message_id=message_id,
+        channel_delivered=channel_carries_message(recipient, native_wake_adapter=delivery_kind == DELIVERY_QUEUED_WAKE),
         recipient_agent_id=recipient.agent_id,
         recipient_role_name=role_name,
     )
@@ -928,9 +945,18 @@ def build_wake_reply_hint(
     streamable recipients get the same two-way role reply-to — transport-agnostic,
     with no role-coupling in the forwarder. ``reply_to_role`` is treated as an
     opaque, operator-defined string (never enumerated / special-cased).
+
+    Returns the EMPTY string for a send stamped with the scheduler sentinel
+    (``SYSTEM_SCHEDULER_ID``, a send with no caller identity): that stamp is a
+    provenance label, not an address anyone holds, so a reply instruction naming
+    it reaches no one. A hint that cannot be answered is worse than none. The
+    message is still delivered; callers join the hint only when it is non-empty.
     """
     if reply_to_role:
         return f'(reply via peer_send_by_name with name={reply_to_role}; prefix prose with "IMPORTANT: " only if you need a response. thread_id={thread_id}, message_id={message_id}.)'
+    # The scheduler sentinel is not a routable address: omit the instruction.
+    if sender_agent_instance_id == SYSTEM_SCHEDULER_ID:
+        return ""
     # WS-2c V4 / A2: the sender's STABLE session key rides ALONGSIDE the instance
     # id, never replacing it — old receivers keep reading the field they already
     # know, and a receiver whose stored instance id has rotated has a second key

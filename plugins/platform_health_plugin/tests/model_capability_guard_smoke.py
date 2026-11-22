@@ -7,8 +7,8 @@ body running against the repo's real-shape in-memory state fake, with every
 fetch answered by an ``httpx.MockTransport`` handler (real-shaped fixtures from
 the agent_messaging refresh smoke) and the harness model lists read from that
 smoke's hermetic fixture (a temporary HOME with a Claude cache and a stub Codex
-binary), so no result depends on the host it runs on. Delivery is a recording double standing in
-for ``peer_send_by_name``. Age scenarios use a fake clock and cells seeded
+binary), so no result depends on the host it runs on. A recording double stands in for
+``peer_send_by_name`` so the smoke can inspect the operator notices. Age scenarios use a fake clock and cells seeded
 directly, so no test depends on how long it takes to run.
 
 The cron fire path runs through the REAL platform classes (PluginProcessScanner
@@ -18,12 +18,13 @@ starting-action entry is submitted through the real
 ``EventOrchestrator._submit_starting_actions``.
 
 Run:
-    PYTHONPATH=<lane worktree> .venv/bin/python3 plugins/platform_health_plugin/tests/model_capability_guard_smoke.py
+    PYTHONPATH=<linked worktree> .venv/bin/python3 plugins/platform_health_plugin/tests/model_capability_guard_smoke.py
 """
 
 from __future__ import annotations
 
 import ast
+import dataclasses
 import logging
 import sys
 import threading
@@ -31,6 +32,9 @@ import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import patch
+
+import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 _TESTS = Path(__file__).resolve().parent
@@ -46,29 +50,35 @@ for _entry in (
     if str(_entry) not in sys.path:
         sys.path.insert(0, str(_entry))
 
-import host_disk_guard_smoke as host  # noqa: E402 -- shares the real-platform fixtures (registry, fire path, scheduling double)
+import guard_test_support as fixtures  # noqa: E402 -- shared real-platform fixtures
 import model_capability_refresh_smoke as refresh_fixtures  # noqa: E402  # pyright: ignore[reportMissingImports] -- dynamic sibling fixture path
-import platform_health_plugin.plugin as plugin_module  # noqa: E402
 from _real_state_fake import RealShapeState  # noqa: E402  # pyright: ignore[reportMissingImports] -- dynamic sibling fixture path
+from ananta.core.actions.action_factory import ActionFactory  # noqa: E402
+from ananta.core.config.environment_config import EnvironmentConfig  # noqa: E402
 from ananta.core.domain.enums import ProcessorPolicyCategory  # noqa: E402
 from ananta.core.event_orchestrator import EventOrchestrator  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 from catalog_guard_test_support import (  # noqa: E402  # pyright: ignore[reportMissingImports]
     _BASE,
-    ROLE,
+    _RESULT_KEYS,
     _CatalogMessagingPlugin,
     _Clock,
     _detail_outage_handler,
     _failing_handler,
     _failure_envelope,
+    _guard_logs,
     _healthy_handler,
+    _LogCapture,
     _no_renewal_handler,
+    _seed_cell,
+    _status_marker,
     _success,
 )
 from default_scheduling_plugin.factories.schedule_factory import ScheduleFactory  # noqa: E402
 from default_scheduling_plugin.validation import validate_cron_action_def  # noqa: E402
 from platform_health_plugin import model_capability_guard as guard  # noqa: E402
-from platform_health_plugin.host_disk_guard import STATE_NAMESPACE  # noqa: E402
+from platform_health_plugin.constants import PLUGIN_NAME, SWEEP_PROCESS_NAME  # noqa: E402
+from platform_health_plugin.guard_support import STATE_NAMESPACE  # noqa: E402
 from platform_health_plugin.model_capability_guard import (  # noqa: E402
     CHECK_CRON_PROCESS_KEY,
     CHECK_PROCESS_KEY,
@@ -83,6 +93,7 @@ from platform_health_plugin.plugin import PlatformHealthPlugin  # noqa: E402
 
 from agent_messaging_plugin import model_capability_verbs as verbs  # noqa: E402
 from agent_messaging_plugin import schema as owner_schema  # noqa: E402
+from agent_messaging_plugin.model_capability_fetch import SOURCE_LEADERBOARD_HTML  # noqa: E402
 from agent_messaging_plugin.model_capability_store import CATALOG_PAGE_SIZE, CATALOG_READ_CEILING  # noqa: E402
 from quality_gates import whole_tree_integration_gate as whole_tree_gate  # noqa: E402
 
@@ -106,44 +117,21 @@ def _check(condition: object, label: str) -> None:
 class _Orchestrator:
     def __init__(self, messaging: object | None, state: RealShapeState) -> None:
         plugins: dict[str, object] = {} if messaging is None else {"agent_messaging_plugin": messaging}
-        self.plugin_manager = host._FixturePluginManager(plugins)  # noqa: SLF001
+        self.plugin_manager = fixtures._FixturePluginManager(plugins)  # noqa: SLF001
         self._state = state
 
     def get_service(self, name: str) -> object | None:
         return self._state if name == "state_service" else None
 
 
-def _world(*, handler: Any = _healthy_handler, delivery: str = "queued_wake") -> tuple[_Orchestrator, _CatalogMessagingPlugin, RealShapeState]:
+def _world(*, handler: Any = _healthy_handler) -> tuple[_Orchestrator, _CatalogMessagingPlugin, RealShapeState]:
     state = RealShapeState()
-    messaging = _CatalogMessagingPlugin(state, handler=handler, delivery=delivery)
+    messaging = _CatalogMessagingPlugin(state, handler=handler)
     return _Orchestrator(messaging, state), messaging, state
 
 
-def _run(orch: _Orchestrator, clock: _Clock, *, role: str | None = ROLE, state: dict[str, Any] | None = None) -> dict[str, Any]:
-    return run_model_capability_guard(orch, config=ModelCapabilityGuardConfig(alert_role=role), state=state if state is not None else {}, clock=clock)
-
-
-def _seed_cell(state: RealShapeState, model: str, *, age: timedelta, window_hours: int = 72) -> None:
-    measured = (_BASE - age).isoformat()
-    record = {
-        "provider": "anthropic",
-        "runtime": "claude_code",
-        "model": model,
-        "effort": "high",
-        "capability_score": 50.0,
-        "cost_per_task_usd": 1.0,
-        "relative_cost_multiplier": 1.0,
-        "currency": "USD",
-        "effort_supported": True,
-        "measured_at": measured,
-        "accepted_at": measured,
-        "acceptance": owner_schema.CELL_ACCEPTANCE_ACCEPTED,
-        "agreeing_observation_ids": [],
-        "disagreement_note": None,
-        "staleness_window_hours": window_hours,
-        "last_refresh_run_id": "run-seed",
-    }
-    state.write_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": guard.TABLE_MODEL_CAPABILITY_CELL, "record": record})
+def _run(orch: _Orchestrator, clock: _Clock, *, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    return run_model_capability_guard(orch, config=ModelCapabilityGuardConfig(), state=state if state is not None else {}, clock=clock)
 
 
 def _seeded_world(*, old_age: timedelta, window_hours: int = 72) -> tuple[_Orchestrator, _CatalogMessagingPlugin, _Clock]:
@@ -159,15 +147,6 @@ def _seeded_world(*, old_age: timedelta, window_hours: int = 72) -> tuple[_Orche
     return orch, messaging, clock
 
 
-class _LogCapture(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(level=logging.ERROR)
-        self.messages: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.messages.append(record.getMessage())
-
-
 # ─── The cron-fired verb runs the refresh ───────────────────────────────────
 
 
@@ -181,64 +160,145 @@ def test_guard_invokes_the_refresh_with_the_cron_trigger() -> None:
     _check("cron" in verbs._VALID_TRIGGERS, "the trigger the guard sends is one the refresh accepts")  # noqa: SLF001
     _check(result["status"] == "ok" and result["renewed"] is True, "a healthy first run is ok and renewed a cell")
     _check(result["cells_accepted"] == 3 and result["accepted_cell_count"] == 3, "the result carries the real run counts (one cell on two sources, two on the leaderboard alone)")
-    _check(result["alerted"] is False and messaging.sends == [], "an ok first tick is quiet (marker baseline is ok)")
+    _check(result["transitioned"] is False and messaging.sends == [], "an ok first tick is not a transition (marker baseline is ok)")
+
+
+def _expect_fields(result: dict[str, Any], label: str, **expected: object) -> None:
+    actual = {key: result.get(key) for key in expected}
+    _check(actual == expected, f"{label}: {actual!r}")
+
+
+def _expect_text(text: str, label: str, *fragments: str) -> None:
+    missing = [fragment for fragment in fragments if fragment not in text]
+    _check(not missing, f"{label} (missing {missing!r})")
+
+
+# ─── A severity change is recorded and logged ───────────────────────────────
+
+
+def test_a_severity_change_is_recorded_once() -> None:
+    orch, messaging, clock = _seeded_world(old_age=timedelta(hours=1))
+    state = messaging.state
+    markers: list[str | None] = []
+    with _guard_logs() as capture:
+
+        def run(label: str, expected_status: str, expected_transition: bool) -> None:
+            before = len(capture.transitions())
+            result = _run(orch, clock)
+            _expect_fields(result, label, status=expected_status, transitioned=expected_transition)
+            _check(set(result) == _RESULT_KEYS | {"advisories", "historical_unrenewed_cell_count"}, "the result carries the status fields and advisories")
+            markers.append(_status_marker(state))
+            _check(len(capture.transitions()) - before == int(expected_transition), f"{label}: transition log count")
+
+        run("a healthy first run", "ok", False)
+        messaging.canned_envelope = _failure_envelope("refresh_fetch_failed", "model capability refresh could not fetch: boom")
+        run("a refresh failure", "critical", True)
+        _expect_text(capture.transitions()[0][1], "failure envelope code reaches the transition log", "refresh_fetch_failed")
+        run("the same failure again", "critical", False)
+        messaging.canned_envelope = None
+        clock.offset = timedelta(hours=48)  # m-old is now 49h old; the fresh renewal makes the current run healthy
+        run("a successful partial renewal recovery", "ok", True)
+        messaging.touch_models = ["m-old", "m-fresh"]
+        clock.offset += timedelta(minutes=1)
+        run("a healthy refresh", "ok", False)
+        clock.offset += timedelta(minutes=1)  # the next daily refresh measures strictly later than the last
+        run("a quiet ok", "ok", False)
+    levels = [level for level, _ in capture.transitions()]
+    _check(levels == [logging.ERROR, logging.INFO], "the transitions log at error (critical) and info (ok recovery), in order")
+    _check(markers == [None, "critical", "critical", "ok", "ok", "ok"], "the marker follows every status after the first change")
+    _check(len(messaging.sends) == 1, "the zero-reading failure sends one notice across the severity sequence")
+    _check({field.name for field in dataclasses.fields(ModelCapabilityGuardConfig)} == {"warning_age"}, "the guard config holds only warning_age: it has no target to message")
 
 
 # ─── (a) failures ────────────────────────────────────────────────────────────
 
 
-def test_fetch_failure_raises_critical_once_and_a_repeat_sends_nothing() -> None:
-    orch, messaging, _ = _world()
+def test_fetch_failure_is_critical_logged_once_and_a_repeat_logs_nothing() -> None:
+    orch, messaging, state = _world()
     clock = _Clock(real=True)
     _run(orch, clock)  # healthy baseline: one accepted cell
     messaging.handler = _failing_handler
+    day = clock().date()
+    with _guard_logs() as capture, patch.object(EnvironmentConfig, "solet_name", return_value="catalog-smoke"):
+        first = _run(orch, clock)
+        runs = state.query_state(AGENT_ROLE_BINDING_NAMESPACE, {"table": owner_schema.TABLE_MODEL_CAPABILITY_REFRESH_RUN})["data"]["records"]
+        failed_run_id = runs[-1]["id"]
+        second = _run(orch, clock)
+    _expect_fields(first, "a fetch failure changes status", status="critical", transitioned=True)
+    _expect_fields(second, "another failure keeps status", status="critical", transitioned=False)
+    _check(len(first["sources_failed"]) == 1, "only the leaderboard source failed")
+    _check(_status_marker(state) == "critical", "the marker records critical")
+    _check([level for level, _ in capture.transitions()] == [logging.ERROR], "the repeated failure logs one transition at ERROR")
+    details = (f"{SOURCE_LEADERBOARD_HTML}: http_error", "readings_gathered=0", "cells_accepted=0", "Oldest accepted cell", "h old")
+    _expect_text(capture.transitions()[0][1], "transition details", *details, "CRITICAL", "selector still works from the last accepted readings")
+    _check([send["name"] for send in messaging.sends] == ["Catalog-Smoke-Main"], "one notice went to the solet-local Main role")
+    _expect_text(messaging.sends[0]["content"], "notice details", *details, f"{day} UTC", f"refresh run {failed_run_id}")
+
+
+def test_zero_row_refresh_preserves_cells_and_notifies_again_the_next_day() -> None:
+    def empty_page(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<table><tr><th>Model</th></tr></table>")
+
+    orch, messaging, state = _world(handler=empty_page)
+    clock = _Clock()
+    _seed_cell(state, "claude-sonnet-5", age=timedelta(hours=21))
+    query = {"table": owner_schema.TABLE_MODEL_CAPABILITY_CELL, "filters": {"model": "claude-sonnet-5"}}
+    prior = state.query_state(AGENT_ROLE_BINDING_NAMESPACE, query)["data"]["records"][0]
     first = _run(orch, clock)
-    _check(first["status"] == "critical" and first["transitioned"] is True and first["alerted"] is True, "a fetch failure is critical and alerts")
-    _check(len(first["sources_failed"]) == 1, "the result lists the failed source (with no leaderboard no cell is discovered, so no per-cell fetch fails)")
-    _check(len(messaging.sends) == 1 and messaging.sends[0]["name"] == ROLE, "exactly one alert, to the configured role")
-    text = messaging.sends[0]["content"]
-    _check("CRITICAL" in text and "readings_gathered=0" in text and "cells_accepted=0" in text, "the alert names the run counts")
-    _check("artificial_analysis_leaderboard_html" in text, "the alert names the failed source")
-    _check("Oldest accepted cell" in text and "h old" in text, "the alert names the oldest accepted cell's age")
-    _check("selector still works from the last accepted readings" in text, "the alert says the selector keeps serving the last accepted readings")
-    second = _run(orch, clock)
-    _check(second["status"] == "critical" and second["transitioned"] is False and second["alerted"] is False, "a second identical failure is not a transition")
-    _check(len(messaging.sends) == 1, "a second identical failure sends nothing")
+    # Reconstruct the guard and sender against the same durable state.
+    replacement = _CatalogMessagingPlugin(state, handler=empty_page)
+    orch = _Orchestrator(replacement, state)
+    repeat = _run(orch, clock)
+    _check(len(messaging.sends) == 1 and replacement.sends == [], "the same UTC day is suppressed across guard instances")
+    clock.offset += timedelta(days=1)
+    following = _run(orch, clock)
+    _check(len(replacement.sends) == 1, "the following day sends one notice")
+    _expect_text(replacement.sends[0]["content"], "next day's notice is dated", f"{clock().date()} UTC")
+    _expect_text(messaging.sends[0]["content"], "first notice explains retained cells", "thin_page: 0 rows parsed", "21.0h old")
+    _check([result["transitioned"] for result in (first, repeat, following)] == [True, False, False], "new days can notify at the same severity")
+    for result in (first, repeat, following):
+        _expect_fields(result, "the empty leaderboard renews nothing", readings_gathered=0, cells_accepted=0, renewed=False)
+        _check(result["sources_failed"][0].startswith(f"{SOURCE_LEADERBOARD_HTML}: thin_page: 0 rows parsed"), "the guard returns the typed zero-row cause")
+    row = state.query_state(AGENT_ROLE_BINDING_NAMESPACE, query)["data"]["records"][0]
+    _check(all(row[key] == prior[key] for key in ("capability_score", "cost_per_task_usd", "measured_at")), "the accepted cell retains its score, cost and timestamp through repeated empty refreshes")
 
 
-def test_many_failed_sources_are_capped_in_the_alert() -> None:
+def test_notice_send_failure_is_visible_and_can_recover() -> None:
+    orch, messaging, _ = _world(handler=_failing_handler)
+    clock = _Clock()
+    refusal = _failure_envelope("peer_role_vacant", "no local Main binding")
+    with _guard_logs() as capture, patch.object(messaging, "peer_send_by_name", autospec=True, return_value=refusal):
+        failure = _run(orch, clock)
+    _expect_fields(failure, "a completed assessment reports the underlying failure", status="critical")
+    _expect_text(failure["advisories"][0], "result names the send refusal", "peer_role_vacant")
+    _check(any(level == logging.WARNING and "peer_role_vacant" in message for level, message in capture.records), "the send failure is also visible in the log")
+    _expect_fields(_run(orch, clock), "retry stays at the same severity", transitioned=False, advisories=[])
+    _check(len(messaging.sends) == 1, "the next check can notify after a failed send")
+
+
+def test_many_failed_sources_are_capped_in_the_transition_text() -> None:
     orch, messaging, _ = _world(handler=_detail_outage_handler)
-    first = _run(orch, _Clock(real=True))
+    with _guard_logs() as capture:
+        first = _run(orch, _Clock(real=True))
     _check(first["status"] == "critical" and len(first["sources_failed"]) == 4, "a detail outage fails one source per discovered cell")
-    text = messaging.sends[0]["content"]
-    _check("artificial_analysis_model_detail_html" in text and "(+1 more)" in text, "the alert names failed sources, capped with a remainder count")
+    text = capture.transitions()[0][1]
+    _check("artificial_analysis_model_detail_html" in text and "(+1 more)" in text, "the line names failed sources, capped with a remainder count")
+    _check(first["renewed"] and first["cells_accepted"] > 0 and messaging.sends == [], "a detail outage leaves leaderboard renewals working and sends no daily notice")
 
 
 def test_a_refresh_that_raises_is_critical_logged_and_not_swallowed() -> None:
-    orch, messaging, _ = _world()
+    orch, messaging, state = _world()
     clock = _Clock(real=True)
     _run(orch, clock)
     messaging.raise_on_refresh = RuntimeError("scheduler wedged")
-    capture = _LogCapture()
-    logger = logging.getLogger("platform_health_plugin.model_capability_guard")
-    logger.addHandler(capture)
-    try:
+    with _guard_logs() as capture:
         result = _run(orch, clock)
-    finally:
-        logger.removeHandler(capture)
-    _check(result["status"] == "critical" and result["alerted"] is True, "a raising refresh is critical and alerts")
+    _check(result["status"] == "critical" and result["transitioned"] is True, "a raising refresh is critical and a transition")
     _check(result["refresh_failure"] is not None and "scheduler wedged" in result["refresh_failure"], "the result names the raised failure")
-    _check("scheduler wedged" in messaging.sends[-1]["content"], "the alert text carries the failure")
-    _check(any("raised" in message for message in capture.messages), "the raise is logged at ERROR")
-
-
-def test_a_failure_envelope_is_critical() -> None:
-    orch, messaging, _ = _world()
-    clock = _Clock(real=True)
-    _run(orch, clock)
-    messaging.canned_envelope = _failure_envelope("refresh_fetch_failed", "model capability refresh could not fetch: boom")
-    result = _run(orch, clock)
-    _check(result["status"] == "critical" and "refresh_fetch_failed" in str(result["refresh_failure"]), "a failure envelope is critical and names its code")
+    _check(_status_marker(state) == "critical", "the marker records critical")
+    _check(any("scheduler wedged" in message for _, message in capture.transitions()), "the transition line carries the failure")
+    _check(any(level == logging.ERROR and "raised" in message for level, message in capture.records), "the raise is logged at ERROR")
+    _check(len(messaging.sends) == 1, "a raised refresh sends one failure notice")
 
 
 def test_an_unreadable_refresh_result_is_critical_not_ok() -> None:
@@ -266,70 +326,109 @@ def test_messaging_plugin_unavailable_raises() -> None:
 
 
 def test_readings_gathered_but_nothing_renewed_warns_once() -> None:
-    orch, messaging, _ = _world()
+    orch, messaging, state = _world()
     clock = _Clock(real=True)
     _run(orch, clock)  # baseline: one accepted cell
     messaging.handler = _no_renewal_handler
-    first = _run(orch, clock)
-    _check(first["readings_gathered"] > 0 and first["cells_accepted"] == 0, "precondition: readings were gathered and no cell was accepted")
+    with _guard_logs() as capture:
+        first = _run(orch, clock)
+        second = _run(orch, clock)
+    _check(first["readings_gathered"] > 0, "precondition: readings were gathered")
     _check(first["cells_unchanged"] > 0, "precondition: cells_unchanged is non-zero on a run that renewed nothing (so 'accepted + unchanged == 0' cannot detect it)")
-    _check(first["sources_failed"] == [], "precondition: no source failed")
-    _check(first["status"] == "warning" and first["renewed"] is False, "a run that gathered readings but renewed nothing is warning")
-    _check(first["alerted"] is True and len(messaging.sends) == 1 and "WARNING" in messaging.sends[0]["content"], "warning alerts once")
-    _check("renewed no accepted cell" in messaging.sends[0]["content"], "the alert says why")
-    second = _run(orch, clock)
-    _check(second["status"] == "warning" and second["alerted"] is False and len(messaging.sends) == 1, "an identical second run sends nothing")
+    _expect_fields(first, "a run that renewed nothing warns", cells_accepted=0, sources_failed=[], status="warning", renewed=False, transitioned=True)
+    _expect_fields(second, "the same warning keeps its status", status="warning", transitioned=False)
+    _check([level for level, _ in capture.transitions()] == [logging.WARNING], "one transition logs at WARNING")
+    _expect_text(capture.transitions()[0][1], "warning names the cause", "WARNING", "renewed no accepted cell")
+    _check(_status_marker(state) == "warning", "the marker records warning")
+    _check(not messaging.sends, "nonzero readings with no failed source send no notice")
 
 
 # ─── (c) age against the window read from the catalog ───────────────────────
 
 
-def test_cell_age_warns_at_49h_critical_at_73h_and_a_healthy_refresh_recovers_once() -> None:
+def test_historical_cell_age_is_advisory_during_successful_renewal() -> None:
     orch, messaging, clock = _seeded_world(old_age=timedelta(hours=49))
-    first = _run(orch, clock)
-    _check(first["status"] == "warning" and first["renewed"] is True, "a cell at 49h is warning though the run renewed something")
-    _check(abs(first["oldest_cell_age_hours"] - 49.0) < 1e-9, "the result reports the oldest accepted cell's age")
-    _check(first["alerted"] is True and len(messaging.sends) == 1, "warning alerts once")
-    again = _run(orch, clock)
-    _check(again["alerted"] is False and len(messaging.sends) == 1, "a second tick at the same severity sends nothing")
-    clock.offset = timedelta(hours=24)  # m-old is now 73h old; the canned refresh renews m-fresh at the new now
-    critical = _run(orch, clock)
-    _check(critical["status"] == "critical" and critical["alerted"] is True and len(messaging.sends) == 2, "a cell at 73h is critical and escalates once")
-    _check("past the 72.0h staleness window" in messaging.sends[1]["content"], "the critical alert names the window it was read from")
-    messaging.touch_models = ["m-old", "m-fresh"]
-    recovered = _run(orch, clock)
-    _check(recovered["status"] == "ok" and recovered["alerted"] is True and len(messaging.sends) == 3, "a later healthy refresh sends one recovery")
-    _check("OK (recovered)" in messaging.sends[2]["content"], "the recovery alert says so")
-    clock.offset += timedelta(minutes=1)  # the next daily refresh measures strictly later than the last
-    quiet = _run(orch, clock)
-    _check(quiet["status"] == "ok" and quiet["alerted"] is False and len(messaging.sends) == 3, "ok after recovery is quiet again")
+    messaging.state.set_key_value(STATE_NAMESPACE, "model_capability_guard:last_status", "critical")
+    messaging.touch_models = ["m-fresh"]
+    with _guard_logs() as capture:
+        first = _run(orch, clock)
+        _expect_fields(first, "a cell at 49h is advisory during renewal", status="ok", renewed=True, oldest_cell_age_hours=49.0, transitioned=True)
+        clock.offset += timedelta(minutes=1)
+        again = _run(orch, clock)
+        _expect_fields(again, "a repeat keeps the same severity", transitioned=False)
+        _check(len(capture.transitions()) == 1, "a healthy partial renewal is quiet")
+        clock.offset = timedelta(hours=24, minutes=1)  # m-old is now 73h old; the canned refresh renews m-fresh at the new now
+        critical = _run(orch, clock)
+        _expect_fields(critical, "a cell at 73h remains advisory during renewal", status="ok", transitioned=False)
+        _check(len(capture.transitions()) == 1, "historical age does not add a transition while renewal succeeds")
+        messaging.touch_models = ["m-old", "m-fresh"]
+        recovered = _run(orch, clock)
+        _check(recovered["status"] == "ok" and recovered["transitioned"] is False and len(capture.transitions()) == 1, "a later full refresh remains quiet")
+        clock.offset += timedelta(minutes=1)  # the next daily refresh measures strictly later than the last
+        quiet = _run(orch, clock)
+        _check(quiet["status"] == "ok" and quiet["transitioned"] is False and len(capture.transitions()) == 1, "ok after renewal is quiet again")
+    _check(messaging.sends == [], "nothing was sent")
+
+
+def test_successful_partial_renewal_ignores_historical_unrenewable_age() -> None:
+    orch, messaging, clock = _seeded_world(old_age=timedelta(hours=73))
+    state = messaging.state
+    state.set_key_value(STATE_NAMESPACE, "model_capability_guard:last_status", "critical")
+    query = {"table": owner_schema.TABLE_MODEL_CAPABILITY_CELL, "filters": {"model": "m-old"}}
+    prior = state.query_state(AGENT_ROLE_BINDING_NAMESPACE, query)["data"]["records"][0]
+    with _guard_logs() as capture:
+        result = _run(orch, clock)
+    current = state.query_state(AGENT_ROLE_BINDING_NAMESPACE, query)["data"]["records"][0]
+    _check(
+        result.get("status") == "ok" and result.get("renewed") is True,
+        "a successful partial renewal is ok despite a historical cell past the window",
+    )
+    _check(
+        result.get("historical_unrenewed_cell_count") == 1,
+        "the result counts the historical cell that was not renewed",
+    )
+    reasons = result.get("reasons", [])
+    _check(
+        any("1 historical accepted cell" in str(reason) and "stale" in str(reason) for reason in reasons),
+        "the result keeps a stale historical-cell advisory",
+    )
+    _check(current["measured_at"] == prior["measured_at"], "the historical cell measured_at is unchanged")
+    _check(any("1 historical accepted cell" in message for _, message in capture.transitions()), "the recovery log names the stale historical-cell count")
+
+
+def test_all_historical_cells_old_without_renewal_stays_critical() -> None:
+    orch, messaging, clock = _seeded_world(old_age=timedelta(hours=73))
+    messaging.touch_models = []
+    result = _run(orch, clock)
+    _check(result["status"] == "critical" and result["renewed"] is False, "all old cells without renewal remain critical")
+    _check(result["historical_unrenewed_cell_count"] == 2, "all historical cells are counted when none renews")
+    _expect_text(result["reasons"][0], "the no-renewal critical reason keeps the age failure", "past the 72.0h staleness window")
 
 
 def test_the_window_is_read_from_the_catalog_not_hard_coded() -> None:
     orch, messaging, clock = _seeded_world(old_age=timedelta(hours=100), window_hours=120)
+    messaging.canned_envelope = _success({"readings_gathered": 2, "cells_accepted": 0, "cells_conflicted": 0, "cells_unchanged": 2, "sources_failed": []})
     wide = _run(orch, clock)
     _check(wide["status"] == "warning" and wide["staleness_window_hours"] == 120.0, "100h old inside a 120h window is warning, not critical")
     orch2, messaging2, clock2 = _seeded_world(old_age=timedelta(hours=25), window_hours=24)
+    messaging2.canned_envelope = _success({"readings_gathered": 2, "cells_accepted": 0, "cells_conflicted": 0, "cells_unchanged": 2, "sources_failed": []})
     narrow = _run(orch2, clock2)
     _check(narrow["status"] == "critical" and narrow["staleness_window_hours"] == 24.0, "25h old past a 24h window is critical, not warning")
-    _check(len(messaging.sends) == 1 and len(messaging2.sends) == 1, "each scenario alerted once")
+    _check(wide["transitioned"] is True and narrow["transitioned"] is True and messaging.sends == [] and messaging2.sends == [], "each scenario recorded one change and sent nothing")
 
 
 def test_assess_boundaries_are_strict() -> None:
-    renewing = RefreshOutcome(failure=None, readings_gathered=2, cells_accepted=1)
-    old = guard.CatalogReading({("claude_code", "m", "high"): _BASE - timedelta(hours=200)}, timedelta(hours=72))
-
     def at(age: timedelta, window: timedelta = timedelta(hours=72)) -> str:
-        cells = guard.CatalogReading({("claude_code", "m", "high"): _BASE - age}, window)
-        return assess(renewing, old, cells, now=_BASE, warning_age=timedelta(hours=48)).status
+        critical, warning = guard._age_finding(age, window, timedelta(hours=48))  # noqa: SLF001 -- boundary test for the named classifier
+        return "critical" if critical else "warning" if warning else "ok"
 
     _check(at(timedelta(hours=48)) == "ok", "exactly 48h is ok (warning is a strict >)")
     _check(at(timedelta(hours=48, seconds=1)) == "warning", "48h + 1s is warning")
     _check(at(timedelta(hours=72)) == "warning", "exactly the window is warning (critical is a strict >)")
     _check(at(timedelta(hours=72, seconds=1)) == "critical", "window + 1s is critical")
     _check(at(timedelta(hours=30), window=timedelta(hours=24)) == "critical", "a window tighter than 48h makes its own edge the warning threshold")
-    empty = guard.CatalogReading({}, None)
-    _check(assess(renewing, empty, empty, now=_BASE, warning_age=timedelta(hours=48)).status == "critical", "no accepted cell at all is critical")
+    critical, _ = guard._age_finding(None, None, timedelta(hours=48))  # noqa: SLF001 -- boundary test for the named classifier
+    _check(critical == "no accepted cell in the catalog", "no accepted cell at all is critical")
 
 
 def test_renewal_is_a_newer_measurement_not_a_count() -> None:
@@ -338,46 +437,9 @@ def test_renewal_is_a_newer_measurement_not_a_count() -> None:
     before = guard.CatalogReading({cell: stamp}, timedelta(hours=72))
     claims_accepted = RefreshOutcome(failure=None, readings_gathered=2, cells_accepted=1)
     same = assess(claims_accepted, before, guard.CatalogReading({cell: stamp}, timedelta(hours=72)), now=_BASE, warning_age=timedelta(hours=48))
-    _check(same.renewed is False and same.status == "warning", "a run claiming cells_accepted>0 whose measured_at did not advance is not renewal")
+    _check(same.renewed is False and same.status == "warning" and same.historical_unrenewed_cells == 1, "a run claiming cells_accepted>0 whose measured_at did not advance is not renewal")
     newer = assess(claims_accepted, before, guard.CatalogReading({cell: stamp + timedelta(hours=1)}, timedelta(hours=72)), now=_BASE, warning_age=timedelta(hours=48))
     _check(newer.renewed is True and newer.status == "ok", "a newer measured_at after the run is renewal")
-
-
-# ─── Delivery ────────────────────────────────────────────────────────────────
-
-
-def test_no_alert_role_still_refreshes_and_reports_why() -> None:
-    orch, messaging, _ = _world()
-    clock = _Clock(real=True)
-    _run(orch, clock, role=None)
-    messaging.handler = _failing_handler
-    capture = _LogCapture()
-    logger = logging.getLogger("platform_health_plugin.model_capability_guard")
-    logger.addHandler(capture)
-    try:
-        first = _run(orch, clock, role=None)
-        second = _run(orch, clock, role=None)
-    finally:
-        logger.removeHandler(capture)
-    _check(len(messaging.refresh_calls) == 3, "with no alert_role the refresh still runs on every tick")
-    _check(first["status"] == "critical" and first["alerted"] is False and first["alert_reason"] == "alert_target_unconfigured", "no role -> alerted=False with alert_reason")
-    _check(messaging.sends == [], "nothing was sent")
-    _check(any("no alert_role configured" in message for message in capture.messages), "the unconfigured transition is logged at ERROR")
-    _check(second["transitioned"] is True and second["alert_reason"] == "alert_target_unconfigured", "the marker did not advance, so the transition is retried (and re-logged) next tick")
-
-
-def test_an_undelivered_alert_is_retried_next_tick() -> None:
-    orch, messaging, _ = _world(delivery="queued_for_replay")
-    clock = _Clock(real=True)
-    _run(orch, clock)
-    messaging.handler = _failing_handler
-    first = _run(orch, clock)
-    _check(first["alerted"] is False and "queued_for_replay" in str(first["alert_reason"]), "queued_for_replay is not a live delivery: alerted=False with the reason")
-    messaging.delivery = "queued_wake"
-    second = _run(orch, clock)
-    _check(second["alerted"] is True and len(messaging.sends) == 2, "the next tick retries the undelivered transition and it lands")
-    third = _run(orch, clock)
-    _check(third["alerted"] is False and len(messaging.sends) == 2, "after a confirmed delivery the transition is not repeated")
 
 
 def test_state_service_failure_propagates() -> None:
@@ -445,6 +507,7 @@ def test_constants_match_the_catalog_owner() -> None:
     _check(guard.TABLE_MODEL_CAPABILITY_CELL == owner_schema.TABLE_MODEL_CAPABILITY_CELL, "cell table name matches agent_messaging_plugin.schema")
     _check(guard.CELL_ACCEPTANCE_ACCEPTED == owner_schema.CELL_ACCEPTANCE_ACCEPTED, "accepted marker matches agent_messaging_plugin.schema")
     _check(guard.CATALOG_PAGE_SIZE == CATALOG_PAGE_SIZE and guard.CATALOG_READ_CEILING == CATALOG_READ_CEILING, "page size and read ceiling match the owner's constants")
+    _check(guard.SOURCE_LEADERBOARD_HTML == SOURCE_LEADERBOARD_HTML, "the failure source matches the leaderboard owner's identifier")
     _check(STATE_NAMESPACE == "platform_health_plugin", "the marker lives in this plugin's own key-value namespace")
 
 
@@ -452,7 +515,7 @@ def test_constants_match_the_catalog_owner() -> None:
 
 
 def test_schedule_installer_is_idempotent_and_tagged() -> None:
-    scheduling = host._FixtureSchedulingService()  # noqa: SLF001
+    scheduling = fixtures._FixtureSchedulingService()  # noqa: SLF001
     first = ensure_model_capability_guard_schedule(scheduling)
     second = ensure_model_capability_guard_schedule(scheduling)
     _check(first["status"] == "created" and first["tag"] == "model_capability_guard", "the first run creates the cron under its tag")
@@ -464,17 +527,16 @@ def test_schedule_installer_is_idempotent_and_tagged() -> None:
     _check(call["state"] == {"flow_id": "flow-model-capability-guard", "session_id": "sess-model-capability-guard"}, "the schedule carries its own system-owned flow/session ids")
 
 
-def test_schedule_installer_does_not_need_an_alert_role() -> None:
-    scheduling = host._FixtureSchedulingService()  # noqa: SLF001
-    plugin_module.get_config = lambda: host._FakeConfigManager({})  # type: ignore[assignment]  # noqa: SLF001
-    plugin, orch = _plugin({}, _CatalogMessagingPlugin(RealShapeState()))
-    host._run_init_service_manager(orch, scheduling)  # noqa: SLF001
+def test_schedule_installer_needs_no_configuration() -> None:
+    scheduling = fixtures._FixtureSchedulingService()  # noqa: SLF001
+    plugin, orch = _plugin(_CatalogMessagingPlugin(RealShapeState()))
+    fixtures._run_init_service_manager(orch, scheduling)  # noqa: SLF001
     result = plugin.ensure_model_capability_guard_schedule({}, {})
-    _check(result["data"]["status"] == "created" and len(scheduling.create_calls) == 1, "with no alert_role the cron is still installed (the refresh is the point)")
+    _check(result["data"]["status"] == "created" and len(scheduling.create_calls) == 1, "with an empty plugin config the cron is still installed")
 
 
 def test_schedule_installer_lookup_failure_raises() -> None:
-    scheduling = host._FixtureSchedulingService(fail_lookup=True)  # noqa: SLF001
+    scheduling = fixtures._FixtureSchedulingService(fail_lookup=True)  # noqa: SLF001
     try:
         ensure_model_capability_guard_schedule(scheduling)
     except RuntimeError as exc:
@@ -488,7 +550,7 @@ def test_schedule_installer_lookup_failure_raises() -> None:
 
 
 def _installed_cron() -> tuple[list[Any], dict[str, Any]]:
-    scheduling = host._FixtureSchedulingService()  # noqa: SLF001
+    scheduling = fixtures._FixtureSchedulingService()  # noqa: SLF001
     ensure_model_capability_guard_schedule(scheduling)
     call = scheduling.create_calls[0]
     actions, _, _ = ScheduleFactory.parse_actions_from_params({"actions": call["actions"]})
@@ -496,7 +558,15 @@ def _installed_cron() -> tuple[list[Any], dict[str, Any]]:
 
 
 def test_registry_declares_the_three_verbs_with_the_right_shape() -> None:
-    processes = cast("dict[str, Any]", host._real_registry()["processes"])  # noqa: SLF001
+    processes = cast("dict[str, Any]", fixtures._real_registry()["processes"])  # noqa: SLF001
+    plugin_processes = {key for key in processes if key.startswith("plugin::platform_health_plugin::")}
+    expected_processes = {
+        f"plugin::{PLUGIN_NAME}::{SWEEP_PROCESS_NAME}",
+        "plugin::platform_health_plugin::check_model_capability_catalog",
+        "plugin::platform_health_plugin::check_model_capability_catalog_cron",
+        "plugin::platform_health_plugin::ensure_model_capability_guard_schedule",
+    }
+    _check(plugin_processes == expected_processes, f"registry exposes exactly the retained platform-health verbs: {plugin_processes!r}")
     cron = processes[CHECK_CRON_PROCESS_KEY]
     _check(cron["processor_policy_category"] == ProcessorPolicyCategory.EDGE_SINK and cron["is_discoverable"] is False, "cron target: EDGE_SINK, not discoverable")
     _check("error_processor_customizations" not in cron and "result_processor_customizations" not in cron, "cron target declares no result or error processor")
@@ -504,9 +574,6 @@ def test_registry_declares_the_three_verbs_with_the_right_shape() -> None:
     _check(direct["processor_policy_category"] == ProcessorPolicyCategory.EDGE and direct["is_discoverable"] is False, "direct verb: EDGE, not discoverable (it reaches the network)")
     ensure = processes["plugin::platform_health_plugin::ensure_model_capability_guard_schedule"]
     _check(ensure["processor_policy_category"] == ProcessorPolicyCategory.EDGE and ensure["is_discoverable"] is False, "installer: EDGE, not discoverable")
-    heartbeat = processes["plugin::platform_health_plugin::check_main_seat_heartbeat_cron"]
-    _check(heartbeat["processor_policy_category"] == ProcessorPolicyCategory.EDGE_SINK, "the seat heartbeat remains terminal beside the catalog cron")
-    _check("result_processor_customizations" not in heartbeat, "seat heartbeat cannot start an inference continuation")
 
 
 def test_cron_entry_is_terminal_and_the_fire_stamps_the_flow_id() -> None:
@@ -517,14 +584,14 @@ def test_cron_entry_is_terminal_and_the_fire_stamps_the_flow_id() -> None:
         _check(True, "the scheduling plugin's cron-action validator accepts the entry")
     except ValueError as exc:
         _check(False, f"the scheduling plugin's cron-action validator accepts the entry ({exc})")
-    built, recorder, outcome, template_engine = host._fire(host._real_registry(), actions[0], schedule_state)  # noqa: SLF001
+    built, recorder, outcome, template_engine = fixtures._fire(fixtures._real_registry(), actions[0], schedule_state)  # noqa: SLF001
     _check(built.get("flow_id") == "flow-model-capability-guard", "the fire stamps the schedule's flow_id")
     _check(outcome == (True, None) and len(recorder.stored) == 1, "the real ActionFactory accepts the fired definition")
     stored = recorder.stored[0] if recorder.stored else {}
     _check(stored.get("process_key") == CHECK_CRON_PROCESS_KEY, "the stored runtime action targets the cron sibling")
     _check("error_processor" not in stored and "result_processor" not in stored, "no processor attached: the fire stays terminal")
     _check(template_engine.calls == 0, "no template resolution ran")
-    _, recorder2, outcome2, _ = host._fire(host._real_registry(), actions[0], {})  # noqa: SLF001
+    _, recorder2, outcome2, _ = fixtures._fire(fixtures._real_registry(), actions[0], {})  # noqa: SLF001
     _check(outcome2[0] is False and not recorder2.stored, "a flow_id-less fire is refused by the real factory")
 
 
@@ -555,21 +622,21 @@ def test_the_starting_action_installs_the_cron_after_startup() -> None:
     entry = _STARTING_ACTION
     _check(entry["process_key"] == "plugin::platform_health_plugin::ensure_model_capability_guard_schedule", "the entry's process_key is the installer verb")
     _check("result_processor_kind" not in entry, "it declares no result_processor_kind: a successful install is terminal")
-    scheduling = host._FixtureSchedulingService()  # noqa: SLF001
-    recorder = host._RecordingActionEventRecorder()  # noqa: SLF001
-    plugin, orch = _plugin({}, _CatalogMessagingPlugin(RealShapeState()))
-    orch.action_factory = host.ActionFactory(  # type: ignore[assignment]
-        template_engine=host._RecordingTemplateEngine(),  # type: ignore[arg-type]  # noqa: SLF001
-        state_service=host._SuffixStateService(),  # noqa: SLF001
+    scheduling = fixtures._FixtureSchedulingService()  # noqa: SLF001
+    recorder = fixtures._RecordingActionEventRecorder()  # noqa: SLF001
+    plugin, orch = _plugin(_CatalogMessagingPlugin(RealShapeState()))
+    orch.action_factory = ActionFactory(  # type: ignore[assignment]
+        template_engine=fixtures._RecordingTemplateEngine(),  # type: ignore[arg-type]  # noqa: SLF001
+        state_service=fixtures._SuffixStateService(),  # type: ignore[arg-type]  # noqa: SLF001
         action_event_recorder=recorder,
     )
-    orch._process_registry = host._real_registry()  # noqa: SLF001
+    orch._process_registry = fixtures._real_registry()  # noqa: SLF001
     orch.current_flow_id = "flow-startup-smoke"
     orch.current_session_id = "sess-startup-smoke"
     orch._submit_starting_actions([dict(entry)], {})  # noqa: SLF001 -- the real starting-action path
     stored = recorder.stored[0] if recorder.stored else {}
     _check(stored.get("process_key") == entry["process_key"] and stored.get("flow_id") == "flow-startup-smoke", "the starting action is submitted on the startup flow")
-    host._run_init_service_manager(orch, scheduling)  # noqa: SLF001
+    fixtures._run_init_service_manager(orch, scheduling)  # noqa: SLF001
     parameters = stored.get("parameters")
     result = plugin.ensure_model_capability_guard_schedule(parameters if isinstance(parameters, dict) else {}, {})
     _check(result["data"]["status"] == "created", "dispatching the stored action installs the cron")
@@ -578,10 +645,9 @@ def test_the_starting_action_installs_the_cron_after_startup() -> None:
 # ─── The plugin's cron verb ──────────────────────────────────────────────────
 
 
-def _plugin(config: dict[str, object], messaging: _CatalogMessagingPlugin) -> tuple[PlatformHealthPlugin, EventOrchestrator]:
-    plugin_module.get_config = lambda: host._FakeConfigManager(config)  # type: ignore[assignment]  # noqa: SLF001
+def _plugin(messaging: _CatalogMessagingPlugin) -> tuple[PlatformHealthPlugin, EventOrchestrator]:
     orch = EventOrchestrator.__new__(EventOrchestrator)
-    orch.plugin_manager = host._FixturePluginManager({"agent_messaging_plugin": messaging})  # type: ignore[assignment]  # noqa: SLF001
+    orch.plugin_manager = fixtures._FixturePluginManager({"agent_messaging_plugin": messaging})  # type: ignore[assignment]  # noqa: SLF001
     orch.state_service = messaging.state  # type: ignore[assignment]
     plugin = PlatformHealthPlugin()
     plugin.orchestrator_ref = orch
@@ -608,7 +674,7 @@ def test_cron_verb_runs_the_refresh_in_the_background_one_at_a_time() -> None:
         return real_refresh(params, state)
 
     messaging.refresh_model_capability_catalog = _blocking_refresh  # type: ignore[method-assign]
-    plugin, _ = _plugin({"alert_role": ROLE}, messaging)
+    plugin, _ = _plugin(messaging)
     fire_state = {"flow_id": "flow-model-capability-guard", "session_id": "sess-model-capability-guard"}
     first = plugin.check_model_capability_catalog_cron({}, fire_state)
     second = plugin.check_model_capability_catalog_cron({}, fire_state)
@@ -619,7 +685,8 @@ def test_cron_verb_runs_the_refresh_in_the_background_one_at_a_time() -> None:
     _check(_wait_for_check(plugin), "the background check finishes and releases its slot")
     _check(len(messaging.refresh_calls) == 1 and messaging.refresh_calls[0] == {"trigger": "cron"}, "the cron fire ran exactly one cron-triggered refresh")
     _check(messaging.refresh_states == [fire_state], "the background check ran with the fire's own state")
-    _check(len(messaging.sends) == 1 and messaging.sends[0]["name"] == ROLE, "the configured alert_role (plugin config) is the alert target")
+    _check(_status_marker(catalog_state) == "critical", "the background check recorded the failing catalog's status")
+    _check(len(messaging.sends) == 1, "the failing cron fire sends one operator notice")
     plugin.set_active(False)
     _check(plugin.check_model_capability_catalog_cron({}, fire_state)["data"]["dispatch"] == "inactive", "the inactive colour's fires are no-ops")
 
@@ -627,8 +694,8 @@ def test_cron_verb_runs_the_refresh_in_the_background_one_at_a_time() -> None:
 def test_cron_background_failure_is_logged_at_error() -> None:
     state = RealShapeState()
     messaging = _CatalogMessagingPlugin(state)
-    plugin, orch = _plugin({"alert_role": ROLE}, messaging)
-    orch.plugin_manager = host._FixturePluginManager({})  # type: ignore[assignment]  # noqa: SLF001 -- messaging plugin unresolvable
+    plugin, orch = _plugin(messaging)
+    orch.plugin_manager = fixtures._FixturePluginManager({})  # type: ignore[assignment]  # noqa: SLF001 -- messaging plugin unresolvable
     capture = _LogCapture()
     plugin.logger.addHandler(capture)
     try:
@@ -640,56 +707,57 @@ def test_cron_background_failure_is_logged_at_error() -> None:
     _check(any("catalog check failed" in message for message in capture.messages), "the failure is logged at ERROR")
 
 
-def test_direct_verb_returns_the_result_and_hands_state_to_the_alert() -> None:
+def test_direct_verb_returns_the_status_and_advisories() -> None:
     for failing in (False, True):
         state = RealShapeState()
         messaging = _CatalogMessagingPlugin(state)
         if failing:
             messaging.raise_on_refresh = RuntimeError("controlled failure")
-        plugin, _ = _plugin({"alert_role": ROLE}, messaging)
+        plugin, _ = _plugin(messaging)
         original = messaging.refresh_model_capability_catalog_sync
         job = refresh_fixtures.prove_queued_operation(plugin, "check_model_capability_catalog", {}, messaging, "refresh_model_capability_catalog_sync", original, None)
         data = job["result"]["data"]
         _check(data["status"] == ("critical" if failing else "ok"), "the queued guard preserves the final refresh decision")
+        _check(data["transitioned"] is failing, "the result says whether the severity changed on this call")
+        _check(set(data) == _RESULT_KEYS | {"advisories", "historical_unrenewed_cell_count"}, "the result carries the status fields and advisories")
         _check(failing or data["cells_accepted"] == 3, "the queued guard preserves final run counts")
         _check(messaging.refresh_states[0]["session_id"] == "smoke-session", "the worker receives the dispatch context")
+        _check(len(messaging.sends) == int(failing), "the direct verb sends a notice only for the failing case")
 
 
 def main() -> int:
     print("=== platform_health_plugin model_capability_guard_smoke ===")
-    original_get_config = plugin_module.get_config
-    try:
-        test_guard_invokes_the_refresh_with_the_cron_trigger()
-        test_fetch_failure_raises_critical_once_and_a_repeat_sends_nothing()
-        test_many_failed_sources_are_capped_in_the_alert()
-        test_a_refresh_that_raises_is_critical_logged_and_not_swallowed()
-        test_a_failure_envelope_is_critical()
-        test_an_unreadable_refresh_result_is_critical_not_ok()
-        test_messaging_plugin_unavailable_raises()
-        test_readings_gathered_but_nothing_renewed_warns_once()
-        test_cell_age_warns_at_49h_critical_at_73h_and_a_healthy_refresh_recovers_once()
-        test_the_window_is_read_from_the_catalog_not_hard_coded()
-        test_assess_boundaries_are_strict()
-        test_renewal_is_a_newer_measurement_not_a_count()
-        test_no_alert_role_still_refreshes_and_reports_why()
-        test_an_undelivered_alert_is_retried_next_tick()
-        test_state_service_failure_propagates()
-        test_catalog_read_pages_past_the_old_wall_and_truncates_at_the_ceiling()
-        test_catalog_read_refuses_malformed_rows()
-        test_null_windows_are_unknown_and_malformed_values_still_raise()
-        test_constants_match_the_catalog_owner()
-        test_schedule_installer_is_idempotent_and_tagged()
-        test_schedule_installer_does_not_need_an_alert_role()
-        test_schedule_installer_lookup_failure_raises()
-        test_registry_declares_the_three_verbs_with_the_right_shape()
-        test_cron_entry_is_terminal_and_the_fire_stamps_the_flow_id()
-        test_whole_tree_gate_c51_sees_and_exempts_the_literal()
-        test_the_starting_action_installs_the_cron_after_startup()
-        test_cron_verb_runs_the_refresh_in_the_background_one_at_a_time()
-        test_cron_background_failure_is_logged_at_error()
-        test_direct_verb_returns_the_result_and_hands_state_to_the_alert()
-    finally:
-        plugin_module.get_config = original_get_config
+    test_guard_invokes_the_refresh_with_the_cron_trigger()
+    test_a_severity_change_is_recorded_once()
+    test_fetch_failure_is_critical_logged_once_and_a_repeat_logs_nothing()
+    test_zero_row_refresh_preserves_cells_and_notifies_again_the_next_day()
+    test_notice_send_failure_is_visible_and_can_recover()
+    test_many_failed_sources_are_capped_in_the_transition_text()
+    test_a_refresh_that_raises_is_critical_logged_and_not_swallowed()
+    test_an_unreadable_refresh_result_is_critical_not_ok()
+    test_messaging_plugin_unavailable_raises()
+    test_readings_gathered_but_nothing_renewed_warns_once()
+    test_historical_cell_age_is_advisory_during_successful_renewal()
+    test_successful_partial_renewal_ignores_historical_unrenewable_age()
+    test_all_historical_cells_old_without_renewal_stays_critical()
+    test_the_window_is_read_from_the_catalog_not_hard_coded()
+    test_assess_boundaries_are_strict()
+    test_renewal_is_a_newer_measurement_not_a_count()
+    test_state_service_failure_propagates()
+    test_catalog_read_pages_past_the_old_wall_and_truncates_at_the_ceiling()
+    test_catalog_read_refuses_malformed_rows()
+    test_null_windows_are_unknown_and_malformed_values_still_raise()
+    test_constants_match_the_catalog_owner()
+    test_schedule_installer_is_idempotent_and_tagged()
+    test_schedule_installer_needs_no_configuration()
+    test_schedule_installer_lookup_failure_raises()
+    test_registry_declares_the_three_verbs_with_the_right_shape()
+    test_cron_entry_is_terminal_and_the_fire_stamps_the_flow_id()
+    test_whole_tree_gate_c51_sees_and_exempts_the_literal()
+    test_the_starting_action_installs_the_cron_after_startup()
+    test_cron_verb_runs_the_refresh_in_the_background_one_at_a_time()
+    test_cron_background_failure_is_logged_at_error()
+    test_direct_verb_returns_the_status_and_advisories()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     if _failed:
         for label in _failed:

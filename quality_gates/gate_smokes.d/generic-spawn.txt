@@ -1,0 +1,2 @@
+# spawn_session generic mode: a session started from runtime, model, effort, a workspace directory, the first message, permissions and a label.
+plugins/agent_messaging_plugin/tests/generic_spawn_smoke.py

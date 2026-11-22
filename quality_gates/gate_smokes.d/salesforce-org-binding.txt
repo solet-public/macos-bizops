@@ -1,0 +1,20 @@
+# Fragment of the gate-smoke register for Salesforce build 6 (frq_770ad1d9,
+# unt_3a7ad845): many orgs bound at once and the org lifecycle.
+# Hermetic: the real plugin, job worker and SalesforceCliExecutor run against
+# a scripted sf CLI (patched subprocess.run, sf 2.142.7 --json shapes) and an
+# in-memory vault; no sf executable and no Salesforce org.
+# Bound orgs: the vault index, selection by alias/username/org id, unknown-org
+# errors listing the bound orgs, per-org pin verification, legacy
+# salesforce_org migration, login by web/jwt/sfdx_url/access_token with every
+# documented flag, logout, set_default_org, disconnect_org, and each secret
+# absent in raw, percent (both hex cases), base64 and JSON-escaped forms.
+plugins/salesforce_plugin/tests/org_bindings_smoke.py
+# Org lifecycle: list, display, open, scratch create/resume/delete from a
+# bound Dev Hub, sandbox create/clone/refresh/resume/status/delete from a
+# bound production org, every documented flag accepted or plugin-set.
+plugins/salesforce_plugin/tests/org_lifecycle_smoke.py
+# Live scratch org round trip; exits 77 (disclosed skip) in every battery,
+# because SALESFORCE_LIVE_DEV_HUB is not on the runner's child environment
+# allowlist. Run it directly with that variable to create and delete a real
+# scratch org.
+plugins/salesforce_plugin/tests/live_scratch_org_smoke.py

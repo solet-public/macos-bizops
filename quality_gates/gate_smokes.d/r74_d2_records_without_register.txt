@@ -1,0 +1,2 @@
+# r74-d2-a7: solet-owned work-folder and deployment records without external tooling; offline, exits 0 when run once.
+ananta/tests/lifecycle_management_service/records_without_register_smoke.py

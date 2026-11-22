@@ -69,7 +69,6 @@ if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
 from _real_state_fake import RealShapeState  # noqa: E402
-from _register_unit_double import fixture_assignment  # noqa: E402
 
 from agent_messaging_plugin import session_hosts  # noqa: E402
 from agent_messaging_plugin import tmux_adapter as tmux_module  # noqa: E402
@@ -163,13 +162,18 @@ def _live_session(state: StateManagementInterface, agent_instance_id: str, host:
     insert_managed_session(
         state,
         ManagedSessionSpec(
-            agent_instance_id=agent_instance_id, lane_id="lane-gau09", assignment=fixture_assignment(),
-            work_class="read_only", budget_line="gau_fixes_2026-08-18", host=host,
+            agent_instance_id=agent_instance_id,
+            label="clear-effect",
+            session_origin="spawned",
+            host=host,
         ),
     )
     transition_lifecycle_state(
-        state, agent_instance_id=agent_instance_id, from_state=LIFECYCLE_SPAWNING,
-        to_state=LIFECYCLE_LIVE, directed_by="operator:none",
+        state,
+        agent_instance_id=agent_instance_id,
+        from_state=LIFECYCLE_SPAWNING,
+        to_state=LIFECYCLE_LIVE,
+        directed_by="operator:none",
     )
 
 
@@ -185,6 +189,7 @@ def _uninstall(host: str) -> None:
 # THE RED PIN — the measured GAU-09 lie, as an executable assertion.
 # ---------------------------------------------------------------------------
 
+
 def test_unconfirmed_clear_fails_loud_instead_of_returning_success() -> None:
     """THE DEFECT. A pane that is never cleared must not yield a success
     shape. Pre-fix this returned ``{'lifecycle_state': 'live', 'parked':
@@ -198,7 +203,9 @@ def test_unconfirmed_clear_fails_loud_instead_of_returning_success() -> None:
         raised: VerbError | None = None
         try:
             clear_session(
-                state, agent_instance_id="agi-gau09-red", park=False,
+                state,
+                agent_instance_id="agi-gau09-red",
+                park=False,
                 directed_by="operator:none",
             )
         except VerbError as exc:
@@ -256,7 +263,9 @@ def test_unverified_clear_guidance_names_deferral_not_an_ordinary_message() -> N
         raised: VerbError | None = None
         try:
             clear_session(
-                state, agent_instance_id="agi-gau27-guidance", park=False,
+                state,
+                agent_instance_id="agi-gau27-guidance",
+                park=False,
                 directed_by="operator:none",
             )
         except VerbError as exc:
@@ -308,7 +317,9 @@ def test_unconfirmed_clear_does_not_take_the_park_edge() -> None:
         _live_session(state, "agi-gau09-nopark", _TEST_HOST_VERIFYING)
         try:
             clear_session(
-                state, agent_instance_id="agi-gau09-nopark", park=True,
+                state,
+                agent_instance_id="agi-gau09-nopark",
+                park=True,
                 directed_by="operator:none",
             )
         except VerbError:
@@ -333,7 +344,9 @@ def test_confirmed_clear_reports_the_effect_positively() -> None:
         state = _state()
         _live_session(state, "agi-gau09-green", _TEST_HOST_VERIFYING)
         result = clear_session(
-            state, agent_instance_id="agi-gau09-green", park=False,
+            state,
+            agent_instance_id="agi-gau09-green",
+            park=False,
             directed_by="operator:none",
         )
         _check(result.get("cleared") is True, "a CONFIRMED clear reports cleared=True")
@@ -361,7 +374,9 @@ def test_blind_driver_degrades_to_honest_naming_never_to_a_verdict() -> None:
         state = _state()
         _live_session(state, "agi-gau09-blind", _TEST_HOST_BLIND)
         result = clear_session(
-            state, agent_instance_id="agi-gau09-blind", park=False,
+            state,
+            agent_instance_id="agi-gau09-blind",
+            park=False,
             directed_by="operator:none",
         )
         _check(
@@ -392,7 +407,9 @@ def test_blind_driver_still_parks_on_request() -> None:
         state = _state()
         _live_session(state, "agi-gau09-blindpark", _TEST_HOST_BLIND)
         result = clear_session(
-            state, agent_instance_id="agi-gau09-blindpark", park=True,
+            state,
+            agent_instance_id="agi-gau09-blindpark",
+            park=True,
             directed_by="operator:none",
         )
         _check(result.get("parked") is True, "a blind driver still honours park=True")
@@ -407,6 +424,7 @@ def test_blind_driver_still_parks_on_request() -> None:
 # ---------------------------------------------------------------------------
 # The tmux leg — the real read-back surface, and the substring trap.
 # ---------------------------------------------------------------------------
+
 
 class _FakeCompletedProcess:
     def __init__(self, stdout: str = "", returncode: int = 0) -> None:
@@ -445,8 +463,11 @@ class _FakeClock:
 
 def _tmux_channel(runner: _FakeTmuxRunner, **kwargs: Any) -> Any:
     return tmux_module._TmuxSendKeysDriverChannel(  # noqa: SLF001
-        tmux_bin="tmux", session="s1", run_fn=runner,
-        sleep_fn=lambda _s: None, now_fn=_FakeClock(),
+        tmux_bin="tmux",
+        session="s1",
+        run_fn=runner,
+        sleep_fn=lambda _s: None,
+        now_fn=_FakeClock(),
         **kwargs,
     )
 
@@ -513,12 +534,13 @@ def test_tmux_verify_cleared_never_accumulates_across_a_flapping_pane() -> None:
         capture_pane_sequence=["❯\xa0", "❯\xa0/clear"] * 6,
     )
     channel = _tmux_channel(
-        runner, clear_stable_samples_required=3, clear_verify_timeout_seconds=10.0,
+        runner,
+        clear_stable_samples_required=3,
+        clear_verify_timeout_seconds=10.0,
     )
     _check(
         channel.verify_cleared() is False,
-        "a pane that never shows 2 cleared frames IN A ROW is never confirmed "
-        "(kills the no-reset mutation)",
+        "a pane that never shows 2 cleared frames IN A ROW is never confirmed (kills the no-reset mutation)",
     )
 
 

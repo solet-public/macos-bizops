@@ -8,9 +8,9 @@ Article Role: operations_reference
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-reference, domain:local-solet, domain:client-deployment, consumer_profile:both
 
-Embedding Description: How to change the base model, effort level, advisor model, and declared transport (MCP vs watch) for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, the one verified-correct way to fully disable the advisor tool for a single session, where the fleet-wide default transport is declared and how a per-role launcher export overrides it, why solet launchers deny the structured-choice AskUserQuestion prompt by default and the per-launch override that lifts it, why spawn_session's tmux host driver carries that same deny (with its own allow_askuserquestion override) while headless needs none — the tool is inert there by construction, and how a long-running session clears its own context with no helper agent in the injection path — the operator types the clear command and the resume prompt, or the session runs a deterministic detached script that does only that. It also points Main seats to the native candidate relay verbs delivered-to-review, reviewed-to-ready, and the Project-Solet-only landing run, with their authority boundaries and known gaps.
+Embedding Description: How to change the base model, effort level, advisor model, and declared transport (MCP vs watch) for one named role in an operator's multi-session fleet launcher — where that launcher actually lives, the CLI flags and environment variables involved, the one verified-correct way to fully disable the advisor tool for a single session, where the fleet-wide default transport is declared and how a per-role launcher export overrides it, why solet launchers deny the structured-choice AskUserQuestion prompt by default and the per-launch override that lifts it, why spawn_session's tmux host driver carries that same deny (with its own allow_askuserquestion override) while headless needs none — the tool is inert there by construction, and how a long-running session clears its own context with no helper agent in the injection path — the operator types the clear command and the resume prompt, or the session runs a deterministic detached script that does only that.
 
-**When you need this**: an operator asks to change the model, effort level, advisor configuration, or transport for a named session role (a coordinator, a reviewer, an implementation lane, any role launched by a wrapper function); a session needs to know where that configuration actually lives before searching for it in the wrong place; a session needs to turn the advisor tool off for one role without touching the operator's global default; a session needs to know why one role talks over MCP while another talks over the watch transport, or wants to change which one a role uses; a session wants a spawn_session-spawned worker to be able to use AskUserQuestion (or wants to confirm why one can't); a session's context has grown long and it needs to clear itself and continue working without waiting for the operator; or Main needs to hand a delivered candidate to review, prepare a reviewed candidate for landing, or distinguish the local Git-Controller procedure from Project-Solet's `landing run`.
+**When you need this**: an operator asks to change the model, effort level, advisor configuration, or transport for a named session role (a coordinator, a reviewer, an implementation session, any role launched by a wrapper function); a session needs to know where that configuration actually lives before searching for it in the wrong place; a session needs to turn the advisor tool off for one role without touching the operator's global default; a session needs to know why one role talks over MCP while another talks over the watch transport, or wants to change which one a role uses; a session wants a spawn_session-spawned worker to be able to use AskUserQuestion (or wants to confirm why one can't); a session's context has grown long and it needs to clear itself and continue working without waiting for the operator.
 
 ---
 
@@ -46,7 +46,7 @@ A launcher must not `exec claude` in whatever terminal it was typed into. Headle
 
 To reach a running role: `tmux attach -t =<role>` (the `=` makes the match exact); `tmux ls` lists them; `C-b d` detaches and leaves the session running. The fleet environment knobs (`<solet>_FLEET_SKIP_PERMISSIONS`, `_FLEET_MCP_CHANNELS`, `_FLEET_TRANSPORT`) are forwarded into the new pane with `tmux -e`, because a tmux server that is already running does not inherit them from the launching shell. tmux itself is installed by the setup flow's `setup::tmux.install` (Homebrew `tmux`).
 
-A solet hydrated before the tmux host existed still has the old launcher in `<clone>/client/<solet>-fleet.zsh`. That file is a rendered copy that also holds your own role functions. `solet-manager update` replaces its launcher section, the text above the line `# One function per role the operator chose in Step 4a.`, and keeps your role functions and your Git-Controller choice byte-for-byte. The preview lists the change, and the update keeps a copy of the file first. A launcher section you edited is left as it is and the preview says so; for that case, or when you update by hand, follow the seed update runbook's Part C Step 5, "Exact re-render of the fleet file", which does the same replacement.
+A solet hydrated before the tmux host existed still has the old launcher in `<clone>/client/<solet>-fleet.zsh`. That file is a rendered copy that also holds your own role functions. `solet-manager update` replaces its launcher section, the text above the line `# One function per role the operator chose in Step 4a.`, and keeps your role functions byte-for-byte. The preview lists the change, and the update keeps a copy of the file first. A launcher section you edited is left as it is and the preview says so; for that case, or when you update by hand, follow the seed update runbook's Part C Step 5, "Exact re-render of the fleet file", which does the same replacement.
 
 ## Every Claude session starts with Remote Control
 
@@ -56,23 +56,36 @@ Every Claude session in the fleet starts with Remote Control, so the operator ca
 
 Both are ordinary per-session CLI flags on the `claude` invocation: `--model <alias>` and `--effort <level>` (`low`, `medium`, `high`, `xhigh`, `max`). Passing neither flag inherits the operator's `~/.claude/settings.json` defaults (`model` and `effortLevel` keys). A launcher function typically builds these as optional flags — an empty argument expands to zero flags rather than an empty-string flag value — so existing callers that don't pass a model/effort stay byte-identical after adding the parameters.
 
-## Context-window compaction per seat
+## Context-window compaction and other per-launch flags
 
-The launcher sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` for each seat while preserving
-`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50`. The three named main seats and Operator
-use a 200000-token window by default; other roles retain 1000000. An explicit
-positive `--auto-compact-window N` on the
-launcher overrides the role default for that launch. The value is carried into
-the tmux re-entry command, so the detached host and the Claude process receive
-the same setting. Omitting the argument restores the role default.
+The launcher sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` for each session and sets no
+percentage override: Claude Code 2.1.323 and later mostly ignore
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, and where a version honors it the percentage
+would halve the window, so the launcher neither sets nor inherits it. The session
+name changes nothing: every session gets a 500000-token window, no debug file and
+no appended system prompt
+unless the person's launch passes a flag for it. Each flag is a per-launch input
+and is carried into the tmux re-entry command, so the detached host and the
+Claude process receive the same setting:
+
+- `--auto-compact-window N` (a positive integer) sets the window; omitting it
+  means 500000.
+- `--debug-file PATH` gives claude a debug log file; omitting it means no debug file.
+- `--append-system-prompt-file PATH` appends the file's text to the system prompt
+  (a relative path is read from the checkout root); omitting it appends nothing,
+  and a missing file prints a WARNING naming the path and the launch goes on
+  without the text.
+
+To give one session a smaller window, a debug log or the shared decision contract,
+add the flags to that session's launcher function in the shell profile.
 
 ## Transport per role
 
-Each session talks to the platform over one of two transports: **MCP** (a live bridge connection; requires `claude mcp add` and, on some tiers, Anthropic-direct auth — unusable on a machine whose policy blocks MCP) or **watch** (a per-session `solet watch` watcher plus a zero-token `Stop`-hook wake; no MCP registration needed). The fleet's charter (2026-08-06, operator, verbatim in the fleet-watch-transport-migration lane brief): corporate deployments disallow MCP, so **watch must be the fleet's primary transport**, MCP retained only as a backup and for chat-class sessions.
+Each session talks to the platform over one of two transports: **MCP** (a live bridge connection; requires `claude mcp add` and, on some tiers, Anthropic-direct auth — unusable on a machine whose policy blocks MCP) or **watch** (a per-session `solet watch` watcher plus a zero-token `Stop`-hook wake; no MCP registration needed). For deployments where policy disallows MCP, use watch as the primary transport. Where policy permits MCP, a session can select it explicitly.
 
-The fleet-wide default is declared in exactly ONE place: `default_fleet_transport` in `agent_messaging_plugin`'s `plugin.yaml` (shipped `"watch"`, the charter's own value — same declared-config posture as `headless_permission_mode`, changeable with a config edit and a routine blue-green swap, no launcher edit required to move the fleet-wide default).
+The fleet-wide default is declared in exactly ONE place: `default_fleet_transport` in `agent_messaging_plugin`'s `plugin.yaml` (shipped `"watch"`, declared alongside `headless_permission_mode`, changeable with a config edit and a routine blue-green swap, no launcher edit required to move the fleet-wide default).
 
-That config value is the *source of truth for the default*; it is **not** what an individual session reads at launch. Each session reads its own `FLEET_TRANSPORT` environment variable directly (the rename skill, the spawned-worker hook guards, and — on Claude sessions — the watch-arm's `wake_waiter.py` Stop hook all read it independently — declared, never probed, never silently crossed; see the rename skill for the full rule). Codex sessions currently have no Stop-hook reader of this variable at all: stock Codex does not execute async command hooks on any measured build, so the coordination plugin ships no `Stop` binding (codex-0147-async-hook-regression, 2026-08-13) — a Codex session's watch-arm delivery notice comes only from `drive_on_delivery` for managed workers, or a manual `peer_inbox` drain otherwise. The goal state is that **every role's launcher wrapper exports `FLEET_TRANSPORT` explicitly**, per role, rather than relying on any consumer's own unset-fallback literal:
+That config value is the *source of truth for the default*; it is **not** what an individual session reads at launch. Each session reads its own `FLEET_TRANSPORT` environment variable directly (the rename skill, the spawned-worker hook guards, and — on Claude sessions — the watch-arm's `wake_waiter.py` Stop hook all read it independently — declared, never probed, never silently crossed; see the rename skill for the full rule). Codex sessions currently have no Stop-hook reader of this variable at all: stock Codex does not execute async command hooks on any measured build, so the coordination plugin ships no `Stop` binding (codex-0147-async-hook-regression, 2026-08-13) — a Codex session's watch-arm delivery notice comes only from `drive_on_delivery` for sessions configured to drive on delivery, or a manual `peer_inbox` drain otherwise. The goal state is that **every role's launcher wrapper exports `FLEET_TRANSPORT` explicitly**, per role, rather than relying on any consumer's own unset-fallback literal:
 
 ```sh
 claude-<role>() { _claude_for_<solet> <Role-Label> <model> <effort> watch }
@@ -305,63 +318,6 @@ prompt or it does not. If it does, it is by definition processing. If it does
 not, the operator sees an idle prompt and retypes it — a visible, recoverable
 failure rather than a silent one. The session's durable identity and any role
 binding survive the clear.
-
-## Candidate delivery, review, readiness, and landing
-
-When a candidate is delivered, Main uses `psolet delivered-to-review` to
-freeze the exact revision and create or reuse its review unit, select and spawn
-the reviewer, assign its owner, and send the generated GO. First inspect the
-write-free plan, then invoke the relay with the development checkout explicitly named:
-
-```sh
-psolet delivered-to-review --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT --dry-run
-psolet delivered-to-review --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT
-```
-
-The command is idempotent for an unchanged delivery. It does not handle a
-re-delivery after a FAIL or retired reviewer; it can leave the old review unit
-in place without a delta review (`iss_2b8b517d`). A partial relay also has no
-resume mode. Nothing starts the relay automatically: Main invokes it at the
-author handoff.
-
-After the reviewer records a typed PASS/CLEAR against that frozen revision,
-Main can prepare readiness under the repository's active landing policy:
-
-```sh
-psolet reviewed-to-ready --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT --dry-run
-psolet reviewed-to-ready --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT
-```
-
-The verb requires the newest candidate to be frozen and a typed clearing review
-outcome for that exact revision. It reuses current readiness for the same
-revision and review event. A message, review receipt, or readiness receipt is
-not acceptance or proof that a landing occurred.
-
-`psolet landing run --repo project-solet --unit UNIT [--dry-run]` is the
-Project-Solet-Git-Controller command, not the local Git-Controller procedure. It
-requires the live Project-Solet-Git-Controller binding and current
-`ready_to_land` register state. It verifies the frozen candidate's bytes and
-modes, runs one provisioned gate, records evidence, runs read-only preflight,
-fast-forwards Project Solet `master`, and records the landing. A red gate,
-conflict, or byte mismatch records a typed blocker and leaves `master`
-untouched. Dry-run writes nothing and runs no gate. Recovery after an already
-published merge consumes retained verdict evidence and does not run another
-gate. The command has not yet carried a real landing; the first actual landing
-was recorded by route A (`lnd_8976b957`). The local Git-Controller continues
-to use the repository-specific procedure and gates in the canonical
-Git-Controller commit skill.
-
-Until the exact-candidate metadata Unit `unt_d428a5c3` lands after
-`unt_44965222`, the author includes a proposed landing commit message (subject
-and body) and a doc-impact statement in the delivery report; Main passes both
-to Git-Controller in the READY message. The register stores neither
-(`iss_49b2e4c8`). No automatic trigger exists yet. The old G/ scripts and route
-A remain bounded fallback paths only; they are not the default when a native
-relay is available.
-
-Landing and deployment are still distinct from close-out. After cutover, the
-authorizing seat follows the canonical Change Close-Out Checklist for issue
-disposition, doc impact, reviewer follow-ups, and lane or worktree retirement.
 
 ## Reference
 

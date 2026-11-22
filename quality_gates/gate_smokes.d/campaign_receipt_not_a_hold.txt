@@ -1,0 +1,2 @@
+# A running full-campaign receipt is noted, not a hold, so it does not defer a production deploy (Change chg_0efc0b8a-ed39-4dc6-b7c4-a0f9b112b675).
+ananta/tests/lifecycle_management_service/campaign_receipt_not_a_hold_smoke.py

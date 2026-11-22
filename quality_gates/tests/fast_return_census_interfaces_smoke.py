@@ -213,10 +213,8 @@ class InterfaceProofSmoke(unittest.TestCase):
         representatives = {
             "resolve_caller_provenance",
             "report_alive",
-            "capture_lane_charter",
             "report_context_status",
             "report_inbox_consumption",
-            "managed_dispatch_uptake_rate",
             "read_model_capability_history",
             "read_model_catalog_policy",
             "read_session_usage_window",
@@ -229,15 +227,12 @@ class InterfaceProofSmoke(unittest.TestCase):
             assert plugin.plugin_class is not None
             with census.plugin_context(ROOT, scratch, plugin.entry.plugin, plugin.plugin_class, census.Probe(census.Settings()), census.discover_preparers()) as context:
                 for action in plugin.actions:
-                    if action.name not in representatives | {"read_lane_evidence"}:
+                    if action.name not in representatives:
                         continue
                     with self.subTest(verb=action.name):
                         row = census.measure_verb(ROOT, plugin, action, scratch, census.Settings(), context)
                         print(f"MANAGED_PREREQUISITE {action.name} {row['class']} {row['outcome']}")
-                        if action.name == "read_lane_evidence":
-                            self.assertNotIn("dispatch_authentication_required", row["outcome"], "N088 must receive a valid principal; later peer-registry prerequisites remain named")
-                        else:
-                            self.assertNotEqual(row["class"], "NOT_MEASURABLE", f"{action.name}: {row['missing_piece']}")
+                        self.assertNotEqual(row["class"], "NOT_MEASURABLE", f"{action.name}: {row['missing_piece']}")
 
     def test_proof_results_through_discovery(self) -> None:
         modules = _discover()
@@ -330,10 +325,10 @@ class InterfaceProofSmoke(unittest.TestCase):
             _require_plugin("census_missing_optional_plugin")
         with smoke_scratch(ROOT) as scratch:
             for plugin, verb in sorted(interfaces.INTERFACE_VERBS):
-                params: dict[str, object] = {"unit_id": "remove-if-instance-selected"}
+                params: dict[str, object] = {"opaque_probe": "remove-if-instance-selected"}
                 prepared = interfaces.parameters(plugin, verb, params, {}, scratch)
                 self.assertEqual(prepared, interfaces.parameters(plugin, verb, params, {}, scratch))
-                self.assertEqual(params, {"unit_id": "remove-if-instance-selected"})
+                self.assertEqual(params, {"opaque_probe": "remove-if-instance-selected"})
                 if (plugin, verb) in interfaces.RESIDUAL:
                     self.assertEqual(interfaces.RESIDUAL[(plugin, verb)], "R6")
                 else:
@@ -369,8 +364,8 @@ class InterfaceProofSmoke(unittest.TestCase):
             probe = census.Probe(census.Settings(delay_seconds=0))
             with census.isolated_boundaries(ROOT, scratch, probe):
                 instance = _class_for("agent_messaging_plugin")()
-                params = interfaces.parameters("agent_messaging_plugin", "read_unit_usage", {"unit_id": "remove"}, {}, scratch)
-                result = instance.read_unit_usage(params, {})
+                params = interfaces.parameters("agent_messaging_plugin", "read_label_usage", {"label": "remove"}, {}, scratch)
+                result = instance.read_label_usage(params, {})
                 self.assertEqual(result["action_status"], "completed")
                 self.assertEqual(result["data"]["coverage"], "none")
                 self.assertFalse(census._failure_reason(result))

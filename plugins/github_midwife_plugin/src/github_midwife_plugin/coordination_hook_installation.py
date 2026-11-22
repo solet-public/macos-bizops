@@ -18,7 +18,6 @@ RECEIPT_SCHEMA: Final = "solet_coordination_installation_v1"
 RECEIPT_RELATIVE_PATH: Final = Path("data/coordination-hooks/claude/installation.v1.json")
 HOOK_FILENAMES: Final = (
     "coordination_owner.py",
-    "heartbeat_report_alive.py",
     "rotation_due_watch.py",
     "wake_waiter.py",
 )
@@ -98,8 +97,13 @@ def surface_payload(surface: ReceiptSurface) -> dict[str, object]:
 
 
 def build_receipt(
-    *, solet_name: str, app_home: Path, plugin_selector: str, default_hook_root: Path,
-    surfaces: tuple[ReceiptSurface, ...], installation_id: str | None = None,
+    *,
+    solet_name: str,
+    app_home: Path,
+    plugin_selector: str,
+    default_hook_root: Path,
+    surfaces: tuple[ReceiptSurface, ...],
+    installation_id: str | None = None,
 ) -> dict[str, object]:
     if not solet_name or plugin_selector != f"coordination-hooks@{solet_name.replace('_', '-')}":
         raise ValueError("receipt selector does not name the selected solet")
@@ -191,9 +195,7 @@ def receipt_has_plugin_cache_surface(path: Path) -> bool:
         surfaces = _strict_object(path.read_text(encoding="utf-8")).get("surfaces")
     except (OSError, ValueError):
         return False
-    return isinstance(surfaces, list) and any(
-        isinstance(surface, dict) and surface.get("kind") == "plugin_cache" for surface in surfaces
-    )
+    return isinstance(surfaces, list) and any(isinstance(surface, dict) and surface.get("kind") == "plugin_cache" for surface in surfaces)
 
 
 def _surface_matches_hook_root(surface: object, hook_root: Path) -> bool:
@@ -203,10 +205,7 @@ def _surface_matches_hook_root(surface: object, hook_root: Path) -> bool:
     if surface.get("manifest_sha256") != _sha256(manifest):
         return False
     files = surface.get("files")
-    return isinstance(files, dict) and all(
-        files.get(filename) == _sha256(_regular_absolute(hook_root / filename, filename))
-        for filename in HOOK_FILENAMES
-    )
+    return isinstance(files, dict) and all(files.get(filename) == _sha256(_regular_absolute(hook_root / filename, filename)) for filename in HOOK_FILENAMES)
 
 
 def hook_root_matches_expected(actual_root: Path, expected_root: Path) -> bool:
@@ -214,10 +213,7 @@ def hook_root_matches_expected(actual_root: Path, expected_root: Path) -> bool:
     try:
         actual = _root(actual_root, "actual hook_root")
         expected = _root(expected_root, "expected hook_root")
-        return all(
-            _sha256(_root_file(actual, name)) == _sha256(_root_file(expected, name))
-            for name in (*HOOK_FILENAMES, "hooks.json")
-        )
+        return all(_sha256(_root_file(actual, name)) == _sha256(_root_file(expected, name)) for name in (*HOOK_FILENAMES, "hooks.json"))
     except (OSError, ValueError):
         return False
 
@@ -244,7 +240,11 @@ def receipt_matches_hook_root(
         payload = _strict_object(path.read_text(encoding="utf-8"))
         expected_home = _root(app_home, "app_home")
         if not _receipt_owner_matches(
-            payload, path, solet_name, expected_home, plugin_selector,
+            payload,
+            path,
+            solet_name,
+            expected_home,
+            plugin_selector,
         ):
             return False
         surfaces = payload.get("surfaces")
@@ -279,9 +279,7 @@ def _surface_contract_valid(surface: object, roots: set[Path]) -> bool:
     if surface.get("manifest_sha256") != _sha256(manifest) or not interpreter.is_file():
         return False
     files = surface.get("files")
-    return isinstance(files, dict) and set(files) == set(HOOK_FILENAMES) and all(
-        files.get(name) == _sha256(_root_file(root, name)) for name in HOOK_FILENAMES
-    )
+    return isinstance(files, dict) and set(files) == set(HOOK_FILENAMES) and all(files.get(name) == _sha256(_root_file(root, name)) for name in HOOK_FILENAMES)
 
 
 def _receipt_owner_matches(
@@ -307,9 +305,4 @@ def _selected_surface_matches(
     interpreter: Path,
 ) -> bool:
     expected_interpreter = _regular_absolute(interpreter, "interpreter")
-    return any(
-        _surface_matches_hook_root(surface, selected)
-        and isinstance(surface, dict)
-        and surface.get("interpreter") == str(expected_interpreter)
-        for surface in surfaces
-    )
+    return any(_surface_matches_hook_root(surface, selected) and isinstance(surface, dict) and surface.get("interpreter") == str(expected_interpreter) for surface in surfaces)

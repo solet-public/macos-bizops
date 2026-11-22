@@ -178,7 +178,9 @@ _AGENT_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 # Map BridgeError.code → HTTP status.  Anything not in this table maps
 # to 400, matching the platform_surface convention of "bad input"
-# being the default failure mode.
+# being the default failure mode.  A BridgeError that carries its own
+# ``status`` (one code shared by a caller's mistake and a server fault, such as
+# ``bridge.process_call_failed``) answers with that status instead.
 _BRIDGE_ERROR_STATUS: Final[dict[str, int]] = {
     "bridge.no_active_bridge": 404,
     "bridge.action_result_not_found": 404,
@@ -809,7 +811,7 @@ def _managed_session_registration_backfill(
     on an existing spawned row. When neither primary nor recovered spawn
     identity resolves, it creates the honest operator inventory row: it has
     identity and joinability, but no fabricated report-by or TTL contract.
-    It is an operator-existing-checkout row, never a provisioned lane
+    It is an operator-existing-checkout row, never a provisioned
     worktree. ``model`` and ``effort`` deliberately remain empty here
     (iss_f2ca1599): the generic registration envelope contains neither and
     the server cannot truthfully recover the operator's local launcher flags.
@@ -835,14 +837,10 @@ def _managed_session_registration_backfill(
             state_service,
             ManagedSessionSpec(
                 agent_instance_id=agent_instance_id,
-                lane_id="",
-                assignment=None,
-                work_class="",
-                budget_line="",
                 host=OPERATOR_HOST,
                 report_by_seconds=0,
                 directed_by="registration",
-                provisioning_mode="operator_existing_checkout",
+                session_origin="registered",
                 # The effective label is what peer_registry accepted for this
                 # registration.  An empty label is legitimate, but cannot be
                 # an honest local identity, so retain the unique registering
@@ -1677,8 +1675,8 @@ def _register_peer_routes(
         # bridge's live last_model_activity_at marking owed rows consumed) and
         # the DIRECT-wake half of this route retired here — Guard 1 ("no
         # model-initiated call since emission") was blind to local-only work;
-        # sweep_overdue_sessions + _notify_steward_of_overdue is the sole
-        # successor, keyed on the recipient's own report_by promise. Role
+        # nothing replaces it, so no timer or sweep wakes a recipient over an
+        # owed row: the row stays readable through this route. Role
         # consumption stays authoritative via /peer/delivered (the forwarder's
         # explicit confirm) and the watcher events-ack path — both untouched.
         # iss_5cf6184d: binding read + undelivered page + touch are DB work.
@@ -2200,7 +2198,7 @@ def _iso_or_empty(value: object) -> str:
 
 
 def _bridge_error_response(exc: BridgeError) -> JSONResponse:
-    status = _BRIDGE_ERROR_STATUS.get(exc.code, 400)
+    status = exc.status if exc.status is not None else _BRIDGE_ERROR_STATUS.get(exc.code, 400)
     return JSONResponse(
         content={"code": exc.code, "message": exc.message},
         status_code=status,

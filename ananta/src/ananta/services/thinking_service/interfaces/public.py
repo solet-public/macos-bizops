@@ -203,6 +203,7 @@ class ThinkingServiceAPI(ABC):
     # ==========================================================================
 
     @service_interface_process(
+        is_async=True,
         name="create_playbook",
         is_discoverable=True,
         provider="thinking_service",
@@ -226,17 +227,19 @@ class ThinkingServiceAPI(ABC):
                 default=None,
             ),
         },
-        return_value_schema=ReturnValueSchema(
-            description="Playbook creation result with IDs for tracking",
-            type=ParameterType.OBJECT,
-            properties={
-                "playbook_id": ParameterMetadata(type=ParameterType.STRING, description="Playbook ID (pbk- prefix)"),
-                "planning_context_id": ParameterMetadata(
-                    type=ParameterType.STRING,
-                    description="Planning context ID for the inference loop",
-                ),
-                "status": ParameterMetadata(type=ParameterType.STRING, description="Playbook status (active)"),
-            },
+        return_value_schema=registered_job_return_schema(
+            ReturnValueSchema(
+                description="Playbook creation result with IDs for tracking",
+                type=ParameterType.OBJECT,
+                properties={
+                    "playbook_id": ParameterMetadata(type=ParameterType.STRING, description="Playbook ID (pbk- prefix)"),
+                    "planning_context_id": ParameterMetadata(
+                        type=ParameterType.STRING,
+                        description="Planning context ID for the inference loop",
+                    ),
+                    "status": ParameterMetadata(type=ParameterType.STRING, description="Playbook status (active)"),
+                },
+            )
         ),
         error_processor_customizations=MergeErrorProcessorCustomizations(),
     )

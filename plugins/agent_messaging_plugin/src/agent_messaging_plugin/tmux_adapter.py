@@ -81,29 +81,31 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .channel_support import provider_ignores_dev_channels
 from .claude_hook_commands import optional_hook_command
+from .composer_faint import faint_suggestion_row
 from .headless_adapter import (
     WorkerHookResolutionError,
     _announce_managed_policy,
-    _authority_system_prompt,
     _managed_policy_remedy,
     _permission_state_report,
     _pid_alive,
     _resolve_coordination_receipt_path,
-    _resolve_heartbeat_marker_dir,
     _resolve_local_label,
     _resolve_session_mapping_spool_dir,
-    _resolve_spawn_cwd,
     _resolve_worker_hook_paths,
     _sigterm_then_kill,
 )
-from .lane_worktrees import worktree_pythonpath
+from .host_end_notice import arm_session_closed_notice
+from .session_workspace import resolve_workspace
 from .solet_cli import (
     WakeCliResolver,
     expose_worker_cli,
     watch_sidecar_argv,
+    worker_path,
 )
 from .submit_conventions import TMUX_CLAUDE_SUBMIT_CONVENTION
+from .tmux_target import pane_target, session_target
 
 logger = logging.getLogger(__name__)
 
@@ -180,33 +182,61 @@ def _pane_shows_startup_prompt(pane_text: str) -> bool:
     return _pane_shows_bypass_prompt(pane_text) or _pane_shows_dev_channels_prompt(pane_text)
 
 
-# Third-party-provider fix (§39.1/§40.1, reported and field-verified by a seed
-# adopter): on a third-party inference provider, Claude Code IGNORES
-# --dangerously-load-development-channels ("... ignored (server:<name>)" /
-# "Channels are not available on third-party providers") and never raises the
-# interactive confirmation. The expect loop above has exactly two branches --
-# prompt-appeared -> confirm, no-prompt -> assume-hung -> KILL -- so a
-# fully-booted worker was killed after DEFAULT_CONFIRM_TIMEOUT_SECONDS on every
-# such spawn, making the swap-durable tmux fleet unspawnable on exactly the
-# provider configuration an enterprise adopter without Anthropic-API access is
-# forced onto.
-#
-# The fix is to omit the flag when it is already inert, so no prompt is ever
-# expected: with the flag absent, _needs_dev_channels_confirmation returns False
-# and the loop is skipped entirely. ONE mechanism, not two -- deliberately NOT
-# also adding a pane-text success marker for the "ignored" lines, because a
-# second guard would make this guard's smoke legs vacuous. The Anthropic /
-# no-provider path is byte-for-byte unchanged (flag present, prompt-and-confirm
-# exactly as before).
-#
-# EVIDENCE BOUND ON THIS TUPLE: CLAUDE_CODE_USE_BEDROCK is the ONLY marker with
-# live evidence behind it (the adopter's verified spawn). Other third-party
-# providers plausibly have their own switches, but we have no third-party
-# endpoint in this checkout and no field report naming one, so adding a marker
-# here on inference would be an unmarked guess -- a wrong name is silently inert
-# and a right-name-wrong-semantics entry would omit the flag on an Anthropic
-# spawn. Extend this tuple ONLY with a measured spawn or an adopter report.
-_THIRD_PARTY_PROVIDER_ENV_MARKERS = ("CLAUDE_CODE_USE_BEDROCK",)
+def _first_turn_text(spec: Mapping[str, object]) -> str:
+    """The spec's first turn, ``""`` when it has none."""
+    return str(spec.get("first_turn") or "")
+
+
+def _launch_prompt_args(spec: Mapping[str, object]) -> list[str]:
+    """The tail of the claude argv that carries the spec's first turn as the
+    CLI's own launch prompt, or ``[]`` when the spec has none.
+
+    ``--`` ends options because ``--dangerously-load-development-channels`` is
+    variadic and would otherwise swallow the prompt."""
+    first_turn = _first_turn_text(spec)
+    return ["--", first_turn] if first_turn else []
+
+
+def _outside_startup_dialogs(pane_text: str) -> list[str]:
+    """The pane's lines with every startup dialogue cut out, as whitespace-free
+    segments (one per stretch of lines between dialogues).
+
+    A dialogue runs from the line carrying its first marker to the next line
+    carrying the shared footer (``Enter to confirm``). A dialogue whose footer is
+    not on screen is not cut: the footer is how the pane proves the dialogue is
+    drawn in full, and a message quoting a title is not one."""
+    footer = _DEV_CHANNELS_PROMPT_MARKERS[1]
+    starts = (_DEV_CHANNELS_PROMPT_MARKERS[0], _BYPASS_PROMPT_MARKERS[0])
+    lines = pane_text.splitlines()
+    kept: list[list[str]] = [[]]
+    index = 0
+    while index < len(lines):
+        if any(start in lines[index] for start in starts):
+            end = next((i for i in range(index, len(lines)) if footer in lines[i]), None)
+            if end is not None:
+                kept.append([])
+                index = end + 1
+                continue
+        kept[-1].append(lines[index])
+        index += 1
+    return ["".join("".join(segment).split()) for segment in kept]
+
+
+def _pane_shows_launch_prompt(pane_text: str, first_turn: str) -> bool:
+    """True when the CLI has echoed the launch prompt onto the pane.
+
+    The CLI submits the launch prompt only after the startup dialogues clear,
+    so its echo is proof they are gone even when the message quotes a dialogue
+    marker. Whitespace is dropped on both sides because the echo is wrapped and
+    indented; the first 60 remaining characters are enough to recognise it.
+
+    The echo must be positive proof, so text that a dialogue drawn on screen
+    contains itself is not one: a first turn that is any fragment of a dialogue
+    (its title, its footer, an option) would otherwise be "found" in the
+    dialogue. Only text on the pane outside the dialogues counts, which is the
+    same as the first turn appearing more often than the dialogues alone show it."""
+    needle = "".join(first_turn.split())[:60]
+    return bool(needle) and any(needle in segment for segment in _outside_startup_dialogs(pane_text))
 
 
 def _effective_spawn_env(spec: Mapping[str, object]) -> Mapping[str, str]:
@@ -279,13 +309,6 @@ def _provider_env_pairs(spec: Mapping[str, object], identity_pairs: list[str]) -
     return pairs
 
 
-def _provider_ignores_dev_channels(spawn_env: Mapping[str, str]) -> bool:
-    """True when the effective spawn environment selects a third-party provider
-    that ignores ``--dangerously-load-development-channels``. Adopter's shape,
-    bound to OUR effective-env computation rather than to their overlay."""
-    return any(str(spawn_env.get(marker, "")).strip() == "1" for marker in _THIRD_PARTY_PROVIDER_ENV_MARKERS)
-
-
 def _emit_role_tag_path() -> Path:
     return Path(__file__).resolve().parent / "tmux_support" / "emit_role_tag.sh"
 
@@ -314,11 +337,12 @@ def _env_pairs(
     # "mysolet") -- that conflation was the 2026-08-08 deaf-wake defect. The
     # 2026-08-08 fix used the bare command name "solet-bridge", which is only
     # correct when PATH can resolve it. A tmux pane inherits the tmux
-    # SERVER's environment, not this process's, so a worker ran with a
-    # minimal PATH carrying no venv/bin: MEASURED live in a spawned pane,
-    # `heartbeat_report_alive.py` -> "[Errno 2] No such file or directory:
-    # 'solet-bridge'", exit 0, silent. Absolute binary + PATH prepend closes both
-    # halves (the same treatment codex_common landed on 2026-08-13).
+    # SERVER's environment, not this process's (its PATH is the tmux CLIENT's,
+    # see the PATH entry below), so a worker ran with a
+    # minimal PATH carrying no venv/bin: MEASURED live in a spawned pane, a
+    # coordination subprocess using `solet-bridge` returned "[Errno 2] No such
+    # file or directory", exit 0, silent. Absolute binary + PATH prepend closes
+    # both halves (the same treatment codex_common landed on 2026-08-13).
     cli_env: dict[str, str] = {"PATH": os.environ.get("PATH", "")}
     expose_worker_cli(cli_env, solet_bin)
     pairs: list[str] = []
@@ -336,19 +360,11 @@ def _env_pairs(
         # `new-session -e` is an explicit allowlist boundary -- tmux drops
         # every variable not named here, which is exactly how the managed
         # Codex path lost its release PATH until 52edfb559 passed it
-        # through. Same boundary, same fix.
+        # through. Same boundary, same fix. PATH is the one name that does
+        # not arrive: tmux keeps this value in the session environment but
+        # gives the pane process its CLIENT's PATH (measured, tmux 3.7b,
+        # prb_e03ec2bb), so `_pane_command` exports the same value again.
         "PATH": cli_env["PATH"],
-        # A lane worktree isolates FILES, not IMPORTS (2026-09-07,
-        # iss_2236d297): a pane opened in the lane tree with no matching
-        # import path still resolves `agent_messaging_plugin` and every
-        # other repo module out of the SHARED checkout -- a quieter version
-        # of exactly the contamination the worktree exists to prevent. The
-        # Codex drivers already anchor this (codex_tmux._spawn_env ->
-        # worktree_pythonpath); this is the same helper, not a second
-        # implementation. `cwd` is the spawn's RESOLVED root, so on a spawn
-        # with no worktree_path this reduces to the driver's own default
-        # cwd and the value is what a shared-root spawn already had.
-        "PYTHONPATH": worktree_pythonpath(cwd, os.environ.get("PYTHONPATH", "")),
     }.items():
         pairs += ["-e", f"{key}={value}"]
     if isinstance(allowed_tools, (list, tuple)) and allowed_tools:
@@ -359,11 +375,6 @@ def _env_pairs(
     spool_dir = _resolve_session_mapping_spool_dir()
     if spool_dir is not None:
         pairs += ["-e", f"ANANTA_SESSION_MAPPING_SPOOL_DIR={spool_dir}"]
-    # T2 heartbeat lane (seat's redesign ruling 2026-08-05): same
-    # declared-not-derived, conditional-export contract.
-    heartbeat_dir = _resolve_heartbeat_marker_dir()
-    if heartbeat_dir is not None:
-        pairs += ["-e", f"AGENT_HEARTBEAT_MARKER_DIR={heartbeat_dir}"]
     receipt_path = _resolve_coordination_receipt_path(solet_name, context_gauge_reporter_path)
     if receipt_path is not None:
         pairs += ["-e", f"AGENT_COORDINATION_RECEIPT_PATH={receipt_path}"]
@@ -410,6 +421,10 @@ def _pane_command(
     parts = [
         "unset GIT_CONTROLLER_NAME; ",
         f"sh {shlex.quote(str(emit_script))} {shlex.quote(label)}; " if emit_script.exists() else "",
+        # prb_e03ec2bb: tmux gives the pane its client's PATH, not the `-e PATH` value, so export
+        # the same worker_path here: after the clear and emit (they need nothing from it), before
+        # the sidecar and exec (they do). Omitted when solet_bin is unresolved: the pre-fix pane.
+        f"export PATH={shlex.quote(worker_path(solet_bin))}; " if solet_bin else "",
     ]
     if transport == "watch" and solet_bin:
         # spool=True, deliberately UNLIKE codex's --no-spool: wake_waiter.py
@@ -433,7 +448,7 @@ def _pane_command(
 def _sanitize_session_name(raw: str) -> str:
     """tmux session names may not contain ``:`` or ``.`` (both are
     target-syntax separators); collapse anything else non-shell-friendly
-    too, so a lane_id with slashes/spaces never breaks ``-t`` targeting."""
+    too, so a label with slashes/spaces never breaks ``-t`` targeting."""
     return _SESSION_NAME_UNSAFE.sub("-", raw) or "session"
 
 
@@ -500,12 +515,12 @@ def _abort_unconfigured_session(tmux_bin: str, session_name: str, run_fn: Any) -
 
     try:
         run_fn(
-            [tmux_bin, "kill-session", "-t", session_name],
+            [tmux_bin, "kill-session", "-t", session_target(session_name)],
             capture_output=True,
             text=True,
             timeout=5,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         logger.warning("could not remove unconfigured tmux session %r", session_name)
 
 
@@ -582,7 +597,7 @@ DEFAULT_PASTE_STABLE_TIMEOUT_SECONDS = 10.0
 systematization fix loop #2) — inherited as a starting default, not
 independently recalibrated for tmux's own render timing beyond the live
 measurement in ``workbench/2026-08-08_spawn_registration_gaps_findings_
-rotation-impl.md`` (a real charter-sized payload's stranding was visible
+rotation-impl.md`` (a real brief-sized payload's stranding was visible
 within ~2s and stayed stable, never resolving on its own — consistent with
 tmux's local paste-chunking completing fast once ``send-keys -l`` returns).
 Flagged as an open item if further tuning is ever warranted; not treated as
@@ -786,7 +801,7 @@ class _TmuxSendKeysDriverChannel:
                     "-b",
                     buffer_name,
                     "-t",
-                    self._session,
+                    pane_target(self._session),
                     "-d",
                     "-p",
                 ],
@@ -809,7 +824,7 @@ class _TmuxSendKeysDriverChannel:
         self._wait_for_paste_stable(probe_text)
         try:
             self._run_fn(
-                [self._tmux_bin, "send-keys", "-t", self._session, self.convention.submit_value],
+                [self._tmux_bin, "send-keys", "-t", pane_target(self._session), self.convention.submit_value],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -830,7 +845,7 @@ class _TmuxSendKeysDriverChannel:
         crash (fire-and-forget contract, same as :meth:`send` itself)."""
         try:
             result = self._run_fn(
-                [self._tmux_bin, "capture-pane", "-t", self._session, "-p"],
+                [self._tmux_bin, "capture-pane", "-t", pane_target(self._session), "-p"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -915,7 +930,7 @@ class _TmuxSendKeysDriverChannel:
         the standing trap this guards against."""
         try:
             result = self._run_fn(
-                [self._tmux_bin, "capture-pane", "-e", "-t", self._session, "-p"],
+                [self._tmux_bin, "capture-pane", "-e", "-t", pane_target(self._session), "-p"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -996,12 +1011,26 @@ class _TmuxSendKeysDriverChannel:
         """Classify one polled sample as ``(stranded, populated, idle)`` —
         a pure reader, no state. Split out of :meth:`verify_driven` to keep
         that method's own branching under the CC gate; the state machine
-        (the idle streak, the population gate) stays in the caller."""
+        (the idle streak, the population gate) stays in the caller.
+
+        ``idle`` is true for the bare cleared-signature row, and also for a
+        composer showing Claude Code's prompt suggestion: the LAST row that
+        starts with the signature (the composer sits below transcript echoes
+        of earlier prompts) whose text is entirely SGR faint, provided that
+        row does not show the driven ``text`` (a row showing it never reads
+        idle, or :meth:`verify_driven` would confirm its own text as
+        submitted). Claude Code drops a suggestion on the first key or paste,
+        so typing over it replaces it. Consequently :meth:`verify_driven` now
+        also confirms a submit when a fresh faint suggestion follows it; that
+        is intended. Normal-colour, mixed and unknown shapes stay occupied."""
         lines = captured.splitlines()
+        signature = self._cleared_signature
         stranded = any(self._is_stranded_drive_line(line, text) for line in lines)
         populated = any(self._composer_content_matches(line, text) for line in lines)
-        idle = any(_ANSI_SGR_RE.sub("", line.replace("\x00", "")).strip() == self._cleared_signature for line in lines)
-        return stranded, populated, idle
+        exact_idle = any(_ANSI_SGR_RE.sub("", line.replace("\x00", "")).strip() == signature for line in lines)
+        faint_row = faint_suggestion_row(lines, signature)
+        faint_idle = faint_row is not None and not self._composer_content_matches(faint_row, text)
+        return stranded, populated, exact_idle or faint_idle
 
     def verify_driven(self, text: str) -> bool | None:
         """Poll the pane for evidence of what happened to a driven ``text``
@@ -1274,7 +1303,7 @@ def _claude_launch_remedies(
             "the resolved transport is 'mcp' (a real MCP bridge config must "
             "exist and is passed verbatim to --mcp-config); 'watch' transport "
             "spawns with an inline empty MCP config and never reads this file, "
-            "so switching FLEET_SESSION_HOST/transport to 'watch' (the charter "
+            "so switching FLEET_SESSION_HOST/transport to 'watch' (the shipped "
             "default) also satisfies this remedy without creating the file.",
         )
     return remedies
@@ -1304,6 +1333,7 @@ def _tmux_capability_report() -> dict[str, object]:
     return {
         "host": "tmux",
         "topology": "detached-session",
+        "first_turn_on_launch": True,
         "inspectable_via": ["tmux attach -t <host_ref>", "tmux -CC attach -t <host_ref>"],
         "attach_hint": ("detached tmux session; attach directly or via iTerm2 'tmux -CC attach -t <host_ref>' for native-window presentation (documented separately, not automated by this driver)"),
         **_permission_state_report(
@@ -1339,7 +1369,6 @@ def _tmux_hook_settings_json(
     *,
     allowlist_hook_path: Path,
     capture_hook_path: Path,
-    heartbeat_hook_path: Path,
     rotation_due_hook_path: Path,
     wake_hook_path: Path,
     session_start_hook_path: Path,
@@ -1366,6 +1395,9 @@ def _tmux_hook_settings_json(
     launcher's ``SOLET_ALLOW_ASKUSERQUESTION=1``); ``False`` (the default)
     keeps the deny on."""
     settings = {
+        # Spawned lanes read project settings only, never ~/.claude/settings.json,
+        # so the compaction window rides here: no session passes 500K (rul_1d0a322d).
+        "autoCompactWindow": 500000,
         "permissions": {
             "deny": list(_tmux_denied_tools(allow_askuserquestion=allow_askuserquestion)),
         },
@@ -1376,14 +1408,16 @@ def _tmux_hook_settings_json(
             "SessionStart": [
                 {"hooks": [{"type": "command", "command": optional_hook_command(capture_hook_path, "SessionStart")}]},
                 {
-                    # Matches coordination-hooks@<solet>'s own hooks.json
-                    # matcher for this event exactly (fidelity, not a
-                    # new choice) -- session_start_context.py
-                    # fires only here (never UserPromptSubmit
-                    # below), matching the shipped plugin.
-                    "matcher": "startup|resume|clear",
+                    # The checkout hook also answers compact: after a
+                    # compaction the host runs SessionStart again and only
+                    # hooks matching it re-inject context. The shipped
+                    # plugin hooks keep startup|resume|clear (they carry
+                    # the solet's statement, not the register block).
+                    # session_start_context.py fires only here, never on
+                    # UserPromptSubmit.
+                    "matcher": "startup|resume|clear|compact",
                     "hooks": [
-                        {"type": "command", "command": optional_hook_command(session_start_hook_path, "SessionStart"), "timeout": 8},
+                        {"type": "command", "command": optional_hook_command(session_start_hook_path, "SessionStart"), "timeout": 40},
                     ],
                 },
             ],
@@ -1393,7 +1427,6 @@ def _tmux_hook_settings_json(
             "PostToolUse": [
                 {
                     "hooks": [
-                        {"type": "command", "command": optional_hook_command(heartbeat_hook_path, "PostToolUse")},
                         {"type": "command", "command": optional_hook_command(rotation_due_hook_path, "PostToolUse")},
                     ]
                 },
@@ -1458,6 +1491,7 @@ def _accept_bypass_permissions_prompt(
     capture_text: Callable[[str], str],
     kill_session: Callable[[str], None],
     confirm_timeout_seconds: float,
+    first_turn: str = "",
 ) -> None:
     """Accept Claude Code's "Bypass Permissions mode" dialogue, which a
     ``--permission-mode bypassPermissions`` lane shows before the
@@ -1481,14 +1515,14 @@ def _accept_bypass_permissions_prompt(
         return
     for key in ("Down", "Enter"):
         run_fn(
-            [tmux_bin, "send-keys", "-t", session_name, key],
+            [tmux_bin, "send-keys", "-t", pane_target(session_name), key],
             capture_output=True,
             text=True,
             timeout=10,
         )
     cleared = await_condition(
         session_name,
-        lambda text: not _pane_shows_bypass_prompt(text),
+        lambda text: not _pane_shows_bypass_prompt(text) or _pane_shows_launch_prompt(text, first_turn),
     )
     if not cleared:
         kill_session(session_name)
@@ -1544,7 +1578,7 @@ class TmuxHostDriver:
         # mirrors headless_adapter.HeadlessHostDriver's own floor exactly --
         # spec-level (spawn_session's policy resolution) always wins; never
         # a fail-closed gate (unlike permission_mode), so an unset floor
-        # resolves to the charter's own default ("watch") in _spawn_command
+        # resolves to the shipped default ("watch") in _spawn_command
         # rather than refusing to spawn.
         self._transport = transport if transport is not None else ""
         self._cwd = cwd if cwd is not None else _resolve_default_cwd()
@@ -1638,7 +1672,7 @@ class TmuxHostDriver:
         durable substrate on exactly the clone that has no MCP config to
         begin with. Resolution mirrors :meth:`_resolve_transport` exactly
         (spec-level override, then this driver's constructor/env floor, then
-        the charter default ``"watch"``) so a bare call sees the same posture
+        the shipped default ``"watch"``) so a bare call sees the same posture
         :meth:`spawn` would actually take."""
         return [
             *self._tmux_binary_remedies(),
@@ -1675,7 +1709,6 @@ class TmuxHostDriver:
         settings_json = _tmux_hook_settings_json(
             allowlist_hook_path=resolved_hooks["headless_tool_allowlist_gate.py"],
             capture_hook_path=resolved_hooks["capture_session_mapping.py"],
-            heartbeat_hook_path=resolved_hooks["heartbeat_report_alive.py"],
             rotation_due_hook_path=resolved_hooks["rotation_due_watch.py"],
             wake_hook_path=resolved_hooks["wake_waiter.py"],
             session_start_hook_path=resolved_hooks["session_start_context.py"],
@@ -1724,8 +1757,8 @@ class TmuxHostDriver:
         # §39.1/§40.1: append the dev-channels flag ONLY where it does
         # something. On a third-party provider it is inert AND the confirm
         # loop it arms would kill the booted worker -- see
-        # _provider_ignores_dev_channels.
-        if not _provider_ignores_dev_channels(_effective_spawn_env(spec)):
+        # provider_ignores_dev_channels.
+        if not provider_ignores_dev_channels(_effective_spawn_env(spec)):
             cmd += ["--dangerously-load-development-channels", f"server:{self._solet_name}"]
         model = str(spec.get("model") or "")
         if model:
@@ -1733,9 +1766,7 @@ class TmuxHostDriver:
         effort = str(spec.get("effort") or "")
         if effort:
             cmd += ["--effort", effort]
-        # T2 authority-template (seat's design ruling 2026-08-05): same
-        # ON-by-default contract as the headless adapter.
-        cmd += ["--append-system-prompt", _authority_system_prompt(spec)]
+        cmd += _launch_prompt_args(spec)
         return cmd
 
     def _resolve_transport(self, spec: Mapping[str, object]) -> str:
@@ -1777,25 +1808,12 @@ class TmuxHostDriver:
         # disagree about what a worker is called. The tmux session name derives
         # from it, so a role-named spawn gets a role-named session for free.
         label = _resolve_local_label(spec, agent_instance_id=agent_instance_id)
-        session_name = _sanitize_session_name(f"fleet-{label}-{agent_instance_id[-8:]}")
+        session_name = _sanitize_session_name(f"fleet-{self._solet_name}-{label}-{agent_instance_id[-8:]}")
         # Minted exactly ONCE, here — never re-derived elsewhere (two
         # evaluations of an identity expression is two identities).
         agent_session_id = f"ases-{agent_instance_id}"
 
-        # The lane root this spawn actually runs in (2026-09-07,
-        # iss_2236d297): spawn_session provisions a lane worktree and hands
-        # it over as `worktree_path`, and until this landed the tmux driver
-        # was the one host driver that ignored the key -- the worktree was
-        # created, registered, and silently abandoned while the pane opened
-        # in the shared checkout. `_resolve_spawn_cwd` is headless_adapter's
-        # own helper, shared for the same reason `_resolve_local_label` is:
-        # the two Claude host drivers must never disagree about which tree a
-        # worker runs in, and it raises HostCannotSpawnError rather than
-        # falling back, so a declared-but-unusable worktree fails loudly.
-        # Resolved BEFORE the env pairs, which anchor PYTHONPATH to it: the
-        # pane's cwd and its import root are two halves of one isolation
-        # decision and must never be computed from different roots.
-        cwd = _resolve_spawn_cwd(spec, self._cwd)
+        cwd = resolve_workspace(spec.get("workspace"), self._cwd)
         try:
             resolved_hooks = _resolve_worker_hook_paths(self._cwd)
         except WorkerHookResolutionError as exc:
@@ -1831,7 +1849,11 @@ class TmuxHostDriver:
         ]
         self._launch_new_session(new_session_cmd)
         _configure_server_options(self._tmux_bin, session_name, self._run_fn)
-        if _needs_bypass_acceptance(claude_cmd):
+        arm_session_closed_notice(tmux=[self._tmux_bin], run_fn=self._run_fn, solet_name=self._solet_name, solet_bin=self._solet_bin)
+        # The launch prompt follows `--`; the flag checks read the options only.
+        options = claude_cmd[: len(claude_cmd) - len(_launch_prompt_args(spec))]
+        first_turn = _first_turn_text(spec)
+        if _needs_bypass_acceptance(options):
             _accept_bypass_permissions_prompt(
                 self._tmux_bin,
                 self._run_fn,
@@ -1840,9 +1862,10 @@ class TmuxHostDriver:
                 self._capture_pane_text,
                 self._kill_session,
                 self._confirm_timeout_seconds,
+                first_turn,
             )
-        if _needs_dev_channels_confirmation(claude_cmd):
-            self._confirm_dev_channels_prompt(session_name)
+        if _needs_dev_channels_confirmation(options):
+            self._confirm_dev_channels_prompt(session_name, first_turn)
         return session_name
 
     def _launch_new_session(self, new_session_cmd: list[str]) -> None:
@@ -1856,12 +1879,12 @@ class TmuxHostDriver:
     def _capture_pane_text(self, session_name: str) -> str:
         try:
             result = self._run_fn(
-                [self._tmux_bin, "capture-pane", "-t", session_name, "-p"],
+                [self._tmux_bin, "capture-pane", "-t", pane_target(session_name), "-p"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             return ""
         if result.returncode != 0:
             return ""
@@ -1879,7 +1902,7 @@ class TmuxHostDriver:
                 return False
             self._sleep_fn(self._confirm_poll_interval_seconds)
 
-    def _confirm_dev_channels_prompt(self, session_name: str) -> None:
+    def _confirm_dev_channels_prompt(self, session_name: str, first_turn: str = "") -> None:
         """The bounded expect loop (D3 slice 0a): wait for the interactive
         ``--dangerously-load-development-channels`` confirmation to appear on
         the pane, clear it with a literal Enter, then wait for it to actually
@@ -1895,14 +1918,14 @@ class TmuxHostDriver:
                 f"tmux pane {session_name!r} never showed the --dangerously-load-development-channels confirmation prompt within {self._confirm_timeout_seconds}s -- killed the half-alive session instead of returning one that may hang forever.",
             )
         self._run_fn(
-            [self._tmux_bin, "send-keys", "-t", session_name, "Enter"],
+            [self._tmux_bin, "send-keys", "-t", pane_target(session_name), "Enter"],
             capture_output=True,
             text=True,
             timeout=10,
         )
         cleared = self._await_pane_condition(
             session_name,
-            lambda text: not _pane_shows_dev_channels_prompt(text),
+            lambda text: not _pane_shows_dev_channels_prompt(text) or _pane_shows_launch_prompt(text, first_turn),
         )
         if not cleared:
             self._kill_session(session_name)
@@ -1913,24 +1936,24 @@ class TmuxHostDriver:
     def alive(self, host_ref: str) -> bool:
         try:
             result = self._run_fn(
-                [self._tmux_bin, "has-session", "-t", host_ref],
+                [self._tmux_bin, "has-session", "-t", session_target(host_ref)],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             return False
         return result.returncode == 0
 
     def _pane_pid(self, host_ref: str) -> int | None:
         try:
             result = self._run_fn(
-                [self._tmux_bin, "list-panes", "-t", host_ref, "-F", "#{pane_pid}"],
+                [self._tmux_bin, "list-panes", "-t", pane_target(host_ref), "-F", "#{pane_pid}"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired, ValueError):
             return None
         if result.returncode != 0:
             return None
@@ -1946,12 +1969,15 @@ class TmuxHostDriver:
         """Native-session cleanup on teardown (FINDINGS requirement 4, tmux
         side) — idempotent: a session already gone is success, not an
         error, matching ``terminate_session``'s own idempotent contract."""
-        with_suppress = self._run_fn(
-            [self._tmux_bin, "kill-session", "-t", host_ref],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        try:
+            with_suppress = self._run_fn(
+                [self._tmux_bin, "kill-session", "-t", session_target(host_ref)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except ValueError:
+            return
         del with_suppress  # non-zero here just means "already gone" — not fatal
 
     def terminate(self, host_ref: str, grace_seconds: int) -> None:

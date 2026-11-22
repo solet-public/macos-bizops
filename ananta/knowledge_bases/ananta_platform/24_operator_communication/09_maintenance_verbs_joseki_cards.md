@@ -1,4 +1,4 @@
-# Operations Joseki Cards: Rotation, Restart, Memory Sync, KB Refresh, Context Gauge, Candidate Relay
+# Operations Joseki Cards: Rotation, Restart, Memory Sync, KB Refresh, Context Gauge
 
 Tags: knowledge:tag:maintenance_verbs, knowledge:tag:joseki, knowledge:tag:session_lifecycle, knowledge:tag:memory_passthrough, knowledge:tag:context_gauge
 
@@ -8,17 +8,17 @@ Article Role: operations_runbook
 
 Article Tags: planning-stage:solet-lifecycle, evidence-category:operations-runbook, domain:local-solet, domain:agent-messaging, consumer_profile:both
 
-Embedding Description: Ordered-call joseki cards for recurring fleet and candidate lifecycle operations — rotate a worker, rotate the operator seat itself with no helper agent in the injection path (the operator types it, or the seat runs a deterministic detached script), restart a dead worker, sync the local memory-passthrough projection, curate the ambient MEMORY.md head at a rotation boundary, refresh a plugin's KB/process registry, check a session's context-window occupancy against the measured economic rotation policy, and relay a delivered candidate through review and readiness to the repository-specific landing path — each with its verify step and known traps. Follow the card, don't re-derive the sequence.
+Embedding Description: Ordered-call joseki cards for recurring session and maintenance operations — rotate a worker, rotate the operator seat itself with no helper agent in the injection path (the operator types it, or the seat runs a deterministic detached script), restart a dead worker, sync the local memory-passthrough projection, curate the ambient MEMORY.md head at a rotation boundary, refresh a plugin's KB/process registry, check a session's context-window occupancy against the measured economic rotation policy — each with its verify step and known traps. Follow the card, don't re-derive the sequence.
 
-**When you need this**: a session is about to rotate, restart, or check on another managed session; the operator seat itself needs its context cleared and resumed mid-programme, whether or not the operator is at the keyboard; a session needs to hydrate or drain its local memory-passthrough projection; a seat is at a rotation boundary or just hit a hydrate budget failure and needs to curate the ambient MEMORY.md head back under budget; a session is editing a plugin's KB process JSON or config and needs to refresh the live registry; a session (worker or the operator seat) needs to know how close it is to its context-window ceiling; or Main needs the native delivered-to-review and reviewed-to-ready verbs, and the boundary between Project-Solet `landing run` and the local Git-Controller. Design records: `workbench/2026-08-09_maintenance_verbs_m0_design_mverbs-impl.md` (maintenance-verbs programme, Lane A, M0/M1) and the 2026-08-10 maintenance-verbs M2 memory-curation charter draft (M2, ambient-index curation & placement decay).
+**When you need this**: a session is about to rotate, restart, or check on another session; the operator seat itself needs its context cleared and resumed mid-programme, whether or not the operator is at the keyboard; a session needs to hydrate or drain its local memory-passthrough projection; a seat is at a rotation boundary or just hit a hydrate budget failure and needs to curate the ambient MEMORY.md head back under budget; a session is editing a plugin's KB process JSON or config and needs to refresh the live registry; a session (worker or the operator seat) needs to know how close it is to its context-window ceiling. Session lifecycle design record: `workbench/2026-08-09_maintenance_verbs_m0_design_mverbs-impl.md`.
 
 ---
 
 ## Card: Worker rotation
 
-Clears a managed worker's context and drives its next work turn — the "rotate in place" operation, distinct from a restart (which kills and respawns the process).
+Clears a worker's context and drives its next work turn — the "rotate in place" operation, distinct from a restart (which kills and respawns the process).
 
-1. `plugin::agent_messaging_plugin::list_sessions` — resolve the ledger `agent_instance_id` by `lane_id`/`host_ref`. **Never** the id from a role-thread message or `peer_list` — that is the watch-transport worker's OWN watch-registration id (`agi-watch-*`), a different value by construction. `clear_session`/`drive_session`/`terminate_session`/`session_status` all key on the spawn-time LEDGER id and reject the watch id loudly (`session_not_found`).
+1. `plugin::agent_messaging_plugin::list_sessions` — resolve the ledger `agent_instance_id` using the session label and host. **Never** the id from a role-thread message or `peer_list` — that is the watch-transport worker's OWN watch-registration id (`agi-watch-*`), a different value by construction. `clear_session`/`drive_session`/`terminate_session`/`session_status` all key on the spawn-time LEDGER id and reject the watch id loudly (`session_not_found`).
 2. `plugin::agent_messaging_plugin::peer_send_by_name` with `name=<the worker's role>` and a pickup pointer to the worker's own handoff note plus "drain your role inbox." Durable — delivers even if the driven turn below races it.
 3. `plugin::agent_messaging_plugin::clear_session` with `agent_instance_id=<ledger id>`, `park=False`, `directed_by=<your role>`.
 4. `plugin::agent_messaging_plugin::drive_session` with the same `agent_instance_id`, `text=<the same pickup pointer>`, `directed_by=<your role>`.
@@ -121,17 +121,12 @@ an adopter's machine, with no error to make the gap visible.
 
 ## Card: Worker restart
 
-Kills a dead or hung worker process and spawns a fresh one in its place — distinct from rotation (which reuses the live process).
+Replaces a dead or hung worker with a fresh session.
 
-1. `plugin::agent_messaging_plugin::session_status` on the dying worker — capture `lane_id`, `unit_id`, `work_class`, `budget_line`, `role_class`, `host`, `model`, `effort` before the row goes terminal.
-2. `plugin::agent_messaging_plugin::terminate_session` with `agent_instance_id`, `directed_by`, `grace_seconds=30`.
-3. `plugin::agent_messaging_plugin::spawn_session` with the captured fields (`unit_id` is the only launch address; the replacement reads the Unit's registered brief revision, and a missing or retired Unit refuses the spawn), including `role_name=<the role this worker should hold>`. Retain the returned `data.job_id` and schedule exact-id `service_interface::job_service::get_job` reads until terminal. Bind the replacement identity from `job.result.data` only on success; handle error/cancelled outcomes before proceeding to step 4. The worker drives one automatic first turn immediately after a successful host dispatch (the lane's captured charter if one is on file, otherwise a fixed fallback bootstrap turn) — this is not optional and nothing further needs to trigger it.
-4. Check whether a lane charter is on file for `lane_id` (only relevant if you need to know whether the automatic first turn from step 3 already instructs the fresh session to claim `role_name`). If no charter is on file: `plugin::agent_messaging_plugin::drive_session` on the new `agent_instance_id` with `text` explicitly instructing it to claim the target role ("claim role '<role_name>' via the rename skill / arm a watch process for it — this is a restart continuing lane '<lane_id>', not a fresh unbriefed spawn").
-5. **Verify — do not skip.** `plugin::agent_messaging_plugin::peer_holds_role` with `name=role_name`, `agent_instance_id=<new id>` must return `holds: true` before the restart is reported complete.
-
-**Traps:**
-- *The claim circle* — a relaunched process can come up with the right transport but still resolve `peer_send_by_name` to the DEAD prior instance (`delivery: queued_for_replay`, empty `delivered_to_bridge_id`); on watch transport there is no bridge-connect auto-registration, so an idle fresh session never turns without a wake, which needs the binding. `spawn_session`'s own automatic first-turn dispatch (step 3) is what breaks this circle for a spawn-path relaunch — a hand relaunch that bypasses `spawn_session` entirely (e.g. raw pane injection) does not get this for free and needs an explicitly driven first turn.
-- *No role-name placeholder in the authority template* — the `--append-system-prompt` delegation contract a fresh spawn receives does not itself name the target role; that instruction has to come from a captured lane charter's prose, or (default, when no charter exists) an explicit step-4 drive. Do not assume the automatic first turn alone re-claims the role.
+1. Call `plugin::agent_messaging_plugin::list_sessions` with the previous session's label and host. Identify the previous session in the results and pass its ledger `agent_instance_id` to `plugin::agent_messaging_plugin::session_status`. Recover the launch settings from the caller's original request.
+2. If the old session is still running, use `plugin::agent_messaging_plugin::terminate_session` with its ledger `agent_instance_id` and verify that it has stopped.
+3. The caller submits `plugin::agent_messaging_plugin::spawn_session` with the runtime, model, effort, workspace directory, permissions, and label. Supply a first message that tells the replacement where to resume and includes any outstanding handoff.
+4. Read the exact launch job with `service_interface::job_service::get_job`. Once it succeeds, use the new instance ID from `job.result.data` and verify that the first turn ran. If it fails or is cancelled, read the terminal result before attempting another launch.
 
 ## Card: Memory-passthrough sync (hydrate or drain)
 
@@ -183,7 +178,7 @@ the next scheduled boundary once the ceiling has already been hit once).
      article (this card's own existence is an example of the shape) →
      move the content to the KB via `author-kb-content`, then retire the
      hook — the lesson survives, just not as an ambient line;
-   - an Active-Work line for a lane that is closed or parked → collapse
+   - an Active-Work line for work that has finished or paused → collapse
      it into the standing backlog-pointer line rather than carrying its
      own slot indefinitely.
    A fact tagged `agent_memory:pinned` is EXCLUDED from candidacy
@@ -237,70 +232,6 @@ Refreshing a plugin's KB process-definition JSON or config after editing it in t
 - *`0` updates ≠ nothing to do; it can also mean nothing changed.* Assert `updated_count > 0` with empty `errors`, not just a bare success flag.
 - *Store-updated ≠ behavior-changed.* `reload_plugin_config`'s green means the config row was written, not that any running instance is reading it differently.
 
-## Card: Candidate delivery, review, readiness, and landing relay
-
-Carries a delivered candidate through typed review and landing readiness,
-while keeping each lifecycle fact and repository's landing authority separate.
-Main invokes the relay at each handoff; nothing starts these commands
-automatically.
-
-1. After the author delivers a candidate, run `psolet delivered-to-review`
-   from a session other than the author. Name the target checkout explicitly;
-   a registered repository name does not select its checkout:
-
-   ```sh
-   psolet delivered-to-review --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT --dry-run
-   psolet delivered-to-review --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT
-   ```
-
-   The command freezes the exact delivered revision, creates or reuses its
-   review unit, selects and spawns a reviewer, assigns the owner, and sends a
-   generated GO. A same-delivery rerun is idempotent. It has no recovery path
-   for a new delivery after FAIL or a retired reviewer (`iss_2b8b517d`), and a
-   partial relay has no resume mode; inspect its recorded observations before
-   any bounded manual fallback.
-2. The reviewer records a typed PASS/CLEAR against that frozen candidate.
-   Afterward Main runs `psolet reviewed-to-ready` under the repository's active
-   landing policy:
-
-   ```sh
-   psolet reviewed-to-ready --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT --dry-run
-   psolet reviewed-to-ready --unit UNIT --repo rep_7111540c-ac4a-468c-8f84-b67d8756d1d0 --repo-root DEVELOPMENT_CHECKOUT
-   ```
-
-   The verb requires the newest revision to be frozen and the newest typed
-   clearing review outcome to name that exact revision. It reuses current
-   readiness for the same revision and review event. A candidate delivery, a
-   reviewer message, a PASS, and readiness are distinct facts; none proves a
-   landing occurred.
-3. For Project Solet only, Project-Solet-Git-Controller uses
-   `psolet landing run --repo project-solet --unit UNIT [--dry-run]` on a
-   current `ready_to_land` receipt and with its existing live binding. The
-   command verifies frozen bytes and modes, runs one provisioned full gate,
-   records the evidence, runs read-only preflight, fast-forwards Project Solet
-   `master`, and records the landing. A conflict, byte mismatch, or red gate
-   records a blocker and leaves `master` untouched. Dry-run writes nothing and
-   runs no gate. An already-published candidate can be recorded from retained
-   verdict evidence without merging or re-running the gate.
-4. The local Git-Controller does not use Project Solet's `landing run`; it follows
-   the repository-specific procedure and gates in the Git-Controller commit skill. In either repository,
-   only current register readiness plus the repository's guards authorizes
-   landing. A message or peer receipt is not acceptance or authorization.
-   Landing is still separate from deployment and close-out; after cutover,
-   follow the canonical Change Close-Out Checklist for issue disposition, doc
-   impact, reviewer follow-ups, and lane or worktree retirement.
-
-**Interim metadata path.** Until the exact-candidate metadata Unit
-`unt_d428a5c3` lands after `unt_44965222`, the author report carries the
-proposed landing commit message (subject and body) plus doc-impact statement.
-Main sends both to Git-Controller in the READY message. The register stores
-neither (`iss_49b2e4c8`); do not invent a verb, flag, or field for them.
-
-**Known limits.** No automatic trigger starts these verbs. `landing run` has
-not yet carried a real landing; the first real landing was recorded by route A
-(`lnd_8976b957`). The old G/ scripts and route A are bounded fallback paths
-only, not the default when a native relay is available.
-
 ## Card: Context gauge check
 
 Checks a session's current context-window occupancy against its model's ceiling. Depends on `session_context_status` (maintenance-verbs M1) — a cached-read verb fed by an extension to the existing `rotation_due_watch.py` PostToolUse hook, landed alongside this card. Coverage today: any worker spawned via `spawn_session` (the hook rides its spawn-time settings). The operator-hosted seat is a known, disclosed gap pending a separate seat-wiring decision (see `workbench/2026-08-09_context_gauge_seat_wiring_design_note_mverbs-impl.md`) — a `resolved: false` result for a `host=operator` session is the expected shape, not a bug to route around.
@@ -330,7 +261,6 @@ Checks a session's current context-window occupancy against its model's ceiling.
    **clearing wins when C > H + 20H/N.**
 
 **Traps:**
-- *`budget_report` is the wrong instrument for this.* It structurally excludes `host=operator` rows and lifetime-sums a worker's usage per `budget_line` — neither "current" nor seat-inclusive. Do not adapt it for a live context reading.
 - *`rotation_due=true` is not the policy.* The verb's own flag fires at 0.5 and
   is a hint, not a threshold. Compare the measured number against the economic
   policy in step 3. The superseded 0.6 tripwire — and the "~80k
@@ -339,6 +269,6 @@ Checks a session's current context-window occupancy against its model's ceiling.
   model CALL, and they leaned on an estimated H that measurement put roughly
   50% low.
 - *The policy binds only if the seat SELF-CHECKS.* A threshold nobody reads is
-  not a threshold. Check at every landing relay and every task boundary. **The
+  not a threshold. Check at each task boundary. **The
   operator noticing first is a policy failure, not a save** — on 2026-08-16 a
   seat rotated at 559K against a >300K rule, operator-flagged.

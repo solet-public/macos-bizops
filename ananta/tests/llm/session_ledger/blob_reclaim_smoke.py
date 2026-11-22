@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -101,6 +103,113 @@ def _run_selector(state: StateManagementInterface, blobs: FilesystemProvider) ->
     for blob_id in (referenced, young, other_kind, other_namespace, ambiguous):
         assert (blobs.blobs_dir / blob_id).exists(), f"T3/T4 protected blob was deleted: {blob_id}"
     print("PASS T1-T4 dry-run counts, exact confirmed selector, protected kinds/namespaces/ages/references and ambiguous row")
+
+
+def _run_batches(state: StateManagementInterface, blobs: FilesystemProvider) -> None:
+    """Budgeted batches with a caller-held cursor.
+
+    The fixture store already holds the rows the earlier checks left, so every
+    row count is measured against an unstopped call on the same store.
+    """
+    counted = ("scanned_count", "candidate_count", "candidate_bytes", "deleted_count", "ambiguous_count", "excluded_count")
+    text = b"synthetic event text"
+    t = [0.0]
+    seen: list[dict[str, Any]] = []
+
+    def reclaimer(**options: Any) -> EventTextBlobReclaimer:
+        return EventTextBlobReclaimer(state=state, blobs=blobs, blob_root=blobs.blobs_dir, **options)
+
+    def tick() -> float:
+        t[0] += 0.5
+        return t[0]
+
+    def drain(reclaim: EventTextBlobReclaimer, *, confirm: bool, budget: float, after: list[str] | None = None) -> list[dict[str, Any]]:
+        results = [reclaim.run(confirm=confirm, after=after, budget_seconds=budget)]
+        while not results[-1]["complete"]:
+            results.append(reclaim.run(confirm=confirm, after=json.loads(json.dumps(results[-1]["next_after"])), budget_seconds=budget))
+        seen.extend(results)
+        return results
+
+    def totals(results: list[dict[str, Any]]) -> dict[str, int]:
+        return {key: sum(result[key] for result in results) for key in counted}
+
+    def walk_order(limit: int) -> list[list[str]]:
+        query: dict[str, object] = {"table": "metadata", "filters": {"plugin_namespace": "session_ledger"}, "order_by": [["created_at", "asc"], ["id", "asc"]], "limit": limit, "include_deleted": True}
+        return [[row["created_at"], row["id"]] for row in _ok(state.query_ordered("default_blob_storage_plugin", query))["records"]]
+
+    def unstopped() -> dict[str, Any]:
+        seen.append(reclaimer(monotonic=lambda: 0.0).run())
+        assert seen[-1]["complete"] is True and seen[-1]["next_after"] is None, seen[-1]
+        return seen[-1]
+
+    def dry_batches() -> tuple[dict[str, Any], list[str], str]:
+        before = unstopped()
+        orphans = [_blob(state, blobs) for _ in range(250)]
+        referenced = _blob(state, blobs)
+        _reference(state, referenced)
+        whole = unstopped()
+        assert (whole["scanned_count"] - before["scanned_count"], before["candidate_count"], whole["candidate_count"]) == (251, 0, 250), (before, whole)
+        dry = drain(reclaimer(page_size=100, monotonic=tick), confirm=False, budget=3)
+        first, second = dry[0], dry[1]
+        order = walk_order(first["scanned_count"] + second["scanned_count"])
+        assert first["complete"] is False and 0 < first["scanned_count"] < 100, first
+        assert first["next_after"] == order[first["scanned_count"] - 1], "T1 cursor must be the last row scanned"
+        assert second["next_after"] == order[-1], "T1 a cursor that went through JSON must continue with the next row"
+        assert totals(dry) == totals([whole]) and dry[-1]["next_after"] is None, (totals(dry), whole)
+        return whole, orphans, referenced
+
+    def confirmed_batches(whole: dict[str, Any], orphans: list[str], referenced: str) -> float:
+        confirmed = drain(reclaimer(), confirm=True, budget=1)
+        assert totals(confirmed) == {**totals([whole]), "deleted_count": 250}, (totals(confirmed), whole)
+        assert sum(result["deleted_bytes"] for result in confirmed) == whole["candidate_bytes"] == 250 * len(text), confirmed
+        assert not any((blobs.blobs_dir / orphan).exists() for orphan in orphans), "T3 confirmed batches must delete every orphan"
+        assert (blobs.blobs_dir / referenced).read_bytes() == text, "T3 referenced blob must stay readable"
+        return max(result["slowest_row_seconds"] for result in confirmed)
+
+    def slow_page() -> None:
+        rest = unstopped()["scanned_count"]
+        slow = [_blob(state, blobs, age=30 * 86400) for _ in range(10)]
+        waits: list[float] = []
+
+        @contextmanager
+        def busy_guard(root: Path, *, timeout: float | None = None) -> Generator[bool]:
+            waits.append(cast(float, timeout))
+            t[0] += waits[-1]
+            yield False
+
+        with patch("ananta.services.session_ledger_service.blob_reclaim.blob_write_guard", busy_guard):
+            stopped = reclaimer(lock_timeout=5, monotonic=lambda: t[0]).run(confirm=True, budget_seconds=6)
+        seen.append(stopped)
+        expected = {"scanned_count": 2, "skipped_locked": 2, "deleted_count": 0, "complete": False, "elapsed_seconds": 6.0, "next_after": walk_order(2)[1]}
+        assert waits == [5.0, 1.0] and {key: stopped[key] for key in expected} == expected, (waits, stopped)
+        resumed = drain(reclaimer(), confirm=True, budget=60, after=json.loads(json.dumps(stopped["next_after"])))
+        assert len(resumed) == 1 and (resumed[0]["scanned_count"] - rest, resumed[0]["deleted_count"]) == (8, 8), resumed
+        assert [(blobs.blobs_dir / blob_id).exists() for blob_id in slow] == [True, True] + [False] * 8, "T2 skipped blobs stay readable; the resume loses no row"
+        seen.append(reclaimer().run(confirm=True, budget_seconds=60))
+        assert seen[-1]["deleted_count"] == 2 and seen[-1]["complete"] is True, seen[-1]
+        assert not any((blobs.blobs_dir / blob_id).exists() for blob_id in slow), "T2 a new run without after deletes the skipped blobs"
+
+    def refused(arguments: dict[str, Any]) -> bool:
+        try:
+            reclaimer().run(**arguments)
+        except (TypeError, ValueError):
+            return True
+        return False
+
+    def shaped(result: dict[str, Any]) -> bool:
+        cursor = result["next_after"]
+        started = datetime.fromisoformat(result["started_at"]).utcoffset() == timedelta(0)
+        timed = result["elapsed_seconds"] >= 0 and result["slowest_row_seconds"] >= 0
+        positioned = (cursor is None) is result["complete"] and result["position_created_at"] == (None if cursor is None else cursor[0])
+        return started and timed and positioned
+
+    slowest = confirmed_batches(*dry_batches())
+    slow_page()
+    invalid: list[dict[str, Any]] = [{"after": "x"}, {"after": ["x"]}, {"after": [1, 2]}, {"budget_seconds": 0}, {"budget_seconds": 61}, {"budget_seconds": True}]
+    with patch.object(state, "query_ordered", side_effect=AssertionError("batch arguments are validated before any read")):
+        assert all(refused(arguments) for arguments in invalid), "T4 invalid after or budget_seconds must be refused"
+    assert all(shaped(result) for result in seen), seen
+    print(f"PASS batches slowest_row_seconds={slowest:.3f}; budget checked after every row, capped guard wait, JSON cursor resume, counts equal an unstopped call")
 
 
 def _run_process_lock(state: StateManagementInterface, blobs: FilesystemProvider) -> None:
@@ -338,6 +447,8 @@ def main() -> int:
         _run_reimport_after_reclaim(state, blobs)
         _run_delete_failure_recovery(state, blobs)
         _run_tombstone_recovery(state, blobs)
+        # Last: its 271 metadata rows would stretch every locked walk above past the fake importer's wait.
+        _run_batches(state, blobs)
     return 0
 
 

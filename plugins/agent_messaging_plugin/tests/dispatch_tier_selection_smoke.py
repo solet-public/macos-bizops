@@ -10,9 +10,10 @@ keeps it because the platform capability must serve metered billing.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -23,18 +24,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
 
-from _real_state_fake import RealShapeState  # noqa: E402
-from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
 
-from agent_messaging_plugin import model_capability_verbs as verbs  # noqa: E402
 from agent_messaging_plugin.dispatch_tier_selection import (  # noqa: E402
     CapabilityCell,
+    TierSelection,
     TierSelectionError,
     select_tier,
 )
-from agent_messaging_plugin.model_capability_store import load_seed_table, seed_catalog  # noqa: E402
-from agent_messaging_plugin.model_dispatch_policy import DispatchPolicyError  # noqa: E402
-from agent_messaging_plugin.schema import CELL_ACCEPTANCE_ACCEPTED, TABLE_MODEL_CAPABILITY_CELL  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []
@@ -99,7 +95,6 @@ def _cell(row: tuple[str, str, str, float, float | None], *, measured_at: dateti
 
 
 CATALOG = tuple(_cell(row) for row in _TABLE)
-CLAUDE_PAIRS = frozenset(cell.pair for cell in CATALOG if cell.runtime == "claude_code")
 
 
 def _check(condition: object, label: str) -> None:
@@ -125,8 +120,14 @@ def _named(cell: CapabilityCell) -> str:
     return f"{cell.model}@{cell.effort}"
 
 
+def _selection_for_pair(pair: tuple[str, str], required_score: float) -> TierSelection:
+    catalog = tuple(cell for cell in CATALOG if cell.pair == pair)
+    return select_tier(catalog, required_score=required_score, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+
+
 def test_operator_dominance_examples() -> None:
-    claude_only = select_tier(CATALOG, required_score=38, objective="metered_usd", now=_NOW, max_age=_WINDOW, capability_floor_pairs=CLAUDE_PAIRS)
+    claude_only_catalog = tuple(cell for cell in CATALOG if cell.runtime == "claude_code")
+    claude_only = select_tier(claude_only_catalog, required_score=38, objective="metered_usd", now=_NOW, max_age=_WINDOW)
     _check(_named(claude_only.selected) == "claude-opus-5@low", "score 38, Claude-only: opus-5 low beats sonnet-5 max")
     dominated = {(_named(weak), _named(strong)) for weak, strong in claude_only.dominated}
     _check(("claude-sonnet-5@max", "claude-opus-5@low") in dominated, "sonnet-5 max is reported as dominated by opus-5 low")
@@ -138,13 +139,13 @@ def test_operator_dominance_examples() -> None:
 
 
 def test_ladder_shows_diminishing_returns() -> None:
-    sonnet = select_tier(CATALOG, required_score=24, objective="metered_usd", now=_NOW, max_age=_WINDOW, capability_floor_pairs=frozenset({("claude_code", "claude-sonnet-5")}))
+    sonnet = _selection_for_pair(("claude_code", "claude-sonnet-5"), 24)
     steps = {step.to_effort: step.points_per_cost_unit for step in sonnet.ladder}
     low_to_medium, xhigh_to_max = steps["medium"], steps["max"]
     _check(low_to_medium is not None and round(low_to_medium, 1) == 8.2, "sonnet-5 low->medium buys 8.2 points per dollar")
     _check(xhigh_to_max is not None and round(xhigh_to_max, 1) == 1.8, "sonnet-5 xhigh->max buys 1.8 points per dollar")
 
-    fable = select_tier(CATALOG, required_score=47, objective="metered_usd", now=_NOW, max_age=_WINDOW, capability_floor_pairs=frozenset({("claude_code", "claude-fable-5-1")}))
+    fable = _selection_for_pair(("claude_code", "claude-fable-5-1"), 47)
     top = next(step for step in fable.ladder if step.to_effort == "max")
     _check(top.score_gain == 0 and top.points_per_cost_unit == 0.0, "fable-5.1 xhigh->max buys zero points for real cost")
 
@@ -186,8 +187,52 @@ def test_refusals_are_distinct() -> None:
     _check(_code(lambda: select_tier((), required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_empty", "empty catalog refuses")
     pending = tuple(_cell(row, acceptance="pending_crosscheck") for row in _TABLE)
     _check(_code(lambda: select_tier(pending, required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_unaccepted", "un-cross-checked cells are never served")
-    _check(_code(lambda: select_tier(CATALOG, required_score=99, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "no_cell_clears_threshold", "impossible threshold refuses distinctly")
     _check(_code(lambda: select_tier(CATALOG, required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW, score_margin=-1)) == "parameter_invalid", "negative margin refuses")
+
+
+def test_strongest_enabled_shortfall() -> None:
+    """An unreachable threshold preserves the ask and returns measured capability."""
+    top = _cell(("codex", "model-a", "high", 62, 9.0))
+    tied = _cell(("codex", "model-b", "low", 62, 0.01))
+    cheaper = _cell(("codex", "cheap", "low", 40, 0.001))
+    disabled = replace(top, model="disabled", capability_score=90, enabled=False)
+    catalog = (cheaper, tied, top, disabled)
+    picked = select_tier(catalog, required_score=68, score_margin=2, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    _check(picked.selected == top, "strongest tie resolves lexically, independently of cost and effort")
+    _check(select_tier(tuple(reversed(catalog)), required_score=68, score_margin=2, objective="metered_usd", now=_NOW, max_age=_WINDOW).selected == top, "strongest tie is independent of catalog order")
+    shortfall = picked.shortfall
+    _check(shortfall is not None and (shortfall.required_score, shortfall.effective_required_score, shortfall.capability_score, shortfall.gap) == (68, 70, 62, 8), "Shortfall retains required/effective threshold, measured score and exact positive gap")
+    _check(picked.advisories.get("strongest_score_tie") == 2 and picked.excluded["operator_disabled"] == 1, "tie is disclosed and disabled stronger cell cannot win")
+    _check(picked.excluded["below_threshold"] == 3, "below_threshold counts clearance failures even when strongest is used")
+    ordinary = select_tier(catalog, required_score=35, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    _check(ordinary.selected == cheaper and ordinary.shortfall is None, "cheapest clearing path and absence of shortfall are preserved")
+    _check(_code(lambda: select_tier((disabled,), required_score=70, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_empty", "all disabled is distinctly empty")
+    unpriced = replace(top, cost_per_task_usd=None)
+    _check(_code(lambda: select_tier((unpriced,), required_score=70, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_ineligible", "unpriced cells cannot become strongest fallback")
+
+
+def _aged_tied_state() -> StateManagementInterface:
+    from dispatch_pin_smoke import NOW, rows, state
+
+    fixture = state()
+    for row in rows(fixture):
+        row["measured_at"] = (NOW - timedelta(days=30)).isoformat()
+        if row["model"] == "cheap-model" and row["effort"] == "high":
+            row["capability_score"] = 60
+    return fixture
+
+
+def test_shortfall_verb_notices() -> None:
+    from dispatch_pin_smoke import metered_profile, select
+
+    with metered_profile():
+        answer = select(_aged_tied_state(), required_score=68, score_margin=2, runtime="codex")
+        _check(answer["shortfall"] == {"required_score": 68, "effective_required_score": 70, "capability_score": 60, "gap": 10}, "verb carries structured shortfall within requested runtime")
+        _check(any("SHORTFALL" in notice and "70" in notice and "60" in notice and "10" in notice for notice in answer["warnings"]), "verb loudly names effective threshold, selected score and gap")
+        _check(answer["selection_mode"] == "strongest_available" and any("STRONGEST SCORE TIE" in notice for notice in answer["warnings"]), "verb discloses fallback mode and tie")
+        _check(any(reading["selected"] for reading in answer["stale_readings"]), "stale selected fallback is still reported")
+        cleared = select(required_score=42)
+        _check("shortfall" not in cleared, "new clearing selection clears optional shortfall without changing golden output")
 
 
 def test_unknown_effort_row_is_excluded_not_raised() -> None:
@@ -204,10 +249,8 @@ def test_unknown_effort_row_is_excluded_not_raised() -> None:
         [(step.to_effort, step.points_per_cost_unit) for step in with_ultra.ladder] == [(step.to_effort, step.points_per_cost_unit) for step in base.ladder],
         "the selected model's ladder is unchanged by an ultra row on the same model",
     )
-    _check(
-        _code(lambda: select_tier((*CATALOG, ultra), required_score=60, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "no_cell_clears_threshold",
-        "an ultra row that would clear the bar is never selected: the refusal is the ordinary one",
-    )
+    fallback = select_tier((*CATALOG, ultra), required_score=60, objective="metered_usd", now=_NOW, max_age=_WINDOW)
+    _check(fallback.selected.capability_score == 53 and fallback.excluded["unknown_effort"] == 1, "unknown effort cannot win the strongest fallback")
     _check(
         _code(lambda: select_tier((ultra,), required_score=1, objective="metered_usd", now=_NOW, max_age=_WINDOW)) == "catalog_unknown_effort",
         "a catalog whose every cell is unknown-effort refuses distinctly",
@@ -256,69 +299,9 @@ def test_mixed_age_catalog_uses_cheapest_cell_and_reports_only_stale_ones() -> N
     )
 
 
-def test_register_phase_selection_with_state_schema_provenance() -> None:
-    state = RealShapeState()
-    typed = cast("StateManagementInterface", state)
-    now = datetime(2026, 10, 3, 12, tzinfo=UTC)
-    seed_catalog(typed, seed=load_seed_table())
-    for row in state.rows(AGENT_ROLE_BINDING_NAMESPACE, TABLE_MODEL_CAPABILITY_CELL):
-        row["acceptance"] = CELL_ACCEPTANCE_ACCEPTED
-        row["accepted_at"] = now.isoformat()
-        row["measured_at"] = now.isoformat()
-        row["last_refresh_run_id"] = "phase-selector-fixture"
-    kinds = (
-        "DESIGN",
-        "FIX",
-        "build",
-        "design",
-        "diagnose",
-        "docs",
-        "fix",
-        "implement",
-        "implementation",
-        "infrastructure",
-        "integration",
-        "repair",
-        "review",
-        "smoke-test",
-        "test",
-        "test-close",
-    )
-    for kind in kinds:
-        selected = verbs.select_dispatch_tier(
-            typed,
-            {"required_score": 50, "scope_tags": ["state_schema"], "dispatch_kind": kind, "cost_tolerance": 0},
-            now=now,
-        )
-        _check({"pin", "pin_basis", "effort_ceiling", "exclude_model_prefixes", "exclude_runtimes"} <= selected["selection_receipt"].keys(), "final five receipt keys")
-        _check(selected["selection_receipt"]["effort_ceiling"] is None and selected["selection_receipt"]["exclude_model_prefixes"] == [] and selected["selection_receipt"]["exclude_runtimes"] == [], "selector receipt carries constraint defaults")
-        cell = selected["selected"]
-        _check(
-            (cell["runtime"], cell["model"], cell["effort"], cell["capability_score"]) == ("codex", "gpt-6-astra", "medium", 50),
-            f"register kind {kind!r} clears score 50 at Astra medium",
-        )
-        _check(
-            selected["capability_floors"] == [] and selected["excluded"]["capability_floor_disallowed"] == 0,
-            f"register kind {kind!r} has no state_schema model floor",
-        )
-    for kind in ("unknown-phase", "test ", "TEST"):
-        selected = verbs.select_dispatch_tier(
-            typed,
-            {"required_score": 50, "dispatch_kind": kind},
-            now=now,
-        )
-        _check(selected["selected"]["capability_score"] >= 50, f"open nonblank provenance {kind!r} selects")
-    for kind in ("", " ", "\t", 123):
-        try:
-            verbs.select_dispatch_tier(typed, {"required_score": 50, "dispatch_kind": kind}, now=now)
-        except DispatchPolicyError as error:
-            code = error.code
-        else:
-            code = ""
-        _check(code in {"dispatch_policy_violation", "dispatch_kind_required"}, f"malformed kind {kind!r} refuses")
-
-
 if __name__ == "__main__":
+    test_strongest_enabled_shortfall()
+    test_shortfall_verb_notices()
     test_operator_dominance_examples()
     test_ladder_shows_diminishing_returns()
     test_cheap_model_effort_is_exhausted_before_switching()
@@ -329,6 +312,5 @@ if __name__ == "__main__":
     test_unknown_effort_row_is_excluded_not_raised()
     test_stale_readings_never_block_selection()
     test_mixed_age_catalog_uses_cheapest_cell_and_reports_only_stale_ones()
-    test_register_phase_selection_with_state_schema_provenance()
     print(f"\n{_passed} passed, {len(_failed)} failed")
     raise SystemExit(1 if _failed else 0)

@@ -17,13 +17,11 @@ for path in (ROOT / "ananta/src", ROOT / "plugins/agent_messaging_plugin/src", R
 
 from async_job_fixture_support import JobState  # noqa: E402
 from session_launch_fixture_support import (  # noqa: E402
-    authority_patches,
     blocked_restart_owner,
     dispatch,
     effect_patch,
     finish_fixture,
     owned_restart_request_failure,
-    parameters,
     plugin_fixture,
     restart_busy_handoff,
     restart_request_failure,
@@ -38,38 +36,8 @@ from session_launch_owner_probe_support import (  # noqa: E402
     own_start_token_read_once,
 )
 
-from agent_messaging_plugin.managed_dispatch import DispatchError  # noqa: E402
 from agent_messaging_plugin.session_launch_jobs import run_reserved_restart  # noqa: E402
 from agent_messaging_plugin.session_launch_store import release_launch, reserve_launch  # noqa: E402
-
-
-def refusal_and_stage_results() -> None:
-    state = JobState()
-    plugin = plugin_fixture(state)
-    denied = plugin.spawn_session_action(parameters("spawn_session"), {})
-    assert denied["action_status"] != "completed" and not state.rows.get("job")
-    bad = dispatch("spawn_session", plugin, {**parameters("spawn_session"), "role_class": "invalid"})
-    assert bad["error"]["code"] == "unknown_role_class" and not state.rows.get("job")
-    with authority_patches():
-        missing = dispatch("dispatch_managed_work", plugin, {**parameters("dispatch_managed_work"), "unit_id": ""})
-        assert missing["error"]["code"] == "unit_id_required" and not state.rows.get("job")
-    for stage in ("worktree_failed", "host_start_failed", "first_turn_failed"):
-
-        def fail(*_args: object, stage: str = stage, **_kwargs: object) -> dict[str, Any]:
-            raise DispatchError(stage, f"fixture {stage}", data={"dispatch_id": "mdp-retained", "state": "failed_start", "version": 4})
-
-        with authority_patches(), effect_patch("dispatch_managed_work", plugin, fail):
-            receipt = dispatch("dispatch_managed_work", plugin)
-            plugin._launch_jobs.future.result(timeout=5)
-        manager = plugin._try_acquire_async_job_manager()
-        job_id = receipt["data"]["job_id"]
-        assert manager.get_job(job_id)["data"]["job"]["status"] == "error"
-        final = manager.get_job_payload(job_id, "result")["data"]["payload"]
-        assert final["error"]["code"] == stage and final["data"]["dispatch_id"] == "mdp-retained"
-        assert manager.get_job_payload(job_id, "error")["data"]["payload"] == final["error"]
-        assert state.rows["session_launch_reservation"] == []
-    finish_fixture(plugin)
-    print("PASS missing_context_shape_refusal, exact_worktree_host_first_turn_errors")
 
 
 def worker_admission_failure() -> None:
@@ -84,21 +52,6 @@ def worker_admission_failure() -> None:
     assert manager.get_job_payload(state.rows["job"][0]["id"], "error")["data"]["payload"]["code"] == "launch_admission_failed"
     finish_fixture(plugin)
     print("PASS executor_admission_failure_persists_error_without_host_work")
-
-
-def uncertain_first_turn() -> None:
-    state = JobState()
-    plugin = plugin_fixture(state)
-    final = {"dispatch": {"dispatch_id": "mdp-uncertain", "state": "uptake_uncertain", "first_turn_delivered": False, "first_turn_error": "fixture unobserved"}, "attempt": {"agent_instance_id": "agi-uncertain"}}
-    with authority_patches(), effect_patch("dispatch_managed_work", plugin, lambda *_args, **_kwargs: final):
-        receipt = dispatch("dispatch_managed_work", plugin)
-        plugin._launch_jobs.future.result(timeout=5)
-    manager = plugin._try_acquire_async_job_manager()
-    job_id = receipt["data"]["job_id"]
-    assert manager.get_job(job_id)["data"]["job"]["status"] == "completed"
-    assert manager.get_job_payload(job_id, "result")["data"]["payload"]["data"] == final
-    finish_fixture(plugin)
-    print("PASS completed_operation_preserves_uncertain_first_turn")
 
 
 def request_and_outcome_failure() -> None:
@@ -230,52 +183,6 @@ def restart_busy_handoff_preserves_new_owner() -> None:
     print("PASS stale_launch_busy_outcome_must_not_terminalize_new_restart_owner")
 
 
-def _inject_native_refusal(case: str, register: Any, state: JobState, raw: dict[str, Any]) -> None:
-    from dataclasses import replace
-
-    from _register_unit_double import FIXTURE_UNIT_ID
-
-    from agent_messaging_plugin.register_unit_client import RegisterUnitError
-
-    if case == "missing":
-        register.units.clear()
-    elif case == "retired":
-        register.units[FIXTURE_UNIT_ID] = replace(register.units[FIXTURE_UNIT_ID], state="retired")
-    elif case == "repository":
-        register.units[FIXTURE_UNIT_ID] = replace(register.units[FIXTURE_UNIT_ID], repository_id="rep_other")
-    elif case == "caller":
-        state.rows["role_binding"][0]["agent_instance_id"] = "agi_other"
-    elif case == "revision":
-        raw["expected_revision_id"] = "drv_stale"
-    elif case == "outage":
-        register.show_unit = lambda _unit: (_ for _ in ()).throw(RegisterUnitError("unit_register_unavailable", "fixture outage"))
-
-
-def native_refusals_have_no_launch_rows() -> None:
-
-    cases = {
-        "missing": "unit_not_found",
-        "retired": "unit_not_dispatchable",
-        "repository": "unit_repository_mismatch",
-        "caller": "coordinator_authority_denied",
-        "revision": "unit_revision_stale",
-        "outage": "unit_register_unavailable",
-    }
-    for case, expected in cases.items():
-        state = JobState()
-        plugin = plugin_fixture(state)
-        register = plugin._register_unit_client()
-        raw = parameters("dispatch_managed_work")
-        _inject_native_refusal(case, register, state, raw)
-        before = deepcopy(state.rows)
-        with patch.object(plugin._launch_jobs, "submit", side_effect=AssertionError("invalid Unit reached job creation")):
-            result = dispatch("dispatch_managed_work", plugin, raw)
-        assert result["error"]["code"] == expected, (case, result)
-        assert state.rows == before, (case, "invalid request wrote ledger state")
-        finish_fixture(plugin)
-    print("PASS native_refusals_before_job_dispatch_or_host_creation")
-
-
 def _exited_pid() -> int:
     child = subprocess.Popen([sys.executable, "-c", ""])
     child.wait()
@@ -355,10 +262,7 @@ def release_refuses_reused_owner_pid() -> None:
 
 
 def main() -> None:
-    native_refusals_have_no_launch_rows()
-    refusal_and_stage_results()
     worker_admission_failure()
-    uncertain_first_turn()
     request_and_outcome_failure()
     restart_and_delivery_failure()
     restart_busy_handoff_preserves_new_owner()

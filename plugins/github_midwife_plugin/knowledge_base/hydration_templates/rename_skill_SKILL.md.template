@@ -6,7 +6,7 @@ description: Take ownership of a session role name on the declared fleet transpo
 The user (or the SessionStart re-claim hook) supplied a role name as the
 argument — call it `$ROLE` below. Take ownership of it for this session: the
 platform-side role binding and address-book entry that back
-`peer_send_by_name` routing and scheduled wake-ups, kept in lock-step with
+`peer_send_by_name` routing, kept in lock-step with
 the local Claude Code session label.
 
 This is the seed render of the canonical rename skill; the platform-checkout

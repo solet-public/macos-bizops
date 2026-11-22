@@ -28,6 +28,7 @@ THINKING_REGISTERED_OPERATIONS = frozenset(
         "create_authored_artifact",
         "create_extended_plan",
         "create_movement_design",
+        "create_playbook",
         "create_resolved_intake_state",
         "create_work_manifest",
         "generate_section_stem_wbs",

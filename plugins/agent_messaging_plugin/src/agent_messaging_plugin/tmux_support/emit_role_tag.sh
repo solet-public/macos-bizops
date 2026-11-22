@@ -14,8 +14,8 @@
 # to reach the outer terminal at all (tmux_adapter.py sets this at spawn).
 #
 # Usage: emit_role_tag.sh <label> [--raw]
-#   <label>  the fleet inspectability label (lane_id, or agent_instance_id
-#            when no lane_id — NOT an authoritative role claim; L0 owns
+#   <label>  the fleet inspectability label (the session label, or agent_instance_id
+#            when no label — NOT an authoritative role claim; L0 owns
 #            identity, this tag is presentation-only and does not replay to
 #            late-attaching clients, per FINDINGS.md).
 #   --raw    force the unwrapped form even inside tmux (negative control —

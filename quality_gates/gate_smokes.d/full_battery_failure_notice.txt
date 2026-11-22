@@ -1,0 +1,2 @@
+# A failed full-battery campaign sends one durable notice to the solet's main seat, replays it while due, and keeps its failed verdict (prb_113eaabe06a34b5a8284baab50db982d, Change chg_446f4166-cf2c-4e26-8459-a1672b051a24).
+plugins/platform_dev_surface_plugin/tests/full_battery_failure_notice_smoke.py

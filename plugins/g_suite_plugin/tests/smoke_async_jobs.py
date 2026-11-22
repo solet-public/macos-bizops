@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from g_suite_plugin import drive_actions  # noqa: E402
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
 from googleapiclient.errors import HttpError  # noqa: E402
-from gsuite_fakes import FakeVault, connect_accounts  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import FakeVault, connect_accounts  # noqa: E402
 
 _passed = 0
 _failed: list[str] = []

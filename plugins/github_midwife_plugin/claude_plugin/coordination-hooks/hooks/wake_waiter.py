@@ -35,14 +35,15 @@ must never trap the session in a failing Stop hook.
 BOUNDED WAIT (2026-08-09). The wait is capped at `_DEFAULT_MAX_WAIT_S` and
 NOT left at the CLI's own ~23.9h default. Rationale, measured: a Stop hook
 that blocks holds the harness session-status file at "shell", and "idle" is
-therefore never stamped. The seat_idle_watcher's only idle gate is
-status == "idle", so an unbounded waiter structurally kills BOTH of that
-watcher's legs -- the keep-warm poke and the context rotation. Live evidence
-from the 2026-08-08 overnight stall: 578 watcher ticks, 531 "shell" / 34
-"busy" / ZERO "idle" readings across a 9h37m life. Capping the wait inside
-the prompt-cache window lets the hook release the turn boundary, so the
-harness can stamp "idle" and the watcher can act on it. A delivery still
-wakes the session immediately -- the cap only bounds the QUIET case.
+therefore never stamped. The seat idle watcher that read that file (since
+removed) gated only on status == "idle", so an unbounded waiter structurally
+killed BOTH of that watcher's legs -- the keep-warm poke and the context
+rotation. Live evidence from the 2026-08-08 overnight stall: 578 watcher
+ticks, 531 "shell" / 34 "busy" / ZERO "idle" readings across a 9h37m life.
+Capping the wait inside the prompt-cache window lets the hook release the
+turn boundary, so the harness can stamp "idle" for whatever reads the status
+file. A delivery still wakes the session immediately -- the cap only bounds
+the QUIET case.
 
 The cap is a coordination constant, not a protection: it must stay under the
 prompt-cache TTL (~1h) so a session cannot go cache-cold while the waiter is
@@ -64,7 +65,6 @@ this hook with no visible signal (see this checkout's deaf-wake findings,
 proved this exact python3 + `${CLAUDE_PLUGIN_ROOT}` invocation shape works
 in this manifest.
 """
-
 
 from __future__ import annotations
 
@@ -101,11 +101,7 @@ _WAKE_EXIT_SIGNAL = 2
 # docstring: this is the constant that keeps "idle" reachable at all.
 _DEFAULT_MAX_WAIT_S = 2400
 _MAX_WAIT_ENV = "AGENT_WAKE_MAX_WAIT_S"
-_NUDGE = (
-    "While this session was idle, its coordination watcher received one or "
-    "more new peer-message deliveries. Durable copies are preserved in this "
-    "session's peer-message inbox and have not yet been read here."
-)
+_NUDGE = "While this session was idle, its coordination watcher received one or more new peer-message deliveries. Durable copies are preserved in this session's peer-message inbox and have not yet been read here."
 
 
 def resolve_max_wait_s() -> int:
@@ -123,15 +119,13 @@ def resolve_max_wait_s() -> int:
         value = int(raw)
     except ValueError:
         print(
-            f"[coordination-hooks wake] {_MAX_WAIT_ENV}={raw!r} is not an integer; "
-            f"using {_DEFAULT_MAX_WAIT_S}s",
+            f"[coordination-hooks wake] {_MAX_WAIT_ENV}={raw!r} is not an integer; using {_DEFAULT_MAX_WAIT_S}s",
             file=sys.stderr,
         )
         return _DEFAULT_MAX_WAIT_S
     if value <= 0:
         print(
-            f"[coordination-hooks wake] {_MAX_WAIT_ENV}={value} is not positive; "
-            f"using {_DEFAULT_MAX_WAIT_S}s",
+            f"[coordination-hooks wake] {_MAX_WAIT_ENV}={value} is not positive; using {_DEFAULT_MAX_WAIT_S}s",
             file=sys.stderr,
         )
         return _DEFAULT_MAX_WAIT_S
@@ -161,7 +155,9 @@ def main() -> int:
     try:
         result = subprocess.run(
             [cli, "wake", "--max-wait", str(resolve_max_wait_s())],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             check=False,
         )
     except OSError as exc:

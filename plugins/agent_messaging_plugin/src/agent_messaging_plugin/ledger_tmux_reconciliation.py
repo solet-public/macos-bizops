@@ -9,14 +9,14 @@ reports/logs remain unchanged. There is no persistent report lifecycle.
 from __future__ import annotations
 
 import subprocess
-import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, Any
 
 from .session_lifecycle_store import read_managed_sessions_page
+from .tmux_target import pane_target
 
 if TYPE_CHECKING:
     from ananta.interfaces.state_management_interface import StateManagementInterface
@@ -26,8 +26,7 @@ MAX_NATIVE_ROWS = 2000
 MAX_OUTPUT_BYTES = 262144
 PROBE_TIMEOUT_SECONDS = 5
 _FORMAT = "\t".join(f"#{{{name}}}" for name in ("session_id", "session_name", "pane_id", "pane_pid", "pane_dead", "pane_current_command"))
-METADATA_ARGV = ("tmux", "list-panes", "-a", "-F", _FORMAT)
-MetadataRunner = Callable[[list[str], BinaryIO], int]
+MetadataRunner = Callable[[list[str]], tuple[int, bytes, str]]
 
 
 @dataclass(frozen=True)
@@ -58,15 +57,15 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _run_metadata(argv: list[str], output: BinaryIO) -> int:
-    """Spool metadata, keeping process output out of an unbounded RAM buffer."""
-    return subprocess.run(  # noqa: S603 -- fixed metadata-only argv
+def _run_metadata(argv: list[str]) -> tuple[int, bytes, str]:
+    """Capture the outcome of one metadata-only reference probe."""
+    result = subprocess.run(  # noqa: S603 -- metadata-only argv with an exact target
         argv,
-        stdout=output,
-        stderr=subprocess.DEVNULL,
+        capture_output=True,
         timeout=PROBE_TIMEOUT_SECONDS,
         check=False,
-    ).returncode
+    )
+    return result.returncode, result.stdout, result.stderr.decode("utf-8", errors="replace")
 
 
 def _unknown(inventory: NativeInventory, detail: str) -> None:
@@ -79,9 +78,10 @@ def _parse_metadata(inventory: NativeInventory, raw: bytes) -> None:
     truncated = len(raw) > MAX_OUTPUT_BYTES
     text = _decode_metadata(inventory, raw[:MAX_OUTPUT_BYTES])
     lines = text.splitlines()
-    if truncated or len(lines) > MAX_NATIVE_ROWS:
+    remaining = MAX_NATIVE_ROWS - len(inventory.panes)
+    if truncated or len(lines) > remaining:
         _unknown(inventory, "metadata output/row limit reached; partial_coverage")
-    for line in lines[:MAX_NATIVE_ROWS]:
+    for line in lines[:remaining]:
         cells = line.split("\t")
         if len(cells) != 6:
             inventory.rejected_rows.append(line)
@@ -108,18 +108,43 @@ def _valid_pane(pane: Pane) -> bool:
     return pane.session_id.startswith("$") and pane.session_id[1:].isdigit() and bool(pane.session_name) and pane.pane_id.startswith("%") and pane.pane_id[1:].isdigit() and pane.pane_pid.isdigit() and pane.pane_dead in {"0", "1"}
 
 
-def read_native_inventory(runner: MetadataRunner | None = None) -> NativeInventory:
-    """One census; failure is unknown, distinct from a complete empty result."""
-    inventory = NativeInventory(started_at=_now())
+def _probe_reference(inventory: NativeInventory, ref: str, label: str, runner: MetadataRunner) -> None:
+    """Keep the recorded name intact, constructing a target only for tmux's argv."""
     try:
-        with tempfile.TemporaryFile() as output:
-            inventory.returncode = (runner or _run_metadata)(list(METADATA_ARGV), output)
-            output.seek(0)
-            _parse_metadata(inventory, output.read(MAX_OUTPUT_BYTES + 1))
-        if inventory.returncode != 0:
-            _unknown(inventory, f"tmux metadata exited {inventory.returncode}")
+        target = pane_target(ref)
+    except ValueError:
+        _unknown(inventory, f"{label}: reference is not an exact session name")
+        return
+    try:
+        returncode, raw, stderr = runner(["tmux", "list-panes", "-t", target, "-F", _FORMAT])
     except (OSError, subprocess.TimeoutExpired) as exc:
-        _unknown(inventory, f"{type(exc).__name__}: metadata census unavailable")
+        if inventory.returncode == 0:
+            inventory.returncode = None
+        _unknown(inventory, f"{label}: {type(exc).__name__}: metadata probe unavailable")
+        return
+    _consume_probe(inventory, label, returncode, raw, stderr)
+
+
+def _consume_probe(inventory: NativeInventory, label: str, returncode: int, raw: bytes, stderr: str) -> None:
+    """Known absence preserves complete coverage; other failures retain uncertainty."""
+    if returncode == 1 and stderr.startswith(("can't find session", "error connecting to", "no server running")):
+        return
+    if returncode != 0:
+        if inventory.returncode in {0, None}:
+            inventory.returncode = returncode
+        _unknown(inventory, f"{label}: tmux metadata exited {returncode}")
+        return
+    previous_detail = inventory.detail
+    _parse_metadata(inventory, raw)
+    if inventory.detail != previous_detail:
+        inventory.detail = f"{label}: {inventory.detail}"
+
+
+def read_native_inventory(refs: list[str], runner: MetadataRunner | None = None) -> NativeInventory:
+    """Probe only recorded references; an empty reference list needs no host read."""
+    inventory = NativeInventory(started_at=_now(), returncode=0)
+    for index, ref in enumerate(refs, start=1):
+        _probe_reference(inventory, ref, f"reference {index}/{len(refs)} {ref!r}", runner or _run_metadata)
     inventory.ended_at = _now()
     return inventory
 
@@ -214,7 +239,6 @@ def classify_observations(
     observations = []
     for row, candidates in zip(rows, joins, strict=True):
         observations.append(_joined_observation(row, candidates, sessions, counts, refs, inventory, ledger_complete))
-    observations.extend(_unbound_observations(sessions, counts, ledger_complete))
     return observations
 
 
@@ -242,25 +266,6 @@ def _joined_observation(
     }
 
 
-def _unbound_observations(
-    sessions: dict[str, list[Pane]],
-    counts: Counter[str],
-    ledger_complete: bool,
-) -> list[dict[str, Any]]:
-    observations = []
-    for sid, panes in sessions.items():
-        if counts[sid] == 0:
-            observations.append(
-                {
-                    "reason": "unbound_tmux" if ledger_complete else "partial_coverage",
-                    "scope": "scope_unknown",
-                    "session_ids": [sid],
-                    "panes": [asdict(pane) for pane in panes],
-                }
-            )
-    return observations
-
-
 def collect_ledger_tmux_report(
     state: StateManagementInterface | None,
     *,
@@ -277,7 +282,8 @@ def collect_ledger_tmux_report(
             page, source = _read_host(state, host)
         rows.extend(page)
         coverage.append(source)
-    inventory = read_native_inventory(runner)
+    refs = list(dict.fromkeys(str(row["host_ref"]) for row in rows if row.get("host_ref")))
+    inventory = read_native_inventory(refs, runner)
     complete = all(source["complete"] for source in coverage)
     observations = classify_observations(rows, inventory, ledger_complete=complete)
     advisories = _advisories(coverage, inventory)

@@ -87,3 +87,10 @@ quality_gates/tests/macos_bizops_identity_gate_smoke.py  # owner: rul_11fcd2ec-d
 # Pre-existing hidden-hook MI debt, measured at base 757245913 with
 # radon_mi_check.py over every tracked .claude/hooks/*.py file.
 .claude/hooks/git_controller_authorization.py  # owner: fleet-coordinator-seat reason: iss_94156bc0-d197-4114-8706-00d243dcef6a pre-existing hidden-hook static debt expires: 2026-12-03
+
+# Added 2026-11-12 under unit unt_9deb97cf-e61e-4f7c-87ce-3344ade72c8e
+# (plan r74-a1-a-memory-ensure-schedules): the owned scheduler double and the
+# ensure_schedules admission check take this smoke from B 9.97 to C 6.85 on the
+# gate's AST-rewritten measure. Remediation is a follow-up that splits the
+# smoke by concern, filed by the main seat.
+plugins/actr_memory_plugin/tests/g1_actr_registered_admission_smoke.py  # owner: main-seat reason: the owned scheduler double and the ensure_schedules case take the file from B 9.97 to C 6.85 on the gate AST-rewritten measure, tracked debt, split the smoke by concern expires: 2026-12-12

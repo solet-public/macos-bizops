@@ -27,7 +27,7 @@ from g_suite_plugin.oauth.service_factory import GoogleServiceFactory  # noqa: E
 from g_suite_plugin.plugin import GSuitePlugin  # noqa: E402
 from g_suite_plugin.workspace_actions import execute_method, request_arguments  # noqa: E402
 from g_suite_plugin.workspace_registry import WORKSPACE_METHODS, discovery_document, parameter_schemas, process_parameters  # noqa: E402
-from gsuite_fakes import connect_accounts  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import connect_accounts  # noqa: E402
 
 
 class RecordingHttp:

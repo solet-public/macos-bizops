@@ -4,7 +4,7 @@
 Before this fix a KB with no install record took the full-install path at
 every start. That path ignores the per-file digest tags already stored, so a
 restart threw away everything the interrupted install had embedded. The
-workbench KB (2,561 files) and the project_solet KB never finished between
+workbench KB (2,561 files) and the external register KB never finished between
 deploys, re-indexed from file one at every start and kept a core busy.
 
 This smoke drives the real auto-install path over a scratch KB with in-memory

@@ -8,7 +8,7 @@ import sys
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import jsonschema
 
@@ -324,6 +324,7 @@ def _check_r44_postgres_dependency_upgrade_proceeds() -> None:
         patch("bootstrap_adapter.routes.postgres_observation", return_value=fresh),
         patch("bootstrap_adapter.postgres_install.postgres_observation", return_value=refreshed),
         patch("bootstrap_adapter.postgres_install.wait_for_postgres_ready", return_value=True),
+        patch("bootstrap_adapter.postgres_install.install_pgvector_from_source") as build,
     ):
         applied = _postgres_install_route(_request("install_postgresql"), runtime)
     _check(applied["checkpoint_status"] == "applied", "r44 dependency upgrades no longer stop the PostgreSQL install")
@@ -333,11 +334,10 @@ def _check_r44_postgres_dependency_upgrade_proceeds() -> None:
             ["/fixture/brew", "install", "--dry-run", "postgresql@17"],
             ["/fixture/brew", "install", "postgresql@17"],
             ["/fixture/brew", "services", "start", "postgresql@17"],
-            ["/fixture/brew", "install", "--dry-run", "pgvector"],
-            ["/fixture/brew", "install", "pgvector"],
         ],
-        "the install is the plain formula install: no brew upgrade, no --ignore-dependencies",
+        "the install is the plain formula install: no brew upgrade, no --ignore-dependencies, and no brew install pgvector",
     )
+    _check(build.call_count == 1, "the pgvector action builds the pinned source (covered by bootstrap_stdlib_only_smoke)")
     recorded = [item for item in applied["evidence"] if item["id"] == "homebrew.upgraded_dependencies"]
     _check(
         len(recorded) == 1 and recorded[0]["observed"] == ["readline", "xz"],
@@ -624,6 +624,7 @@ def _check_fresh_postgres_plans_pgvector_before_apply() -> None:
         ) as observe,
         patch("bootstrap_adapter.postgres_install.postgres_observation", return_value=refreshed) as refresh_observe,
         patch("bootstrap_adapter.postgres_install.wait_for_postgres_ready", return_value=True),
+        patch("bootstrap_adapter.postgres_install.install_pgvector_from_source") as build,
     ):
         preview = _postgres_install_route(preview_request, runtime)
         applied = _postgres_install_route(_request("install_postgresql"), runtime)
@@ -651,10 +652,12 @@ def _check_fresh_postgres_plans_pgvector_before_apply() -> None:
             ["/fixture/brew", "install", "--dry-run", "postgresql@17"],
             ["/fixture/brew", "install", "postgresql@17"],
             ["/fixture/brew", "services", "start", "postgresql@17"],
-            ["/fixture/brew", "install", "--dry-run", "pgvector"],
-            ["/fixture/brew", "install", "pgvector"],
         ],
-        "PostgreSQL apply executes the pgvector package action disclosed in its approved plan",
+        "PostgreSQL apply starts the service, and brew installs no pgvector",
+    )
+    _check(
+        build.call_args_list == [call(runtime, "/fixture/brew")],
+        "PostgreSQL apply builds the pgvector action disclosed in its approved plan, once, with this runtime and brew",
     )
 
 

@@ -1,8 +1,10 @@
-"""T1 S3 (budget-line rollup, ruling of record + seat's S3 design ruling
-2026-08-05) -- ``budget_report`` aggregates token spend per ``budget_line``
-(optionally scoped to one ``lane_id``/``budget_line``) by joining THIS
-plugin's own ``managed_session``/``session_claude_mapping`` tables against
-``session_ledger_service``'s ``session``/``event`` tables.
+"""T1 S3 (token-spend rollup, ruling of record + seat's S3 design ruling
+2026-08-05) -- ``budget_report`` aggregates token spend per ``label`` (the
+opaque text a session stores at spawn; optionally scoped to one ``label``) by
+joining THIS plugin's own ``managed_session``/``session_claude_mapping``
+tables against ``session_ledger_service``'s ``session``/``event`` tables. A
+row with an empty or missing label (every row written before the label column
+existed) is one entry under the label ``''``; it is never backfilled.
 
 FIRST cross-plugin state read of its kind in this codebase (no existing
 plugin reads session_ledger's tables directly) -- sanctioned by the seat for
@@ -144,7 +146,7 @@ _HOOK_LANDING_AT = _parse_iso("2026-08-05T16:36:06+00:00")
 
 @dataclass
 class _Bucket:
-    """One (budget_line) or (budget_line, model) aggregate. Seat's S3 rails:
+    """One (label) or (label, model) aggregate. Seat's S3 rails:
     ``sessions_uncovered`` (rail 3, the no-silent-caps disclosure) and
     ``as_of`` (rail 2, the staleness marker) are first-class, not
     afterthoughts. D4 close-out (2026-08-06): ``sessions_uncovered`` now
@@ -181,7 +183,8 @@ class _Bucket:
 
 
 def _usage_events_for_ledger_session(
-    state: StateManagementInterface, ledger_session_id: str,
+    state: StateManagementInterface,
+    ledger_session_id: str,
 ) -> list[dict[str, Any]]:
     """Every ``session_ledger__event`` row for ``ledger_session_id`` that
     carries a populated ``usage_json`` (server-side filtered via
@@ -216,7 +219,8 @@ def _row_selection_key(row: dict[str, Any]) -> tuple[int, float, str]:
 
 
 def _resolve_usage_events_for_claude_session(
-    state: StateManagementInterface, claude_session_id: str,
+    state: StateManagementInterface,
+    claude_session_id: str,
 ) -> tuple[list[dict[str, Any]], bool, bool]:
     """``claude_session_id`` (from ``session_claude_mapping``) -> the usage-
     bearing events of the ONE ``session_ledger__session`` row that should be
@@ -302,7 +306,9 @@ class _RowClassification:
 
 
 def _accumulate_usage_events(
-    events: list[dict[str, Any]], usage: dict[str, float], as_of: datetime | None,
+    events: list[dict[str, Any]],
+    usage: dict[str, float],
+    as_of: datetime | None,
 ) -> datetime | None:
     """Sums every event's ``usage_json`` into ``usage`` (mutated in place --
     the caller's running total across possibly-many claude_session_ids) and
@@ -321,7 +327,8 @@ def _accumulate_usage_events(
 
 
 def _collect_row_usage(
-    state: StateManagementInterface, agent_instance_id: str,
+    state: StateManagementInterface,
+    agent_instance_id: str,
 ) -> _RowClassification:
     """Every usage figure attributable to one ``managed_session`` row, summed
     across EVERY distinct ``claude_session_id`` it has ever been observed
@@ -333,24 +340,29 @@ def _collect_row_usage(
     as_of: datetime | None = None
     multi_row_resolved = False
     mappings = list_session_claude_mappings(state, agent_instance_id)
-    claude_session_ids = {
-        str(m["claude_session_id"]) for m in mappings if m.get("claude_session_id")
-    }
+    claude_session_ids = {str(m["claude_session_id"]) for m in mappings if m.get("claude_session_id")}
     if not claude_session_ids:
         return _RowClassification(
-            usage={}, as_of=None, multi_row_resolved=False, status=_STATUS_UNCOVERED,
+            usage={},
+            as_of=None,
+            multi_row_resolved=False,
+            status=_STATUS_UNCOVERED,
         )
     all_resolved = True
     for claude_session_id in claude_session_ids:
         events, was_multi_row, resolved_any = _resolve_usage_events_for_claude_session(
-            state, claude_session_id,
+            state,
+            claude_session_id,
         )
         multi_row_resolved = multi_row_resolved or was_multi_row
         all_resolved = all_resolved and resolved_any
         as_of = _accumulate_usage_events(events, usage, as_of)
     status = _status_for(usage=usage, all_resolved=all_resolved)
     return _RowClassification(
-        usage=usage, as_of=as_of, multi_row_resolved=multi_row_resolved, status=status,
+        usage=usage,
+        as_of=as_of,
+        multi_row_resolved=multi_row_resolved,
+        status=status,
     )
 
 
@@ -377,11 +389,7 @@ def _exclusion_class_for_row(row: dict[str, Any]) -> str | None:
     if str(row.get("host") or "") == SESSION_HOST_OPERATOR:
         return _EXCLUDED_OPERATOR_HOSTED
     created_at = _parse_iso(row.get("created_at"))
-    if (
-        created_at is not None
-        and _HOOK_LANDING_AT is not None
-        and created_at < _HOOK_LANDING_AT
-    ):
+    if created_at is not None and _HOOK_LANDING_AT is not None and created_at < _HOOK_LANDING_AT:
         return _EXCLUDED_PRE_LANDING
     return None
 
@@ -414,8 +422,7 @@ def _apply_row(
     model_buckets: dict[tuple[str, str], _Bucket],
 ) -> None:
     """One ``managed_session`` row's worth of :func:`build_budget_report` --
-    split out to keep the outer loop under the radon cc threshold (mirrors
-    ``session_sweep.py``'s ``_mark_one_overdue`` split).
+    split out to keep the outer loop under the radon cc threshold.
 
     D4 close-out (2026-08-06): an excluded row (see
     :func:`_exclusion_class_for_row`) is declared into its own
@@ -426,10 +433,10 @@ def _apply_row(
     agent_instance_id = str(row.get("agent_instance_id") or "")
     if not agent_instance_id:
         return
-    row_budget_line = str(row.get("budget_line") or "")
+    row_label = str(row.get("label") or "")
     row_model = str(row.get("model") or "")
-    top = top_buckets.setdefault(row_budget_line, _Bucket())
-    sub = model_buckets.setdefault((row_budget_line, row_model), _Bucket())
+    top = top_buckets.setdefault(row_label, _Bucket())
+    sub = model_buckets.setdefault((row_label, row_model), _Bucket())
 
     exclusion = _exclusion_class_for_row(row)
     if exclusion == _EXCLUDED_OPERATOR_HOSTED:
@@ -446,26 +453,24 @@ def _apply_row(
 
 
 def build_budget_report(
-    state: StateManagementInterface, *, lane_id: str = "", budget_line: str = "",
+    state: StateManagementInterface,
+    *,
+    label: str = "",
 ) -> dict[str, Any]:
-    """§T1 S3 ``budget_report`` -- one entry per distinct ``budget_line``
-    among ``managed_session`` rows matching the optional ``lane_id``/
-    ``budget_line`` filters. Read-only; issues no writes."""
+    """§T1 S3 ``budget_report`` -- one entry per distinct ``label`` among
+    ``managed_session`` rows matching the optional ``label`` filter (matched
+    exactly as stored; empty means every row). Rows with an empty or missing
+    label are one entry under ``''``. Read-only; issues no writes."""
     filters: dict[str, Any] = {}
-    if lane_id:
-        filters["lane_id"] = lane_id
-    if budget_line:
-        filters["budget_line"] = budget_line
+    if label:
+        filters["label"] = label
     managed_rows = (
         list_managed_sessions(state, filters)
         if filters
         else list(
             iter_managed_sessions_unbounded(
                 state,
-                reason=(
-                    "an unscoped budget_report intentionally aggregates every managed session "
-                    "into budget-line totals"
-                ),
+                reason=("an unscoped budget_report intentionally aggregates every managed session into per-label totals"),
             )
         )
     )
@@ -475,17 +480,14 @@ def build_budget_report(
     for row in managed_rows:
         _apply_row(state, row, top_buckets=top_buckets, model_buckets=model_buckets)
 
-    budget_lines_out: list[dict[str, Any]] = []
-    for bl, top in sorted(top_buckets.items()):
+    labels_out: list[dict[str, Any]] = []
+    for row_label, top in sorted(top_buckets.items()):
         entry = top.to_dict()
-        entry["budget_line"] = bl
-        entry["by_model"] = {
-            model: sub.to_dict()
-            for (owning_bl, model), sub in model_buckets.items() if owning_bl == bl
-        }
-        budget_lines_out.append(entry)
+        entry["label"] = row_label
+        entry["by_model"] = {model: sub.to_dict() for (owning_label, model), sub in model_buckets.items() if owning_label == row_label}
+        labels_out.append(entry)
 
-    return {"budget_lines": budget_lines_out}
+    return {"labels": labels_out}
 
 
 __all__ = ["build_budget_report"]

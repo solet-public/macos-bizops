@@ -1,0 +1,19 @@
+{
+  "process_key": "plugin::agent_messaging_plugin::select_model_cell_for_kind",
+  "display_name": "Select a model cell for a kind of work",
+  "description": "Apply active global rules and rules for the exact supplied kind at the time of this request. Later matching rules decide enablement and preference independently. Omit kind to use global rules. Pass the measured required_score and optional runtime, pin with pin_basis, effort_ceiling, exclude_model_prefixes or exclude_runtimes. The capability selector ranks the effective cells and returns the original score, its selection evidence and the grant. Generic session start performs its own global enablement check.",
+  "embedding_description": "Which model may do planning or author work under the user's current rules? Match a work-kind word against active permissions, account for rule expiry, choose a model at the requested capability score, and explain a refusal in the policy owner's words.",
+  "processor_policy_category": "edge",
+  "result_processor_customizations": {
+    "action_label": "Select a cell under work-kind policy",
+    "result_type": "select_model_cell_for_kind_result",
+    "result_description": "selected names the runtime, model and effort. grant carries the request kind, deciding enablement rule_id and words. Default enablement has null rule_id and words. The capability answer includes required_score, selection_mode and any shortfall, preference, stale readings or warnings.",
+    "presentation_guidance": "Show which cell the kind permits and quote its deciding rule when present. Report capability shortfall and stale readings with the selection.",
+    "output_action_guidance": "Use the selected tuple for the next step. A grant describes selection. Generic spawn separately enforces global enablement and can refuse the granted tuple with model_cell_disabled."
+  },
+  "error_processor_customizations": {
+    "action_context": "Reads the catalog and ordered model-cell policy. Legacy rule words can come from policy history. A stale selection may request a catalog refresh.",
+    "error_interpretation": "no_rule_serves identifies the enablement rule that removed the last otherwise selectable cell, with kind, rule_id and words in the failure data. Ordinary catalog, constraint and pin failures retain the selector's error code. parameter_invalid identifies malformed inputs. policy_invalid reports malformed stored rules.",
+    "recovery_guidance": "For no_rule_serves, read_model_cell_policy shows the rule and its current terms. Review its kind, selector and end time with the policy owner. For a pin or catalog error, check the requested tuple, acceptance, pricing and narrowing. Preserve the caller's measured score."
+  }
+}

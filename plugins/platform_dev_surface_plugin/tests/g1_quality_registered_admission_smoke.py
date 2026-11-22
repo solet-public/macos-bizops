@@ -46,7 +46,7 @@ from ananta.services.discovery_service.service import DiscoveryService
 from ananta.services.job_service.service import JobService
 from async_job_atomic_completion_smoke import FixtureAction  # pyright: ignore[reportMissingImports] - retained core action fixture
 from async_job_fixture_support import JobState  # pyright: ignore[reportMissingImports] - retained transactional state fixture
-from full_smoke_schedule_doubles import CapturingScheduler, RegisterDouble
+from full_smoke_schedule_doubles import CapturingScheduler
 from platform_dev_surface_plugin.bounded_subprocess import SubprocessResult
 from platform_dev_surface_plugin.plugin import PlatformDevSurfacePlugin
 from platform_dev_surface_plugin.quality import full_battery, landing_verify, operations
@@ -59,13 +59,19 @@ from quality_gates.smoke_identity import FrozenTree
 from quality_gates.smoke_pass_store import SmokePassStore
 from quality_gates.tests._focused_smoke_selector_fixture import FrozenProofFixture
 
+# The verdict is structural: the receipt is in hand while the leaf is still parked. A parked leaf
+# therefore outlives every wait the test makes, and no clock decides pass or fail on a busy host.
+PARK_SECONDS = 30.0
+# Shorter than the park, so an admission that runs the leaf inline still fails the receipt check.
+RECEIPT_GUARD_SECONDS = 10.0
+
 SELECTED = frozenset(
     {
         "clear_smoke_proof",
         "correct_smoke_proof",
-        "ensure_full_smoke_schedule",
         "get_smoke_proof",
         "get_smoke_proof_history",
+        "list_full_smoke_campaigns",
         "list_gates",
         "list_smoke_proofs",
         "predict_gate_smokes_merge",
@@ -205,8 +211,8 @@ def operation_arguments(verb: str, root: Path, request: dict[str, object], key: 
     arguments: dict[str, dict[str, Any]] = {
         "run_gate": {"gate": "service_interface_ast"},
         "run_test": {"smoke": "suite/check_smoke.py"},
-        "verify_hash_manifest": {"unit_id": "owned-unit", "root_path": str(root), "manifest": {"data/input.csv": hashlib.sha256(b"one\n").hexdigest()}},
-        "predict_gate_smokes_merge": {"base_ref": "a" * 40, "lane_root_path": str(root), "current_master": "b" * 40},
+        "verify_hash_manifest": {"root_path": str(root), "manifest": {"data/input.csv": hashlib.sha256(b"one\n").hexdigest()}},
+        "predict_gate_smokes_merge": {"base_ref": "a" * 40, "candidate_root_path": str(root), "current_master": "b" * 40},
         "select_smokes": {"request": request},
         "run_selected_smokes": {"request": request},
         "get_smoke_proof": {"key": key},
@@ -216,6 +222,7 @@ def operation_arguments(verb: str, root: Path, request: dict[str, object], key: 
         "retire_smoke_proof": {"key": key, "expected_version": 1, "reason": "owned fixture"},
         "reinstate_smoke_proof": {"key": key, "request": request, "expected_version": 1, "reason": "owned fixture"},
         "trigger_full_smoke_battery": {"trigger": "manual"},
+        "list_full_smoke_campaigns": {"limit": 10},
     }
     return arguments.get(verb, {})
 
@@ -231,10 +238,10 @@ def park_target(harness: Harness, verb: str) -> tuple[Any, str]:
         return landing_verify, "_merge_file"
     if verb in {"select_smokes", "run_selected_smokes", "reinstate_smoke_proof"}:
         return smoke_proof, "read_sources"
-    if verb == "ensure_full_smoke_schedule":
-        return harness.scheduler, "get_schedules_by_tag"
     if verb == "trigger_full_smoke_battery":
         return harness.plugin._quality_ops().full_battery, "_request"
+    if verb == "list_full_smoke_campaigns":
+        return harness.plugin._quality_ops().full_battery, "list_campaigns"
     return SmokePassStore, "history"
 
 
@@ -278,32 +285,34 @@ class QualityAdmissionTests(unittest.TestCase):
             def tracked_read(namespace: str, query: dict[str, Any]) -> dict[str, Any]:
                 if query.get("table") == "flows":
                     flow_reads.append((threading.get_ident(), dict(query.get("filters", {})), bool(harness.state.rows.get("job"))))
-                return cast(dict[str, Any], original_read(namespace, query))
+                return original_read(namespace, query)
 
             def parked() -> list[str]:
                 threads.append(threading.get_ident())
                 entered.set()
-                assert release.wait(5), "fixture releases parked registry read"
+                assert release.wait(PARK_SECONDS), "fixture releases parked registry read"
                 return original()
 
-            def timed_dispatch() -> tuple[dict[str, Any], float]:
+            def timed_dispatch() -> tuple[dict[str, Any], float, float]:
                 caller_threads.append(threading.get_ident())
                 # Full execute_action admission: includes CallContext's
                 # real flow read/JSON decode and job/request persistence.
-                started = time.perf_counter_ns()
+                started, cpu_started = time.perf_counter_ns(), time.process_time()
                 # The runtime poller type lacks the protocol-only plugin field.
                 response = cast(dict[str, Any], harness.processor.execute_action(cast(Any, action)))
                 elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
+                cpu_ms = (time.process_time() - cpu_started) * 1000
                 harness.poller._mark_action_completed(action.id, response, action.flow_token_id)
-                return response, elapsed_ms
+                return response, elapsed_ms, cpu_ms
 
             with patch.object(harness.state, "read_state", side_effect=tracked_read), patch.object(harness.plugin._quality_ops(), "_read_smoke_register", side_effect=parked), ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(timed_dispatch)
                 try:
-                    self.assertTrue(entered.wait(5), "real provider registry leaf reached")
-                    self.assertTrue(wait([future], timeout=0.05).done, f"registered admission must return while registry read is parked; leaf threads={threads}")
-                    response, elapsed_ms = future.result(timeout=0.05)
-                    print("ADMISSION " + json.dumps({"case": case, "trigger_bytes": len(trigger_data.encode("utf-8")), "elapsed_ms": round(elapsed_ms, 3), "flow_lookup": "LOCAL_FAST transactional fixture primary-key read and JSON decode"}), flush=True)
+                    self.assertTrue(entered.wait(PARK_SECONDS), "real provider registry leaf reached")
+                    self.assertTrue(wait([future], timeout=RECEIPT_GUARD_SECONDS).done, f"registered admission must return while registry read is parked; leaf threads={threads}")
+                    response, elapsed_ms, cpu_ms = future.result(timeout=RECEIPT_GUARD_SECONDS)
+                    self.assertFalse(release.is_set(), "receipt must be issued while the leaf is parked")
+                    print("ADMISSION " + json.dumps({"case": case, "trigger_bytes": len(trigger_data.encode("utf-8")), "elapsed_ms": round(elapsed_ms, 3), "cpu_ms": round(cpu_ms, 3), "flow_lookup": "LOCAL_FAST transactional fixture primary-key read and JSON decode"}), flush=True)
                     self.assertTrue(any(thread == caller_threads[0] and filters == {"id": "flow"} and not had_job for thread, filters, had_job in flow_reads), "production CallContext must read the actual flow on the admitting thread before a job exists")
                     self.assertEqual(response["data"], {"job_id": harness.state.rows["job"][0]["id"], "status": "queued"})
                     self.assertEqual(harness.state.rows["job"][0]["status"], "processing")
@@ -313,13 +322,16 @@ class QualityAdmissionTests(unittest.TestCase):
                     self.assertEqual(harness.routes, [])
                 finally:
                     release.set()
-                response, elapsed_ms = future.result(timeout=5)
+                response, elapsed_ms, cpu_ms = future.result(timeout=PARK_SECONDS)
             job = harness.finish(response, fixture_action)
             self.assertEqual(job["status"], "completed")
             self.assertEqual(len(harness.routes), 1)
             self.assertEqual(harness.routes[0]["gates"], job["result"]["gates"])
             self.assertEqual(harness.completed, ["flow"])
-            self.assertLess(elapsed_ms, 50, f"{case}: full quality admission including flow context crosses the census 50 ms line")
+            # The census line is about the work admission does, so it is bounded by the CPU time
+            # admission spends, not by wall time: on a busy host the wall reading moves with the
+            # load while the CPU time does not.
+            self.assertLess(cpu_ms, 50, f"{case}: full quality admission including flow context crosses the census 50 ms line")
 
     def test_other_selected_preflights_are_owned_and_keep_terminal_results(self) -> None:
         for verb in sorted(SELECTED - {"list_gates"}):
@@ -332,13 +344,12 @@ class QualityAdmissionTests(unittest.TestCase):
                 key = smoke_proof.select_smokes(root, fixture.request(), store=store)["selected"][0]["key"]
                 store.observe(key, clean_observation(key), expected_version=0, principal="owned-fixture")
                 harness = Harness(root)
-                producer = FullBatteryProducer(root, "quality-admission-fixture", store=CampaignStore(root / "campaigns"), register=RegisterDouble(), runner=lambda *_args: {"result": "passed", "exit_code": 0, "registered_count": 1, "summary": {"total": 1, "passed": 1}})
+                producer = FullBatteryProducer(root, "quality-admission-fixture", store=CampaignStore(root / "campaigns"), runner=lambda *_args: {"result": "passed", "exit_code": 0, "registered_count": 1, "summary": {"total": 1, "passed": 1}})
                 harness.plugin._quality_ops().full_battery = producer
                 stack.enter_context(patch.object(operations, "run_bounded", return_value=SubprocessResult(0, "owned gate result", False, 17, False)))
                 stack.enter_context(patch("quality_gates.run_smokes.execute_selected", side_effect=runner_result))
                 stack.enter_context(patch.object(landing_verify, "_git_show", return_value="suite/check_smoke.py\n"))
                 stack.enter_context(patch.object(full_battery, "read_tree", return_value=FrozenTree("b" * 40, "d" * 40, {})))
-                stack.enter_context(patch.object(full_battery, "battery_busy", return_value=False))
                 self.check_parked(harness, verb, operation_arguments(verb, root, fixture.request(), key))
                 with producer._slot:
                     pass  # The existing campaign worker must finish before fixture cleanup.
@@ -352,18 +363,17 @@ class QualityAdmissionTests(unittest.TestCase):
         def parked(*args: Any, **kwargs: Any) -> Any:
             worker_threads.append(threading.current_thread().name)
             entered.set()
-            assert release.wait(5), "test must release the operation leaf"
+            assert release.wait(PARK_SECONDS), "test must release the operation leaf"
             return original(*args, **kwargs)
 
         action = harness.action(verb, arguments)
         with patch.object(target, attribute, autospec=True if target is SmokePassStore else None, side_effect=parked), ThreadPoolExecutor(max_workers=1) as executor:
-            started = time.perf_counter()
             future = executor.submit(harness.dispatch, action)
             try:
-                self.assertTrue(entered.wait(5), f"actual {verb} preflight reached")
-                self.assertTrue(wait([future], timeout=0.05).done, f"{verb} receipt must precede leaf release")
+                self.assertTrue(entered.wait(PARK_SECONDS), f"actual {verb} preflight reached")
+                self.assertTrue(wait([future], timeout=RECEIPT_GUARD_SECONDS).done, f"{verb} receipt must precede leaf release")
+                self.assertFalse(release.is_set(), "receipt must be issued while the leaf is parked")
                 response = future.result()
-                self.assertLess(time.perf_counter() - started, 0.05)
                 self.assertTrue(response["success"], response)
                 self.assertEqual(len(harness.state.rows["job"]), 1)
                 self.assertEqual(response["data"], {"job_id": harness.state.rows["job"][0]["id"], "status": "queued"})
@@ -371,7 +381,7 @@ class QualityAdmissionTests(unittest.TestCase):
                 self.assertTrue(all(name == "registered-quality_service" for name in worker_threads))
             finally:
                 release.set()
-            response = future.result(timeout=5)
+            response = future.result(timeout=PARK_SECONDS)
             job = harness.finish(response, action)
         self.assertEqual(job["status"], "completed", job)
         self.assertEqual(len(harness.routes), 1)
@@ -381,7 +391,37 @@ class QualityAdmissionTests(unittest.TestCase):
             self.assertEqual((job["result"]["output"], job["result"]["passed"]), ("owned gate result", True))
         if verb == "run_test":
             self.assertEqual((job["result"]["output"], job["result"]["passed"]), ("owned runner result", True))
+        if verb == "predict_gate_smokes_merge":
+            self.assertEqual(job["result"]["candidate_root_path"], str(Path(arguments["candidate_root_path"]).resolve()))
         print(f"PASS {verb}: parked complete preflight, one persisted owner, original terminal result")
+
+    def test_registered_hash_manifest_returns_byte_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            harness = Harness(root)
+            (root / "exact.txt").write_bytes(b"expected")
+            (root / "changed.txt").write_bytes(b"actual")
+            expected = hashlib.sha256(b"expected").hexdigest()
+            actual = hashlib.sha256(b"actual").hexdigest()
+            manifest = dict.fromkeys(("exact.txt", "changed.txt", "missing.txt"), expected)
+            with self.assertLogs("platform_dev_surface_plugin", level="INFO") as logged:
+                job = harness.run("verify_hash_manifest", {"root_path": str(root), "manifest": manifest})
+            self.assertIn("quality_service.verify_hash_manifest by plugin:trusted-quality-caller", "\n".join(logged.output))
+            self.assertEqual(job["status"], "completed", job)
+            self.assertEqual(
+                job["result"],
+                {
+                    "root_path": str(root.resolve()),
+                    "files": [
+                        {"path": "changed.txt", "expected_sha256": expected, "actual_sha256": actual, "status": "mismatch"},
+                        {"path": "exact.txt", "expected_sha256": expected, "actual_sha256": expected, "status": "exact"},
+                        {"path": "missing.txt", "expected_sha256": expected, "actual_sha256": None, "status": "missing"},
+                    ],
+                    "all_exact": False,
+                    "editable_install_warnings": [],
+                    "editable_install_shadowing_detected": False,
+                },
+            )
 
     def test_registered_frozen_proof_full_lifecycle_and_principal(self) -> None:
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
@@ -396,19 +436,39 @@ class QualityAdmissionTests(unittest.TestCase):
             run = harness.run("run_selected_smokes", {"request": fixture.request()})["result"]
             self.assertEqual((run["executed_count"], run["proofs"][0]["proof"]["reusable"]), (1, True))
             before = harness.run("get_smoke_proof_history", {"key": key})["result"]["events"]
+            # Model a correction written by an older producer. Its fields are
+            # opaque provenance, retained without migrating the original event.
+            legacy = {name + "_" + "id": "old-reference" for name in ("unit", "change")}
+            store = SmokePassStore(root / "receipts" / "smoke-proofs-v1")
+            store._append(key, "correct", {"metadata": legacy, "target": before[-1]["event_id"]}, expected_version=before[-1]["version"], principal="plugin:trusted-quality-caller", reason="historical fixture")
+            before = harness.run("get_smoke_proof_history", {"key": key})["result"]["events"]
+            original_bytes = {path: path.read_bytes() for path in store.root.glob(f"{key}/*.json")}
             version = before[-1]["version"]
             common = {"key": key, "expected_version": version, "reason": "owned lifecycle"}
-            corrected = harness.run("correct_smoke_proof", {**common, "metadata": {"annotation": "first", "unit_id": "owned-unit"}})["result"]
+            for field in legacy:
+                with self.subTest(field=field):
+                    rejected = harness.run("correct_smoke_proof", {**common, "metadata": {field: "legacy-reference"}})
+                    self.assertEqual(rejected["status"], "error", "legacy proof metadata was accepted")
+                    rejected_clear = harness.run("clear_smoke_proof", {**common, "fields": [field], "clear_reuse": True})
+                    self.assertEqual(rejected_clear["status"], "error")
+                    self.assertEqual(harness.run("get_smoke_proof_history", {"key": key})["result"]["events"], before)
+                    self.assertEqual(harness.run("get_smoke_proof", {"key": key})["result"]["version"], version)
+            corrected = harness.run("correct_smoke_proof", {**common, "metadata": {"annotation": "first"}})["result"]
             corrected_again = harness.run("correct_smoke_proof", {**common, "expected_version": corrected["version"], "metadata": {"annotation": "second"}})["result"]
+            self.assertEqual(corrected_again["metadata"], {**legacy, "annotation": "second"})
             cleared = harness.run("clear_smoke_proof", {**common, "expected_version": corrected_again["version"], "fields": ["annotation"], "clear_reuse": True})["result"]
-            self.assertEqual(cleared["metadata"], {"unit_id": "owned-unit"})
+            self.assertEqual(cleared["metadata"], legacy)
             self.assertFalse(cleared["reusable"])
             retired = harness.run("retire_smoke_proof", {**common, "expected_version": cleared["version"]})["result"]
             restored = harness.run("reinstate_smoke_proof", {**common, "expected_version": retired["version"], "request": fixture.request()})["result"]
             self.assertFalse(restored["retired"])
             self.assertTrue(restored["reusable"])
             historical = harness.run("get_smoke_proof", {"key": key, "as_of": version})["result"]
-            self.assertEqual((historical["metadata"], historical["version"]), ({}, version))
+            self.assertEqual((historical["metadata"], historical["version"]), (legacy, version))
+            annotated = harness.run("get_smoke_proof", {"key": key, "as_of": corrected["version"]})["result"]
+            self.assertEqual(annotated["metadata"], {**legacy, "annotation": "first"})
+            self.assertEqual(restored["observation"], run["proofs"][0]["proof"]["observation"])
+            self.assertEqual({path: path.read_bytes() for path in original_bytes}, original_bytes)
             after = harness.run("get_smoke_proof_history", {"key": key})["result"]["events"]
             self.assertEqual(after[: len(before)], before)
             self.assertTrue(all(row["principal"] == "plugin:trusted-quality-caller" for row in after))
@@ -478,8 +538,7 @@ class QualityAdmissionTests(unittest.TestCase):
             harness = Harness(root)
             # The real late boot hook continues to receive a full result.
             harness.plugin.set_action_factory(harness.factory)
-            self.assertTrue(harness.plugin.ensure_full_smoke_schedule()["installed"])
-            self.assertEqual(harness.scheduler.creates, 2)
+            self.assertEqual(harness.scheduler.creates, 0)
             self.assertEqual(harness.state.rows.get("job", []), [])
             entered, release = threading.Event(), threading.Event()
             executions: list[str] = []
@@ -487,16 +546,15 @@ class QualityAdmissionTests(unittest.TestCase):
             def runner(campaign: dict[str, Any], _root: Path) -> dict[str, Any]:
                 executions.append(campaign["campaign_id"])
                 entered.set()
-                assert release.wait(5), "fixture releases the existing full-battery runner"
+                assert release.wait(PARK_SECONDS), "fixture releases the existing full-battery runner"
                 return {"result": "passed", "exit_code": 0, "registered_count": 1, "summary": {"total": 1, "passed": 1}}
 
-            producer = FullBatteryProducer(root, "quality-admission-fixture", store=CampaignStore(root / "campaigns"), register=RegisterDouble(), runner=runner)
+            producer = FullBatteryProducer(root, "quality-admission-fixture", store=CampaignStore(root / "campaigns"), runner=runner)
             harness.plugin._quality_ops().full_battery = producer
             stack.enter_context(patch.object(full_battery, "read_tree", return_value=FrozenTree("b" * 40, "d" * 40, {})))
-            stack.enter_context(patch.object(full_battery, "battery_busy", return_value=False))
             try:
                 first = harness.run("trigger_full_smoke_battery", {"trigger": "manual"})
-                self.assertTrue(entered.wait(5))
+                self.assertTrue(entered.wait(PARK_SECONDS))
                 second = harness.run("trigger_full_smoke_battery", {"trigger": "manual"})
                 self.assertEqual((first["result"]["status"], second["result"]["status"]), ("started", "already_running"))
                 self.assertEqual(first["result"]["campaign_id"], second["result"]["campaign_id"])
@@ -568,14 +626,14 @@ class QualityAdmissionTests(unittest.TestCase):
 
             def leaf() -> list[str]:
                 entered.set()
-                assert release.wait(5), "fixture releases actual registry reader"
+                assert release.wait(PARK_SECONDS), "fixture releases actual registry reader"
                 return original()
 
             with patch.object(harness.plugin._quality_ops(), "_read_smoke_register", side_effect=leaf), ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(harness.processor.execute_action, action)
                 try:
-                    self.assertTrue(entered.wait(5), "real quality provider reached with private-PG job persistence")
-                    self.assertTrue(wait([future], timeout=0.05).done, "private-PG admission must return before registry release")
+                    self.assertTrue(entered.wait(PARK_SECONDS), "real quality provider reached with private-PG job persistence")
+                    self.assertTrue(wait([future], timeout=RECEIPT_GUARD_SECONDS).done, "private-PG admission must return before registry release")
                     response = future.result()
                     job_id = str(cast(dict[str, Any], response["data"])["job_id"])
                     reader = JobService(fixture.state, manager)

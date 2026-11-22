@@ -11,11 +11,11 @@ Legs:
   (b) ``invalid_waiter`` — empty/whitespace-only ``waiter_instance_id``
       refuses BEFORE any write (no row lands).
   (c) ``unknown_condition_kind`` — a condition_kind outside
-      {lane_closed, session_terminal, deadline} refuses.
+      {session_terminal, deadline} refuses, ``lane_closed`` included.
   (d) ``invalid_condition_ref`` per kind: ``session_terminal`` requires an
       ``agi-``-prefixed condition_ref; ``deadline`` requires a parseable
-      ISO-8601 timestamp; ``lane_closed`` requires non-empty. Each leg named
-      to its own kind, not one generic "bad ref" assertion.
+      ISO-8601 timestamp. Each leg named to its own kind, not one generic
+      "bad ref" assertion.
   (e) each VALID kind arms cleanly (one leg per kind, proving the shape
       checks are not accidentally rejecting their own legal inputs).
   (f) lane-scoped arming is unsupported BY CONSTRUCTION — there is no
@@ -47,7 +47,6 @@ from ananta.llm.agent_messaging.state_results import require_records  # noqa: E4
 
 from agent_messaging_plugin.schema import (  # noqa: E402
     CONDITION_DEADLINE,
-    CONDITION_LANE_CLOSED,
     CONDITION_SESSION_TERMINAL,
     TABLE_SESSION_DEPENDENCY,
 )
@@ -79,7 +78,8 @@ def _state() -> StateManagementInterface:
 
 def _rows(state: StateManagementInterface) -> list[dict[str, Any]]:
     result = state.query_state(
-        AGENT_ROLE_BINDING_NAMESPACE, {"table": TABLE_SESSION_DEPENDENCY, "filters": {}},
+        AGENT_ROLE_BINDING_NAMESPACE,
+        {"table": TABLE_SESSION_DEPENDENCY, "filters": {}},
     )
     return require_records(result)
 
@@ -103,7 +103,8 @@ def test_valid_session_terminal_arm_writes_the_row() -> None:
         ),
     )
     _check(
-        result == {
+        result
+        == {
             "waiter_instance_id": "agi-waiter01",
             "condition_kind": CONDITION_SESSION_TERMINAL,
             "condition_ref": "agi-watched01",
@@ -115,10 +116,7 @@ def test_valid_session_terminal_arm_writes_the_row() -> None:
     _check(len(rows) == 1, "exactly one session_dependency row was written")
     row = rows[0]
     _check(
-        row.get("waiter_instance_id") == "agi-waiter01"
-        and row.get("condition_kind") == CONDITION_SESSION_TERMINAL
-        and row.get("condition_ref") == "agi-watched01"
-        and row.get("fired_at") is None,
+        row.get("waiter_instance_id") == "agi-waiter01" and row.get("condition_kind") == CONDITION_SESSION_TERMINAL and row.get("condition_ref") == "agi-watched01" and row.get("fired_at") is None,
         "the written row carries the exact session-scoped fields, fired_at NULL (armed)",
     )
     _check(
@@ -134,8 +132,8 @@ def test_invalid_waiter_refuses_before_any_write() -> None:
             state,
             ArmSessionDependencyRequest(
                 waiter_instance_id=bad_waiter,
-                condition_kind=CONDITION_LANE_CLOSED,
-                condition_ref="lane-x",
+                condition_kind=CONDITION_SESSION_TERMINAL,
+                condition_ref="agi-ref0000000000000000000000000000",
             ),
         )
         _check(
@@ -156,6 +154,15 @@ def test_unknown_condition_kind_refuses() -> None:
         ),
     )
     _check(code == "unknown_condition_kind", f"unrecognised condition_kind refuses (got {code!r})")
+    code = _expect_error(
+        state,
+        ArmSessionDependencyRequest(
+            waiter_instance_id="agi-waiter01",
+            condition_kind="lane_closed",
+            condition_ref="lane-real",
+        ),
+    )
+    _check(code == "unknown_condition_kind", f"lane_closed is no longer a condition kind (got {code!r})")
     _check(not _rows(state), "no row was written")
 
 
@@ -185,18 +192,6 @@ def test_condition_ref_shape_checks_per_kind() -> None:
         code == "invalid_condition_ref",
         f"deadline: an unparseable timestamp condition_ref refuses (got {code!r})",
     )
-    code = _expect_error(
-        state,
-        ArmSessionDependencyRequest(
-            waiter_instance_id="agi-waiter01",
-            condition_kind=CONDITION_LANE_CLOSED,
-            condition_ref="   ",
-        ),
-    )
-    _check(
-        code == "invalid_condition_ref",
-        f"lane_closed: a blank condition_ref refuses (got {code!r})",
-    )
     _check(not _rows(state), "no row was written across any invalid_condition_ref attempt")
 
 
@@ -206,7 +201,6 @@ def test_every_valid_kind_arms_cleanly() -> None:
     cases = (
         (CONDITION_SESSION_TERMINAL, "agi-realwaiter00000000000000000"),
         (CONDITION_DEADLINE, "2026-12-31T23:59:59+00:00"),
-        (CONDITION_LANE_CLOSED, "lane-real"),
     )
     for condition_kind, condition_ref in cases:
         state = _state()

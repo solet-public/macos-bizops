@@ -38,6 +38,7 @@ REGISTERED_MEMORY_OPERATIONS = frozenset(
         "consolidate_cron",
         "delete_memories_by_ids",
         "delete_memories_by_tag",
+        "ensure_schedules",
         "forget",
         "get_memories_by_tag",
         "get_recent_memory",

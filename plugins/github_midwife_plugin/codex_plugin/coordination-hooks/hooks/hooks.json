@@ -2,7 +2,7 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear",
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
@@ -13,8 +13,45 @@
           {
             "type": "command",
             "command": "python3 ${PLUGIN_ROOT}/hooks/session_start_context.py",
-            "timeout": 8,
+            "timeout": 30,
             "statusMessage": "Reading register and peer inbox context"
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/recovery_codex.py",
+            "timeout": 15,
+            "statusMessage": "Checking the working-tree recovery store"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/recovery_codex.py",
+            "timeout": 15,
+            "statusMessage": "Saving working-tree state before a discarding command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Bash|apply_patch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/recovery_codex.py",
+            "timeout": 15,
+            "statusMessage": "Recording this session's edits"
           }
         ]
       }
@@ -35,6 +72,26 @@
             "command": "python3 ${PLUGIN_ROOT}/hooks/inbox_consumer.py",
             "timeout": 8,
             "statusMessage": "Checking peer inbox before ending turn"
+          },
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/recovery_codex.py",
+            "timeout": 120,
+            "async": true,
+            "statusMessage": "Saving this turn's working tree"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/recovery_codex.py",
+            "timeout": 3,
+            "statusMessage": "Saving the working tree at session end"
           }
         ]
       }

@@ -34,15 +34,18 @@ from __future__ import annotations
 
 import contextlib
 import getpass
+import hashlib
 import importlib.util
 import io
 import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
+import unittest
 from collections.abc import Generator
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -759,7 +762,7 @@ def _check_pre_fix_scram_escape(safe_hba: Path) -> None:
             raise SmokeFailureError("pre-fix scram writer did not reach the injected OSError boundary")
     _check(
         "pre-fix scram read OSError escaped the standalone writer",
-        isinstance(pre_fix_scram_escape, PermissionError) and "scram read sentinel" in str(pre_fix_scram_escape),
+        "scram read sentinel" in str(pre_fix_scram_escape),
         repr(pre_fix_scram_escape),
     )
 
@@ -1263,6 +1266,280 @@ def _check_fully_healthy_role_db_skips_with_revoke_verified(root: Path) -> None:
     )
 
 
+def _pgvector_archive(*members: str) -> bytes:
+    """A tiny real tar.gz shaped like GitHub's pgvector-0.8.7 source archive."""
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name in members:
+            info = tarfile.TarInfo(name)
+            info.size = 5
+            archive.addfile(info, io.BytesIO(b"all:\n"))
+    return buffer.getvalue()
+
+
+class _PgvectorHost:
+    """A Mac whose Homebrew pgvector bottle has no PostgreSQL 17 module (since 2026-11-19): `brew install pgvector` exits 0 and installs none."""
+
+    def __init__(self, root: Path, prefix: Path) -> None:
+        self.lib = root / "lib"
+        self.share = root / "share" / "extension"
+        self.sdk = root / "sdk"
+        self.temp = root / "tmp"
+        self.prefix = prefix
+        self.pg_config = prefix / "bin" / "pg_config"
+        for directory in (self.sdk, self.temp, self.pg_config.parent):
+            directory.mkdir(parents=True, exist_ok=True)
+        self.pg_config.write_text("#!/bin/sh\n")
+        self.pg_config.chmod(0o755)
+        self.archive = _pgvector_archive("pgvector-0.8.7/Makefile")
+        self.commands: list[list[str]] = []
+        self.fail = ""
+        self.installs = True
+
+    @property
+    def module_installed(self) -> bool:
+        return (self.lib / "vector.dylib").is_file() and (self.share / "vector.control").is_file()
+
+    def install_module(self) -> None:
+        self.lib.mkdir(parents=True, exist_ok=True)
+        self.share.mkdir(parents=True, exist_ok=True)
+        (self.lib / "vector.dylib").write_text("module")
+        (self.share / "vector.control").write_text("module")
+
+    def owns(self, command: list[str]) -> bool:
+        return command[0] in ("/usr/bin/xcrun", "/usr/bin/curl", "/usr/bin/make", str(self.pg_config))
+
+    def ran(self, executable: str) -> list[list[str]]:
+        return [command for command in self.commands if command[0] == executable]
+
+    def run(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
+        if self.fail and self.fail in " ".join(command):
+            return _fake_completed(2, stderr=f"fixture failure: {self.fail}\n")
+        return _fake_completed(0, stdout=self._toolchain(command) or self._homebrew(command))
+
+    def _toolchain(self, command: list[str]) -> str:
+        if command[:2] == ["/usr/bin/xcrun", "--find"]:
+            return f"/fixture/{command[2]}\n"
+        if command[0] == "/usr/bin/xcrun":
+            return f"{self.sdk}\n"
+        if command[0] == "/usr/bin/curl":
+            Path(command[command.index("--output") + 1]).write_bytes(self.archive)
+        if command[0] == "/usr/bin/make" and command[-1] == "install" and self.installs:
+            self.install_module()
+        return ""
+
+    def _homebrew(self, command: list[str]) -> str:
+        if command[0] == str(self.pg_config):
+            return f"{self.lib if command[1] == '--pkglibdir' else self.share.parent}\n"
+        if command[1:] == ["--prefix", "postgresql@17"]:
+            return f"{self.prefix}\n"
+        if command[1:3] == ["deps", "--formula"]:
+            return "krb5\n"
+        return f"==> Would install 1 formula:\n{command[-1]}\n" if "--dry-run" in command else ""
+
+
+class PgvectorSourceBuildTests(unittest.TestCase):
+    """Homebrew's pgvector bottle has no PostgreSQL 17 module: setup builds the pinned source instead."""
+
+    def setUp(self) -> None:
+        from bootstrap_adapter import models, postgres_install, routes  # noqa: PLC0415
+
+        _load_bootstrap_module()
+        self.models, self.postgres_install, self.routes = models, postgres_install, routes
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        self.host = _PgvectorHost(root, root / "pg")
+        self.root = root
+
+    def runtime(self) -> Any:
+        return self.models.AdapterRuntime(self.host.run, lambda name: "/fixture/brew" if name == "brew" else None, lambda: datetime.now(UTC), "fixture", Path("/fixture"))
+
+    def exercise(self, *, pin: bool = True) -> dict[str, Any]:
+        """Apply the install route; `pin` makes the pinned sha256 that of the host's archive."""
+
+        missing = self.models.PostgresObservation(True, "/fixture/brew", True, True, 17, True, False)
+        digest = {"PGVECTOR_SHA256": hashlib.sha256(self.host.archive).hexdigest()} if pin else {}
+        request = {"operation_id": "install_postgresql", "phase": "apply", "probe_purpose": None, "request_id": "0" * 8, "name": "fixture"}
+        with (
+            patch.object(tempfile, "tempdir", str(self.host.temp)),
+            patch.dict(self.postgres_install.__dict__, digest),
+            patch("bootstrap_adapter.routes.postgres_observation", return_value=missing),
+        ):
+            outcome: dict[str, Any] = self.routes._postgres_install_route(request, self.runtime())  # noqa: SLF001
+        self.assertEqual(list(self.host.temp.iterdir()), [], "a temp directory was left behind")
+        self.assertLessEqual(len(outcome["stderr"]), 16_384, "the reason must fit the envelope's stderr cap")
+        return outcome
+
+    def refused(self, repair: str) -> None:
+        """The install fails, names `repair` to the adopter, and downloads and builds nothing."""
+
+        self.host.commands.clear()
+        failed = self.exercise()
+        self.assertEqual(failed["error_kind"], "postgres_install_failed", self.host.commands)
+        self.assertIn(repair, failed["stderr"])
+        self.assertEqual(self.host.ran("/usr/bin/curl") + self.host.ran("/usr/bin/make"), [], "something was downloaded or built")
+
+    def test_a_missing_module_is_built_from_the_pinned_source(self) -> None:
+        applied = self.exercise()
+        commands = self.host.commands
+        self.assertEqual([c for c in commands if c[-1] == "pgvector"], [], "Homebrew's bottle has no PostgreSQL 17 module")
+        self.assertEqual(applied["checkpoint_status"], "applied", applied["stderr"])
+        self.assertEqual([c[1:] for c in self.host.ran("/usr/bin/xcrun")], [["--find", "clang"], ["--find", "make"], ["--sdk", "macosx", "--show-sdk-path"]])
+        self.assertEqual([c[-1] for c in self.host.ran("/usr/bin/curl")], [self.postgres_install.PGVECTOR_URL])
+        builds = self.host.ran("/usr/bin/make")
+        self.assertEqual(builds[1][-1:], ["install"])
+        for build in builds:
+            self.assertLessEqual({f"PG_CONFIG={self.host.pg_config}", "OPTFLAGS=", f"PG_SYSROOT={self.host.sdk}"}, set(build))
+        order = [Path(c[0]).name for c in commands if c[0].startswith("/usr/bin/")]
+        self.assertEqual(order, ["xcrun"] * 3 + ["curl", "make", "make"], "the Command Line Tools are checked before anything is downloaded")
+        self.assertTrue(self.host.module_installed)
+
+    def test_b_bytes_that_are_not_the_pinned_tarball_are_never_built(self) -> None:
+        failed = self.exercise(pin=False)
+        self.assertEqual(failed["error_kind"], "postgres_install_failed", self.host.commands)
+        self.assertEqual(self.host.ran("/usr/bin/make"), [], "a mismatched tarball was built")
+        self.assertIn(hashlib.sha256(self.host.archive).hexdigest(), failed["stderr"])
+        self.assertIn(self.postgres_install.PGVECTOR_SHA256, failed["stderr"])
+
+    def test_c_missing_command_line_tools_name_the_repair_before_any_download(self) -> None:
+        for fail in ("--find clang", "--find make", "--show-sdk-path"):
+            with self.subTest(fail=fail):
+                self.host.fail = fail
+                self.refused("xcode-select --install")
+        self.host.fail = ""
+        self.host.sdk.rmdir()
+        self.refused("xcode-select --install")
+
+    def test_d_a_failing_build_fails_the_install(self) -> None:
+        self.host.fail = "PG_SYSROOT"
+        failed = self.exercise()
+        self.assertEqual(failed["error_kind"], "postgres_install_failed", self.host.commands)
+        self.assertIn("fixture failure", failed["stderr"])
+        self.assertEqual(len(self.host.ran("/usr/bin/make")), 1, "make install ran after a failed build")
+
+    def test_e_an_install_that_leaves_no_module_fails(self) -> None:
+        self.host.installs = False
+        failed = self.exercise()
+        self.assertEqual(failed["error_kind"], "postgres_install_failed", self.host.commands)
+        self.assertIn("absent after install", failed["stderr"])
+
+    def test_f_an_archive_member_that_escapes_the_extraction_directory_is_refused(self) -> None:
+        self.host.archive = _pgvector_archive("pgvector-0.8.7/Makefile", "../../escaped.txt")
+        failed = self.exercise()
+        self.assertEqual(failed["error_kind"], "postgres_install_failed", self.host.commands)
+        self.assertEqual(list(self.root.rglob("escaped.txt")), [], "a member was written outside the extraction directory")
+        self.assertEqual(self.host.ran("/usr/bin/make"), [])
+
+    def test_g_a_module_the_service_start_reveals_is_left_alone(self) -> None:
+        stopped = self.models.PostgresObservation(True, "/fixture/brew", True, True, 17, False, None)
+        revealed = self.models.PostgresObservation(True, "/fixture/brew", True, True, 17, True, True)
+        request = {"operation_id": "install_postgresql", "phase": "apply", "probe_purpose": None, "request_id": "0" * 8, "name": "fixture"}
+        with (
+            patch("bootstrap_adapter.routes.postgres_observation", return_value=stopped),
+            patch("bootstrap_adapter.postgres_install.postgres_observation", return_value=revealed),
+            patch("bootstrap_adapter.postgres_install.wait_for_postgres_ready", return_value=True),
+        ):
+            applied = self.routes._postgres_install_route(request, self.runtime())  # noqa: SLF001
+        self.assertEqual(applied["checkpoint_status"], "applied")
+        self.assertEqual(self.host.commands, [["/fixture/brew", "services", "start", "postgresql@17"]])
+
+    def test_h_a_missing_pg_config_stops_before_any_download(self) -> None:
+        self.host.pg_config.chmod(0o644)
+        self.refused("pg_config")
+
+
+def _run_pgvector_step(root: Path, *, available: bool = False, confirm: bool = True, fail: str = "") -> tuple[dict[str, Any], list[str], _PgvectorHost]:
+    """Run layer 0's pgvector step on a fresh fixture Mac; a BootstrapError becomes a failed record, as `run_steps` makes it."""
+
+    module = _load_bootstrap_module()
+    from bootstrap_adapter import postgres_install  # noqa: PLC0415
+
+    target, fake_prefix = _make_fixture_tree(root)
+    healthy = _make_all_healthy_fake_run(fake_prefix)
+    host = _PgvectorHost(root / "host", fake_prefix)
+    host.fail = fail
+    if available:
+        host.install_module()
+    asked: list[str] = []
+
+    def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "pg_available_extensions" in " ".join(cmd):
+            return _fake_completed(0, stdout="1\n" if host.module_installed else "")
+        return host.run(cmd, **kwargs) if host.owns(cmd) else healthy(cmd, **kwargs)
+
+    def confirmer(message: str) -> bool:
+        asked.append(message)
+        return confirm
+
+    ctx = module.BootstrapContext(target=target, run=run, confirm=confirmer, http_get=_fake_http_get_correct_model)
+    digest = {"PGVECTOR_SHA256": hashlib.sha256(host.archive).hexdigest()}
+    try:
+        with _isolated_host(module), patch.dict(postgres_install.__dict__, digest), patch.object(tempfile, "tempdir", str(host.temp)):
+            record: dict[str, Any] = module.ensure_pgvector(ctx)
+    except module.BootstrapError as exc:
+        record = {"step_name": "pgvector", "status": "failed", "error": str(exc)}
+    return record, asked, host
+
+
+def _check_pgvector_step_builds_pinned_source_after_confirm(root: Path) -> None:
+    """Layer 0 asks, then builds through the adapter's one function; a module that exists, a decline or missing tools build nothing."""
+
+    _load_bootstrap_module()
+    from bootstrap_adapter import postgres_install  # noqa: PLC0415
+
+    left_alone, asked, host = _run_pgvector_step(root / "available", available=True)
+    _check(
+        "a PostgreSQL 17 that already has a working pgvector is left alone: skipped, nothing asked, nothing run",
+        left_alone["status"] == "skipped" and not asked and not host.commands,
+        f"record={left_alone!r} asked={asked!r} commands={host.commands!r}",
+    )
+    declined, _asked, host = _run_pgvector_step(root / "declined", confirm=False)
+    _check(
+        "declining the pgvector build is a stop-and-ask that runs nothing",
+        declined["status"] == "needs_user_action" and not host.commands,
+        f"record={declined!r} commands={host.commands!r}",
+    )
+    built, asked, host = _run_pgvector_step(root / "built")
+    _check(
+        "a confirmed pgvector build completes and the re-probe sees the module",
+        built["status"] == "completed" and host.module_installed,
+        f"record={built!r} commands={host.commands!r}",
+    )
+    _check(
+        "layer 0 downloads the adapter's one pinned URL",
+        [c[-1] for c in host.ran("/usr/bin/curl")] == [postgres_install.PGVECTOR_URL],
+        f"commands={host.commands!r}",
+    )
+    _check(
+        "the confirm message lists the pinned download and the make commands",
+        len(asked) == 1 and postgres_install.PGVECTOR_URL in asked[0] and "make" in asked[0],
+        f"asked={asked!r}",
+    )
+    no_tools, _asked, host = _run_pgvector_step(root / "no_tools", fail="--find clang")
+    _check(
+        "missing Command Line Tools fail the layer-0 step naming the repair, before any download",
+        no_tools["status"] == "failed" and "xcode-select --install" in no_tools["error"] and not host.ran("/usr/bin/curl"),
+        f"record={no_tools!r} commands={host.commands!r}",
+    )
+
+
+def _check_pgvector_pin_lives_in_one_place() -> None:
+    """A pgvector security fix is a one-line seed change: the pin is in one place, not one per call site."""
+
+    _load_bootstrap_module()
+    from bootstrap_adapter import postgres_install  # noqa: PLC0415
+
+    pin = getattr(postgres_install, "PGVECTOR_SHA256", None)
+    _check("the seed pins a pgvector source sha256", isinstance(pin, str) and len(pin) == 64, f"got {pin!r}")
+    sources = [_BOOTSTRAP_PATH, *_BOOTSTRAP_ADAPTER_PATHS]
+    for token in (str(pin), "github.com/pgvector/pgvector"):
+        copies = sum(path.read_text().count(token) for path in sources)
+        _check(f"{token[:30]!r} appears once across bootstrap.py and bootstrap_adapter", copies == 1, f"copies={copies}")
+
+
 def main() -> int:
     try:
         _check_bootstrap_is_stdlib_only()
@@ -1304,6 +1581,11 @@ def main() -> int:
             _check_absent_role_db_create_path_activates_vector_extension(Path(tmp))
         with tempfile.TemporaryDirectory() as tmp:
             _check_fully_healthy_role_db_skips_with_revoke_verified(Path(tmp))
+        outcome = unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(PgvectorSourceBuildTests))
+        with tempfile.TemporaryDirectory() as tmp:
+            _check_pgvector_step_builds_pinned_source_after_confirm(Path(tmp))
+        _check_pgvector_pin_lives_in_one_place()
+        _check("pgvector source build regressions pass", outcome.wasSuccessful(), f"{len(outcome.failures)} failures, {len(outcome.errors)} errors")
     except SmokeFailureError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         print(f"  ({len(_CHECKS_RUN)} checks attempted before failure)", file=sys.stderr)

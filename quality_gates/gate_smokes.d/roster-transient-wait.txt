@@ -1,0 +1,3 @@
+# prb_3207f577 (chg_bc21e865, upl_f683cfb0de0742368e391f526a64f267): the install doctor's plugin_roster probe waits, bounded, while the
+# inference plugin is still starting. Real producer rows, virtual clock, offline, well under 2 s.
+plugins/github_midwife_plugin/tests/plugin_roster_transient_wait_smoke.py

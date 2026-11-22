@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -45,11 +48,7 @@ include = ["pkg"]
 
 
 def _fixture_env() -> dict[str, str]:
-    return {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("GIT_")
-    }
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
 def check(name: str, condition: bool) -> None:
@@ -63,7 +62,10 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(root), *args],
         env=_fixture_env(),
-        check=True, capture_output=True, text=True, timeout=60,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
 
 
@@ -84,12 +86,34 @@ def _scratch_repo(*, source: str = _CLEAN_SOURCE) -> Generator[Path]:
         yield root
 
 
-def _worktree_copy(repo_root: Path, dest: Path) -> None:
-    """A plain filesystem copy of the whole repo — the same reproduction
-    technique the GTE-13 investigation used (no ``git worktree``)."""
-    import shutil
+@contextmanager
+def _vanishes_during_walk(directory: Path, name: str) -> Generator[None]:
+    """Make ``directory/name`` exist when a walk lists ``directory`` and gone
+    before the walk copies it: a file that vanished between the walk and its copy."""
+    real_scandir = os.scandir
+    target = os.path.realpath(directory)
 
-    shutil.copytree(repo_root, dest)
+    def scandir_then_vanish(path: str | os.PathLike[str] = ".") -> Any:
+        if os.path.realpath(path) != target:
+            return real_scandir(path)
+        (directory / name).write_text("", encoding="utf-8")
+        with real_scandir(path) as itr:
+            entries = list(itr)
+        (directory / name).unlink()
+        return nullcontext(entries)
+
+    with mock.patch.object(os, "scandir", scandir_then_vanish):
+        yield
+
+
+def _worktree_copy(repo_root: Path, dest: Path) -> None:
+    """A plain filesystem copy of the work tree without ``.git`` — the same
+    reproduction technique the GTE-13 investigation used (no ``git worktree``).
+    The discriminator reads only ``worktree_root/rel_path`` and runs git on
+    ``repo_root``, so leaving ``.git`` out loses nothing it reads, and keeps every
+    file a background git process (git commit's detached maintenance run) creates
+    or deletes out of the walk."""
+    shutil.copytree(repo_root, dest, ignore=shutil.ignore_patterns(".git"))
 
 
 def _classify(repo_root: Path, worktree_root: Path, *, rel_path: str = _REL_PATH) -> gte13.Evidence:
@@ -114,6 +138,36 @@ def test_evidence_default_verdict_is_real() -> None:
     check("default verdict is 'real'", ev.verdict == "real")
 
 
+def test_worktree_copy_survives_a_git_file_vanishing_during_the_walk() -> None:
+    print("RACE: a git lock file vanishes between the walk and its copy -> copy still succeeds")
+    with _scratch_repo() as repo_root:
+        with tempfile.TemporaryDirectory(prefix="gte13_worktree_") as wt:
+            worktree_root = Path(wt) / "wt"
+            try:
+                with _vanishes_during_walk(repo_root / ".git" / "objects", "maintenance.lock"):
+                    _worktree_copy(repo_root, worktree_root)
+            except shutil.Error as error:
+                check(f"copy survives the vanished git file (shutil.Error: {error})", False)
+                return
+            check("copy holds pkg/module.py byte-identical to the fixture", (worktree_root / "pkg" / "module.py").read_bytes() == (repo_root / "pkg" / "module.py").read_bytes())
+            check("copy has no .git", not (worktree_root / ".git").exists())
+
+
+def test_worktree_copy_still_fails_on_a_vanished_work_tree_file() -> None:
+    print("RACE CONTROL: a work-tree file vanishes between the walk and its copy -> copy still fails")
+    with _scratch_repo() as repo_root:
+        with tempfile.TemporaryDirectory(prefix="gte13_worktree_") as wt:
+            worktree_root = Path(wt) / "wt"
+            try:
+                with _vanishes_during_walk(repo_root / "pkg", "transient.py"):
+                    _worktree_copy(repo_root, worktree_root)
+            except shutil.Error as error:
+                text = str(error)
+                check("copy refuses a vanished work-tree file (names transient.py, Errno 2)", "transient.py" in text and "No such file or directory" in text)
+                return
+            check("copy refuses a vanished work-tree file (shutil.Error was not raised)", False)
+
+
 # ---------------------------------------------------------------------------
 # The positive case
 # ---------------------------------------------------------------------------
@@ -130,10 +184,7 @@ def test_clean_identical_and_pyright_clean_is_artifact() -> None:
             _worktree_copy(repo_root, worktree_root)
             ev = _classify(repo_root, worktree_root)
             check("verdict is artifact", ev.verdict == "artifact")
-            check("evidence names all three checks",
-                  "git status: clean" in ev.render()
-                  and "byte-identical" in ev.render()
-                  and "direct pyright run" in ev.render())
+            check("evidence names all three checks", "git status: clean" in ev.render() and "byte-identical" in ev.render() and "direct pyright run" in ev.render())
 
 
 # ---------------------------------------------------------------------------
@@ -149,13 +200,13 @@ def test_dirty_live_checkout_is_real() -> None:
             _worktree_copy(repo_root, worktree_root)
             # Dirty the LIVE CHECKOUT after the worktree copy was taken.
             (repo_root / "pkg" / "module.py").write_text(
-                "def f() -> int:\n    return 2\n", encoding="utf-8",
+                "def f() -> int:\n    return 2\n",
+                encoding="utf-8",
             )
             ev = _classify(repo_root, worktree_root)
             check("verdict is real", ev.verdict == "real")
             check("evidence says DIRTY", "DIRTY" in ev.render())
-            check("direct run was skipped, not run against a dirty file",
-                  "SKIPPED" in ev.render())
+            check("direct run was skipped, not run against a dirty file", "SKIPPED" in ev.render())
 
 
 def test_worktree_diverges_from_head_is_real() -> None:
@@ -167,12 +218,12 @@ def test_worktree_diverges_from_head_is_real() -> None:
             # The live checkout stays clean; only the WORKTREE'S copy changes —
             # exactly what a real in-flight edit under review looks like.
             (worktree_root / "pkg" / "module.py").write_text(
-                "def f() -> int:\n    return 3\n", encoding="utf-8",
+                "def f() -> int:\n    return 3\n",
+                encoding="utf-8",
             )
             ev = _classify(repo_root, worktree_root)
             check("verdict is real", ev.verdict == "real")
-            check("evidence names the worktree mismatch",
-                  "worktree copy" in ev.render() and "differs from HEAD" in ev.render())
+            check("evidence names the worktree mismatch", "worktree copy" in ev.render() and "differs from HEAD" in ev.render())
 
 
 def test_missing_worktree_file_is_real() -> None:
@@ -184,8 +235,7 @@ def test_missing_worktree_file_is_real() -> None:
             ev = _classify(repo_root, worktree_root)
             check("verdict is real", ev.verdict == "real")
             check("evidence says FAULT", "FAULT" in ev.render())
-            check("names the worktree file specifically",
-                  "worktree file does not exist" in ev.render())
+            check("names the worktree file specifically", "worktree file does not exist" in ev.render())
 
 
 def test_missing_head_entry_is_real() -> None:
@@ -215,8 +265,7 @@ def test_missing_pyright_binary_is_real() -> None:
                 pyright_bin=Path("/nonexistent/pyright/binary"),
             )
             check("verdict is real", ev.verdict == "real")
-            check("evidence says FAULT: pyright binary not found",
-                  "FAULT: pyright binary not found" in ev.render())
+            check("evidence says FAULT: pyright binary not found", "FAULT: pyright binary not found" in ev.render())
 
 
 # ---------------------------------------------------------------------------
@@ -233,18 +282,28 @@ def test_run_exit_codes() -> None:
             with tempfile.TemporaryDirectory(prefix="gte13_worktree_") as wt:
                 worktree_root = Path(wt) / "wt"
                 _worktree_copy(repo_root, worktree_root)
-                rc = gte13.run([
-                    "--worktree-root", str(worktree_root),
-                    "--repo-root", str(repo_root),
-                    "--rel-path", _REL_PATH,
-                    "--pyright-bin", str(_PYRIGHT_BIN),
-                ])
+                rc = gte13.run(
+                    [
+                        "--worktree-root",
+                        str(worktree_root),
+                        "--repo-root",
+                        str(repo_root),
+                        "--rel-path",
+                        _REL_PATH,
+                        "--pyright-bin",
+                        str(_PYRIGHT_BIN),
+                    ]
+                )
                 check("exit 0 for artifact", rc == 0)
 
-    rc_missing_root = gte13.run([
-        "--worktree-root", "/definitely/does/not/exist/gte13",
-        "--rel-path", _REL_PATH,
-    ])
+    rc_missing_root = gte13.run(
+        [
+            "--worktree-root",
+            "/definitely/does/not/exist/gte13",
+            "--rel-path",
+            _REL_PATH,
+        ]
+    )
     check("exit 2 when --worktree-root does not exist", rc_missing_root == 2)
 
 
@@ -270,10 +329,7 @@ def test_hostile_git_environment_isolation() -> None:
         child_tmp = (proof_root / "child-tmp").resolve()
         victim_work.mkdir()
         child_tmp.mkdir()
-        if any(
-            not path.is_relative_to(proof_root)
-            for path in (victim_git, victim_work, child_tmp)
-        ):
+        if any(not path.is_relative_to(proof_root) for path in (victim_git, victim_work, child_tmp)):
             raise RuntimeError("controlled Git paths escaped the proof temp directory")
 
         subprocess.run(
@@ -333,6 +389,8 @@ def main() -> int:
     for test in (
         test_hostile_git_environment_isolation,
         test_evidence_default_verdict_is_real,
+        test_worktree_copy_survives_a_git_file_vanishing_during_the_walk,
+        test_worktree_copy_still_fails_on_a_vanished_work_tree_file,
         test_clean_identical_and_pyright_clean_is_artifact,
         test_dirty_live_checkout_is_real,
         test_worktree_diverges_from_head_is_real,

@@ -1,0 +1,2 @@
+# C4 U5: one recovery scenario set (S1 to S11) run against both coding-tool adapters in payload mode; advisory and exit 0 while neither adapter is installed in the tree.
+plugins/github_midwife_plugin/tests/recovery_scenarios/run_scenarios.py

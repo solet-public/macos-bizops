@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from g_suite_plugin.oauth import token_store  # noqa: E402
 from g_suite_plugin.oauth.oauth_client import GoogleTokens  # noqa: E402
 from g_suite_plugin.oauth.token_store import TokenStore, active_ledger_count, credential_ledger, ledger_values  # noqa: E402
-from gsuite_fakes import CLIENT_SECRET, FakeVault, fake_loader  # noqa: E402  # pyright: ignore[reportMissingImports]
+from gsuite_fakes import CLIENT_SECRET, FakeVault, fake_loader  # noqa: E402
 
 PAIR = ("r", "a")
 

@@ -42,6 +42,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ananta.core.runtime.port_manager import write_private_port_file
+
 from .mcp_ingress import ROUTER_IO
 from .router_mgmt import MgmtServer
 from .router_state import (
@@ -114,9 +116,7 @@ def _write_port_discovery_files(
     runtime = runtime_dir or _runtime_dir()
     runtime.mkdir(parents=True, mode=0o700, exist_ok=True)
     for name in (f"{solet}.router.port", f"{solet}.bridge.port"):
-        path = runtime / name
-        path.write_text(str(port), encoding="utf-8")
-        path.chmod(0o600)
+        write_private_port_file(runtime / name, port)
 
 
 def _split_header_line(raw: bytes) -> tuple[bytes, bytes, str, str] | None:
@@ -601,15 +601,15 @@ async def _bridge_port_watchdog(
     the canonical
     ``<name>.bridge.port`` empty with no convergent re-write. The
     watchdog ticks every 5s and re-materializes both files via
-    ``Path.write_text`` — idempotent on the happy path, convergent
+    ``write_private_port_file`` — idempotent on the happy path, convergent
     against an empty/missing file inside one tick window.
 
-    Writes directly bypass ``port_manager.write_port_file`` because the
-    latter raises ``ValueError`` on ``service_name='bridge'`` by design
-    (the regression guard at ``port_manager.py:164-171``); the router
-    owns the bridge port file, so the watchdog is the legitimate caller
-    that bypasses the guard via the same direct-write path
-    ``_write_port_discovery_files`` already uses.
+    Writes bypass ``port_manager.write_port_file`` because the latter
+    raises ``ValueError`` on ``service_name='bridge'`` by design (the
+    regression guard in that function); the router owns the bridge port
+    file, so the watchdog is the legitimate caller that bypasses the
+    guard, through the same private-write helper
+    ``_write_port_discovery_files`` uses.
     """
     while True:
         await asyncio.sleep(interval)

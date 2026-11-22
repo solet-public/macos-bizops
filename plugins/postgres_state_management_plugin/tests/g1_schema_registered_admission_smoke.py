@@ -373,12 +373,11 @@ def terminal_uncertainty(harness: Harness) -> None:
 
 
 def declarations(harness: Harness) -> None:
-    for verb in SELECTED:
+    for verb in (*SELECTED, "get_installed_schema"):
         entry = harness.processes[PREFIX + verb]
         assert entry["is_async"] is True and entry["action_blueprint"]["metadata"]["is_async"] is True
         assert set(entry["output"]["properties"]) == {"job_id", "status"}
-    assert harness.processes[PREFIX + "get_installed_schema"]["is_async"] is False
-    print("PASS four real registered receipt schemas; advisory read unchanged")
+    print("PASS five real registered receipt schemas")
 
 
 def main() -> int:
@@ -391,6 +390,8 @@ def main() -> int:
                     if verb == "install_plugin_schema":
                         harness.schemas.initialize_schemas([declaration()])
                         data(harness.state.write_state(NAMESPACE, {"table": "thing", "record": {"kind": "b", "label": "purged fixture row"}}))
+                parked_case(harness, "get_installed_schema")
+                assert harness.final("get_installed_schema", values("get_installed_schema"))["result"]["namespace"] == NAMESPACE
                 lifecycle_cases(harness)
                 ordering_and_direct_calls(harness)
                 failure_cases(harness)

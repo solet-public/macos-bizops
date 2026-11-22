@@ -8,7 +8,7 @@ Article Role: plugin_reference
 
 Article Tags: planning-stage:agent-to-agent-coordination, evidence-category:operator-ruling, domain:agent-messaging, domain:role-binding
 
-Embedding Description: The versioned read of retired fleet role names that project-solet's document and brief guard binds to: exact call, response shape, version semantics, normalization and the fail-closed contract.
+Embedding Description: The versioned read of retired fleet role names, list_retired_roles, that any consumer can cache by version: exact call, response shape, version semantics, normalization and the fail-closed contract.
 
 ## What it is
 
@@ -56,7 +56,7 @@ A successful result's `data` is:
       "role": "Register-Lead",
       "retired_at": "2026-09-28T00:00:00+00:00",
       "retired_by": "iss_bfdb51c1-7a31-443f-b9c9-e15a6bcd7d8c",
-      "reason": "role retired; triage is filed as project-solet register tickets",
+      "reason": "role retired",
       "successor": null,
       "registry_version": 1
     }
@@ -104,7 +104,11 @@ both sides and declare any further rules (for example word boundaries) itself.
 
 `plugin::agent_messaging_plugin::retire_role` takes `name`, `reason`,
 `authority` (the ruling or issue that authorizes it) and an optional
-`successor`. Only a caller holding a primary- or principal-class role may call
-it. It refuses a role that a live session holds until that holder runs
-`peer_release_role`. The result is the new entry, including the registry's new
-`registry_version`.
+`successor`. Any registered caller may call it: roles carry no class and no
+grant or legislation stands behind the call. The appended entry records who
+retired the role as the caller's instance id followed by the authority, and a
+call that carries no caller identity is refused with
+`retire_role_caller_unattributed`, because the entry would have no actor. It
+refuses a role that a live session holds (`role_held_live`) until that holder
+runs `peer_release_role`. The result is the new entry, including the
+registry's new `registry_version`.

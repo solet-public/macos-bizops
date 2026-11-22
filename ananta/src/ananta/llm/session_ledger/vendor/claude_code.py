@@ -105,15 +105,22 @@ class ClaudeCodeSessionMetadata:
       authoritative over ``ai-title`` which is dropped).
     * ``bridge_session_id`` → ``originator_agent_instance_id`` (this IS the
       durable per-bridge UUID, not a label).
+    * ``cwd`` → the session's project identity: the first absolute ``cwd``
+      the transcript records. The project-directory name is a lossy encoding
+      of it (``/`` and ``-`` collide, dots are lost), so consumers prefer
+      this and decode the directory name only when it is ``None``.
 
     A "last-write-wins" precedence applies when multiple lines of the same
     type appear in the file (operator may have ``/rename``-cycled within
-    the session; the most recent value reflects the final state).
+    the session; the most recent value reflects the final state). ``cwd`` is
+    the exception: the FIRST usable value wins, because it is where the
+    session started.
     """
 
     agent_name: str | None = None
     custom_title: str | None = None
     bridge_session_id: str | None = None
+    cwd: str | None = None
 
 
 # Per-metadata-type field name on the JSONL payload.
@@ -124,14 +131,8 @@ _METADATA_PAYLOAD_FIELD: dict[str, str] = {
 }
 
 
-def _parse_metadata_line(stripped: str) -> tuple[str, str] | None:
-    """Return ``(line_type, field_value)`` for a metadata line, else None."""
-    try:
-        data = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(data, dict):
-        return None
+def _parse_metadata_line(data: dict[str, Any]) -> tuple[str, str] | None:
+    """Return ``(line_type, field_value)`` for a parsed metadata line, else None."""
     line_type = data.get("type")
     if not isinstance(line_type, str) or line_type not in _SESSION_METADATA_TYPES:
         return None
@@ -140,6 +141,14 @@ def _parse_metadata_line(stripped: str) -> tuple[str, str] | None:
     if not isinstance(field_value, str) or not field_value:
         return None
     return line_type, field_value
+
+
+def _parse_cwd(data: dict[str, Any]) -> str | None:
+    """Return the line's top-level ``cwd`` when it is a non-empty absolute path."""
+    cwd = data.get("cwd")
+    if isinstance(cwd, str) and cwd.startswith("/"):
+        return cwd
+    return None
 
 
 def read_session_metadata(path: Path) -> ClaudeCodeSessionMetadata:
@@ -154,17 +163,28 @@ def read_session_metadata(path: Path) -> ClaudeCodeSessionMetadata:
 
     Last-write-wins per field — operators who ``/rename`` mid-session leave
     multiple ``agent-name`` lines, and the FINAL value is what reflects the
-    session's current role.
+    session's current role. ``cwd`` is the exception: the FIRST absolute value
+    the transcript records wins (where the session started), and a transcript
+    with none leaves it ``None`` so the caller can flag its fallback.
     """
     if not path.is_file():
         return ClaudeCodeSessionMetadata()
     fields: dict[str, str] = {}
+    cwd: str | None = None
     with path.open("r", encoding="utf-8") as fh:
         for raw_line in fh:
             stripped = raw_line.strip()
             if not stripped:
                 continue
-            parsed = _parse_metadata_line(stripped)
+            try:
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if cwd is None:
+                cwd = _parse_cwd(data)
+            parsed = _parse_metadata_line(data)
             if parsed is None:
                 continue
             line_type, value = parsed
@@ -173,6 +193,7 @@ def read_session_metadata(path: Path) -> ClaudeCodeSessionMetadata:
         agent_name=fields.get("agent-name"),
         custom_title=fields.get("custom-title"),
         bridge_session_id=fields.get("bridge-session"),
+        cwd=cwd,
     )
 
 

@@ -30,10 +30,10 @@ _BRIDGE_VERBS = (
     "peer_list",
     "peer_mark_role_covered",
     "peer_role_read_receipts",
+    "peer_send",
     "peer_send_by_name",
     "post_message",
     "retire_role",
-    "send_peer_message",
     "set_autonomic_slot",
     "start_interface",
 )
@@ -49,7 +49,7 @@ INTERFACE_VERBS = (
     | frozenset(("macos_coding_agent_session_plugin", verb) for verb in _MACOS_VERBS)
     | {
         ("agent_messaging_plugin", "peer_role_read_receipts"),
-        ("agent_messaging_plugin", "read_unit_usage"),
+        ("agent_messaging_plugin", "read_label_usage"),
     }
 )
 
@@ -128,13 +128,13 @@ def _managed_rows(context: CensusContextView) -> dict[str, str]:
 
     state = cast(Any, context.get_service("state_service"))
     seeded = {"agent_instance_id": "agi-3a99b943722941aca0ac8243261cab96", "agent_session_id": "ases-893d793ef62b4c619a972d98d697f485", "since": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(), "until": datetime.now(UTC).isoformat()}
-    insert_managed_session(state, ManagedSessionSpec(agent_instance_id=seeded["agent_instance_id"], lane_id="census-local", assignment=None, work_class="analysis_deliverable", budget_line="census", host="synthetic", provisioning_mode="synthetic_no_process", agent_runtime="codex"))
+    insert_managed_session(state, ManagedSessionSpec(agent_instance_id=seeded["agent_instance_id"], host="synthetic", session_origin="synthetic", agent_runtime="codex"))
     result = state.update_state("agent_messaging_plugin", {"table": "managed_session", "filters": {"agent_instance_id": seeded["agent_instance_id"]}}, {"agent_session_id": seeded["agent_session_id"]})
     if result.get("action_status") != "completed":
         raise RuntimeError(f"managed identity seed failed: {result}")
-    for verb in ("clear_session", "compact_session", "drive_session", "retire_session", "terminate_session", "retire_completed_lane_sessions"):
+    for verb in ("clear_session", "compact_session", "drive_session", "retire_session", "terminate_session"):
         instance_id = f"agi-census-{verb}"
-        insert_managed_session(state, ManagedSessionSpec(agent_instance_id=instance_id, lane_id="census-local", assignment=None, work_class="analysis_deliverable", budget_line="census", host="synthetic", provisioning_mode="synthetic_no_process", agent_runtime="codex"))
+        insert_managed_session(state, ManagedSessionSpec(agent_instance_id=instance_id, host="synthetic", session_origin="synthetic", agent_runtime="codex"))
         transition_lifecycle_state(state, agent_instance_id=instance_id, from_state="spawning", to_state="live", directed_by="census", reason="owned no-process target")
         seeded[verb] = instance_id
     authorization = record_accepted_authorization(state, {"requesting_peer": "census", "owed_by_role": "census", "branch_or_request_ref": "census", "authorizing_message_id": "census-owned-message", "act": "inspect scratch", "predicate": "owned fixture", "actor": "census", "reason": "fixture setup"})
@@ -161,7 +161,7 @@ def _managed_rows(context: CensusContextView) -> dict[str, str]:
 
 def handler_state(plugin: str, verb: str, state: dict[str, object], seeded: Mapping[str, str]) -> dict[str, object]:
     """Use the platform's public server-side identity constructors, not args."""
-    authenticated = {"resolve_caller_provenance", "report_managed_dispatch", "preserve_lane_evidence", "provision_role_session", "qualify_fleet", "read_lane_evidence", "set_model_catalog_policy", "set_model_catalog_source", "set_model_cells_enabled", "resolve_managed_dispatch", "dispatch_managed_work", "spawn_session"}
+    authenticated = {"resolve_caller_provenance", "qualify_fleet", "set_model_catalog_policy", "set_model_catalog_source", "set_model_cells_enabled", "spawn_session"}
     if plugin != "agent_messaging_plugin" or verb not in authenticated:
         return state
     from ananta.core.services.call_context import CallContext
@@ -183,8 +183,6 @@ def _managed_parameters(verb: str, params: dict[str, object], seeded: Mapping[st
         "provider": "openai",
         "kind": "policy",
         "trigger": "manual",
-        "role_class": "principal",
-        "work_class": "analysis_deliverable",
         "status": "working",
         "captured_at": now,
         "retired_at": now,
@@ -216,19 +214,17 @@ def _managed_parameters(verb: str, params: dict[str, object], seeded: Mapping[st
         "check_choreography_job_status": {"job_id": seeded["job_id"]},
         "reinforce_by_slug": {"slug": seeded["memory_slug"]},
         "retire_held_authorization": {"entry_id": seeded["held_authorization_id"]},
-        "retire_completed_lane_sessions": {"agent_instance_ids": [seeded["retire_completed_lane_sessions"]]},
-        "read_unit_usage": {"agent_instance_id": seeded["agent_instance_id"]},
+        "read_label_usage": {"agent_instance_id": seeded["agent_instance_id"]},
         "record_allowance_pool_reading": {"profile_id": "anthropic-max-20x-2026-08-22", "pool_id": "rolling-five-hour", "consumed": 10.0, "remaining": 90.0, "as_of": seeded["since"], "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
         "retract_allowance_pool_reading": {"profile_id": "anthropic-max-20x-2026-08-22", "pool_id": "rolling-five-hour"},
         "arrest_gauge_canary": {"arrest_from": seeded["since"], "arrest_until": (datetime.now(UTC) + timedelta(hours=1)).isoformat(), "expected_notice_type": "gauge_stale_notice"},
-        "register_synthetic_session": {"lane_id": "ledger-lane", "report_by_seconds": 300},
-        "spawn_session": {"working_directory": str(home), "role_class": "ephemeral"},
-        "dispatch_managed_work": {"working_directory": str(home), "role_class": "ephemeral"},
+        "register_synthetic_session": {"report_by_seconds": 300},
+        "spawn_session": {"agent_runtime": "codex", "workspace": str(home), "first_message": "census probe"},
     }
     if verb == "get_authorization_history":
         result.pop("entry_id", None)
-    if verb == "read_unit_usage":
-        result.pop("unit_id", None)
+    if verb == "read_label_usage":
+        result.pop("label", None)
     result.update(additions.get(verb, {}))
     if verb in seeded:
         result["agent_instance_id"] = seeded[verb]
@@ -247,8 +243,8 @@ def _interface_parameters(plugin: str, verb: str, params: dict[str, object], see
     result = dict(params)
     if (plugin, verb) not in INTERFACE_VERBS:
         return result
-    if plugin == "agent_messaging_plugin" and verb == "read_unit_usage":
-        result.pop("unit_id", None)
+    if plugin == "agent_messaging_plugin" and verb == "read_label_usage":
+        result.pop("label", None)
         result["agent_instance_id"] = "agi-census-fixture"
     elif plugin == "agent_messaging_plugin" and verb == "peer_role_read_receipts":
         result.update(agent_session_id="ases-census-fixture", candidates=[])

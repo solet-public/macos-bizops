@@ -38,13 +38,26 @@ not recognised as additive is treated as breaking:
   tightened nullability (nullable → ``NOT NULL``), a new ``NOT NULL``
   column without a default, a primary-key change, a newly-added unique
   constraint.
+
+Declared retirement (does NOT block; reported as an advisory): a table that
+is absent from the new tables AND named in the NEW snapshot's retired list
+(``SchemaDefinition.retired_tables``, carried under the top-level
+:data:`RETIRED_TABLES_KEY`). A rolled-back binary that still declares the
+table recreates it empty and nothing reads it, so the removal is safe. Every
+other removal stays breaking: the retired name must be in the new snapshot,
+under the same namespace, and the table must really be gone from it. The
+classifier does not enforce the data-integrity ordering — the release before
+the drop keeps the table declared and no code reads it; the drop ships one
+deploy later — that ordering is enforced by what the operator deploys, and
+the advisory says so where the operator reads it. A snapshot without the key
+(an old ``VERSION`` or a schema that retires nothing) behaves as before.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 from ananta.types.schema_types import SchemaDefinition
 
@@ -56,6 +69,12 @@ ATTR_HAS_DEFAULT: Final[str] = "has_default"
 ATTR_PRIMARY_KEY: Final[str] = "primary_key"
 ATTR_UNIQUE: Final[str] = "unique"
 
+# Top-level snapshot key: ``namespace -> sorted retired table names``. Present
+# only when some namespace retires a table, so a snapshot of a tree that retires
+# nothing is byte-identical to one built before the key existed. Not a namespace;
+# the classifier reads it separately and never diffs it.
+RETIRED_TABLES_KEY: Final[str] = "__retired_tables__"
+
 # Change-kind tokens for the breaking-change records.
 KIND_NAMESPACE_REMOVED: Final[str] = "namespace_removed"
 KIND_TABLE_REMOVED: Final[str] = "table_removed"
@@ -65,6 +84,9 @@ KIND_NULLABILITY_TIGHTENED: Final[str] = "column_nullability_tightened"
 KIND_NOT_NULL_NO_DEFAULT_ADDED: Final[str] = "not_null_column_without_default_added"
 KIND_PRIMARY_KEY_CHANGED: Final[str] = "column_primary_key_changed"
 KIND_UNIQUE_ADDED: Final[str] = "column_unique_constraint_added"
+# Advisory (non-breaking): a table the new snapshot declares retired.
+KIND_TABLE_RETIRED: Final[str] = "table_retired"
+RETIRED_ORDERING_NOTE: Final[str] = "the classifier does not check ordering: the release before the drop must keep the table declared with no code reading it, and the drop ships one deploy later"
 # B1 fail-closed: the candidate carries NO snapshot in steady state (a current
 # snapshot exists) — the producer failed, so the change cannot be certified
 # rollback-safe and the deploy is refused (NOT treated as additive).
@@ -114,24 +136,29 @@ class PreflightVerdict:
     least one non-additive change was found (the deploy must be refused
     or explicitly overridden by the operator). ``breaking_changes`` lists
     every non-additive difference for the operator-facing report.
+    ``retired_removals`` lists tables the new snapshot declares retired
+    (advisory, never blocking).
     """
 
     is_additive: bool
     breaking_changes: tuple[SchemaChange, ...]
+    retired_removals: tuple[SchemaChange, ...] = ()
 
     def summary(self) -> str:
         if self.is_additive:
-            return "schema diff is additive (rollback-safe)"
-        lines = "\n".join(f"  - {c.describe()}" for c in self.breaking_changes)
-        return (
-            f"schema diff has {len(self.breaking_changes)} non-additive "
-            f"change(s) (rollback-UNSAFE):\n{lines}"
-        )
+            text = "schema diff is additive (rollback-safe)"
+        else:
+            lines = "\n".join(f"  - {c.describe()}" for c in self.breaking_changes)
+            text = f"schema diff has {len(self.breaking_changes)} non-additive change(s) (rollback-UNSAFE):\n{lines}"
+        if self.retired_removals:
+            advisory = "\n".join(f"  - {c.describe()}" for c in self.retired_removals)
+            text += f"\nADVISORY: {len(self.retired_removals)} declared table retirement(s) accepted ({RETIRED_ORDERING_NOTE}):\n{advisory}"
+        return text
 
 
 def schemas_to_snapshot(
     schemas: Mapping[str, SchemaDefinition],
-) -> dict[str, dict[str, dict[str, dict[str, object]]]]:
+) -> dict[str, Any]:
     """Reduce typed ``SchemaDefinition``s to the canonical comparable snapshot.
 
     Keyed ``namespace → table → column → attrs``. Only the attributes
@@ -139,7 +166,7 @@ def schemas_to_snapshot(
     JSON-able, and stable across cosmetic edits (descriptions, index
     tuning, sensitivity) that do not affect data compatibility.
     """
-    snapshot: dict[str, dict[str, dict[str, dict[str, object]]]] = {}
+    snapshot: dict[str, Any] = {}
     for namespace, schema in schemas.items():
         tables: dict[str, dict[str, dict[str, object]]] = {}
         for table_key, table in schema.tables.items():
@@ -155,6 +182,9 @@ def schemas_to_snapshot(
                 }
             tables[table_key] = columns
         snapshot[namespace] = tables
+    retired = {namespace: sorted(schema.retired_tables) for namespace, schema in schemas.items() if schema.retired_tables}
+    if retired:
+        snapshot[RETIRED_TABLES_KEY] = retired
     return snapshot
 
 
@@ -168,29 +198,69 @@ def classify_snapshot_diff(
     not a recognised additive shape is recorded as a breaking change.
     """
     breaking: list[SchemaChange] = []
+    retired: list[SchemaChange] = []
+    retired_by_namespace = _retired_names(new)
     for namespace in old:
-        if namespace not in new:
-            breaking.append(SchemaChange(
-                kind=KIND_NAMESPACE_REMOVED, namespace=namespace,
-                table=None, column=None,
-                detail="namespace (and its tables) no longer declared",
-            ))
+        if namespace == RETIRED_TABLES_KEY:
             continue
-        breaking.extend(_diff_namespace(namespace, old[namespace], new[namespace]))
+        if namespace not in new:
+            breaking.append(
+                SchemaChange(
+                    kind=KIND_NAMESPACE_REMOVED,
+                    namespace=namespace,
+                    table=None,
+                    column=None,
+                    detail="namespace (and its tables) no longer declared",
+                )
+            )
+            continue
+        for change in _diff_namespace(namespace, old[namespace], new[namespace]):
+            declared = change.kind == KIND_TABLE_REMOVED and change.table in retired_by_namespace.get(namespace, ())
+            if declared:
+                retired.append(
+                    SchemaChange(
+                        kind=KIND_TABLE_RETIRED,
+                        namespace=namespace,
+                        table=change.table,
+                        column=None,
+                        detail="table declared retired in the new release",
+                    )
+                )
+            else:
+                breaking.append(change)
     # Added namespaces are additive — not inspected.
-    return PreflightVerdict(is_additive=not breaking, breaking_changes=tuple(breaking))
+    return PreflightVerdict(
+        is_additive=not breaking,
+        breaking_changes=tuple(breaking),
+        retired_removals=tuple(retired),
+    )
+
+
+def _retired_names(snapshot: SchemaSnapshot) -> Mapping[str, frozenset[str]]:
+    """The new snapshot's retired table names per namespace; empty when it has none."""
+    raw = snapshot.get(RETIRED_TABLES_KEY)
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(namespace): frozenset(str(name) for name in names) for namespace, names in raw.items() if isinstance(names, list | tuple)}
 
 
 def _diff_namespace(
-    namespace: str, old: NamespaceSnapshot, new: NamespaceSnapshot,
+    namespace: str,
+    old: NamespaceSnapshot,
+    new: NamespaceSnapshot,
 ) -> list[SchemaChange]:
     changes: list[SchemaChange] = []
     for table in old:
         if table not in new:
-            changes.append(SchemaChange(
-                kind=KIND_TABLE_REMOVED, namespace=namespace, table=table,
-                column=None, detail="table no longer declared",
-            ))
+            changes.append(
+                SchemaChange(
+                    kind=KIND_TABLE_REMOVED,
+                    namespace=namespace,
+                    table=table,
+                    column=None,
+                    detail="table no longer declared",
+                )
+            )
             continue
         changes.extend(_diff_table(namespace, table, old[table], new[table]))
     # Added tables are additive — not inspected.
@@ -198,19 +268,25 @@ def _diff_namespace(
 
 
 def _diff_table(
-    namespace: str, table: str, old: TableSnapshot, new: TableSnapshot,
+    namespace: str,
+    table: str,
+    old: TableSnapshot,
+    new: TableSnapshot,
 ) -> list[SchemaChange]:
     changes: list[SchemaChange] = []
     for column in old:
         if column not in new:
-            changes.append(SchemaChange(
-                kind=KIND_COLUMN_REMOVED, namespace=namespace, table=table,
-                column=column, detail="column dropped (destructive, irreversible)",
-            ))
+            changes.append(
+                SchemaChange(
+                    kind=KIND_COLUMN_REMOVED,
+                    namespace=namespace,
+                    table=table,
+                    column=column,
+                    detail="column dropped (destructive, irreversible)",
+                )
+            )
             continue
-        changes.extend(
-            _diff_existing_column(namespace, table, column, old[column], new[column])
-        )
+        changes.extend(_diff_existing_column(namespace, table, column, old[column], new[column]))
     for column in new:
         if column not in old:
             change = _classify_added_column(namespace, table, column, new[column])
@@ -220,44 +296,69 @@ def _diff_table(
 
 
 def _diff_existing_column(
-    namespace: str, table: str, column: str,
-    old: ColumnSnapshot, new: ColumnSnapshot,
+    namespace: str,
+    table: str,
+    column: str,
+    old: ColumnSnapshot,
+    new: ColumnSnapshot,
 ) -> list[SchemaChange]:
     """Compare a column present in both snapshots."""
     changes: list[SchemaChange] = []
-    if old.get(ATTR_TYPE) != new.get(ATTR_TYPE) or old.get(ATTR_TYPE_PARAMS) != new.get(
-        ATTR_TYPE_PARAMS
-    ):
-        changes.append(SchemaChange(
-            kind=KIND_COLUMN_TYPE_CHANGED, namespace=namespace, table=table,
-            column=column,
-            detail=f"type {old.get(ATTR_TYPE)!r} → {new.get(ATTR_TYPE)!r}",
-        ))
+    if old.get(ATTR_TYPE) != new.get(ATTR_TYPE) or old.get(ATTR_TYPE_PARAMS) != new.get(ATTR_TYPE_PARAMS):
+        changes.append(
+            SchemaChange(
+                kind=KIND_COLUMN_TYPE_CHANGED,
+                namespace=namespace,
+                table=table,
+                column=column,
+                detail=f"type {old.get(ATTR_TYPE)!r} → {new.get(ATTR_TYPE)!r}",
+            )
+        )
     if not old.get(ATTR_NOT_NULL) and new.get(ATTR_NOT_NULL):
-        changes.append(SchemaChange(
-            kind=KIND_NULLABILITY_TIGHTENED, namespace=namespace, table=table,
-            column=column, detail="nullable → NOT NULL (existing NULL rows break)",
-        ))
+        changes.append(
+            SchemaChange(
+                kind=KIND_NULLABILITY_TIGHTENED,
+                namespace=namespace,
+                table=table,
+                column=column,
+                detail="nullable → NOT NULL (existing NULL rows break)",
+            )
+        )
     if old.get(ATTR_PRIMARY_KEY) != new.get(ATTR_PRIMARY_KEY):
-        changes.append(SchemaChange(
-            kind=KIND_PRIMARY_KEY_CHANGED, namespace=namespace, table=table,
-            column=column, detail="primary-key flag changed",
-        ))
+        changes.append(
+            SchemaChange(
+                kind=KIND_PRIMARY_KEY_CHANGED,
+                namespace=namespace,
+                table=table,
+                column=column,
+                detail="primary-key flag changed",
+            )
+        )
     if not old.get(ATTR_UNIQUE) and new.get(ATTR_UNIQUE):
-        changes.append(SchemaChange(
-            kind=KIND_UNIQUE_ADDED, namespace=namespace, table=table,
-            column=column, detail="unique constraint added (may fail on duplicate rows)",
-        ))
+        changes.append(
+            SchemaChange(
+                kind=KIND_UNIQUE_ADDED,
+                namespace=namespace,
+                table=table,
+                column=column,
+                detail="unique constraint added (may fail on duplicate rows)",
+            )
+        )
     return changes
 
 
 def _classify_added_column(
-    namespace: str, table: str, column: str, new: ColumnSnapshot,
+    namespace: str,
+    table: str,
+    column: str,
+    new: ColumnSnapshot,
 ) -> SchemaChange | None:
     """A new column is additive unless it is ``NOT NULL`` without a default."""
     if new.get(ATTR_NOT_NULL) and not new.get(ATTR_HAS_DEFAULT):
         return SchemaChange(
-            kind=KIND_NOT_NULL_NO_DEFAULT_ADDED, namespace=namespace, table=table,
+            kind=KIND_NOT_NULL_NO_DEFAULT_ADDED,
+            namespace=namespace,
+            table=table,
             column=column,
             detail="new NOT NULL column without default (existing rows cannot satisfy it)",
         )
@@ -265,6 +366,7 @@ def _classify_added_column(
 
 
 __all__ = [
+    "RETIRED_TABLES_KEY",
     "PreflightVerdict",
     "SchemaChange",
     "SchemaSnapshot",

@@ -78,7 +78,7 @@ class SourceSelection:
                 kb_name,
                 ", ".join(unknown),
             )
-        return {path for path in candidates if _matches_include(path.relative_to(kb_dir), include_patterns)}
+        return {path for path in candidates if matches_include(path.relative_to(kb_dir), include_patterns)}
 
 
 def _files_within(root: Path, max_depth: int) -> list[Path]:
@@ -93,8 +93,12 @@ def _files_within(root: Path, max_depth: int) -> list[Path]:
     return found
 
 
-def _matches_include(relative: PurePath, include_patterns: list[str]) -> bool:
-    """Match like ``kb_dir.glob(pattern)`` or ``kb_dir.rglob(pattern)`` would."""
+def matches_include(relative: PurePath, include_patterns: list[str]) -> bool:
+    """Match like ``kb_dir.glob(pattern)`` or ``kb_dir.rglob(pattern)`` would.
+
+    The one include test: the bulk walk applies it to each selected candidate,
+    and ``kb_indexing`` applies it to each file of an explicit list.
+    """
     return any(relative.full_match(pattern) or relative.full_match(f"**/{pattern}") for pattern in include_patterns)
 
 

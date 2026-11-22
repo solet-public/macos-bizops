@@ -8,7 +8,7 @@ Tags: knowledge:tag:plugin_reference, knowledge:tag:agent_messaging, knowledge:t
 
 Article Tags: planning-stage:agent-to-agent-coordination, planning-stage:tool-discovery, evidence-category:peer-messaging-contracts, evidence-category:identity-model, domain:agent-messaging, domain:inter-agent-routing
 
-Embedding Description: How live agent sessions talk through the solet — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the runner-specific Stop-hook contract (Claude can re-wake; stock Codex currently ships no Stop-hook delivery mechanism at all — async command hooks are unsupported on measured stock builds, so the binding was removed rather than left registered-but-dead — see codex-0147-async-hook-regression, 2026-08-13), the unconditional delivery contract (wake is a transport property, not a sender-declared marker — every peer_send is delivery-attempted against the resolved recipient's live binding), the delivery-outcome vocabulary (queued_for_replay / queued_notification / queued_wake / queued_watcher) and the optional "IMPORTANT" prose-emphasis convention that is stripped as cosmetic input hygiene and never branched on, what unconditional delivery means for a watcher-held recipient, drive-on-delivery for a MANAGED session (spawn_session-tracked fleet workers get an extra best-effort nudge through their driver channel alongside the ordinary delivery, including exact stable-session reconciliation for watch registrations), the report_by / sweep_overdue_sessions staleness contract that replaced the retired per-message escalation apparatus, peer_inbox catch-up semantics including how to read your own inbox on demand with NO MCP by calling the registered peer_inbox process with your own stable session id, the two independent inbox cursors and why role-section exhaustion is a null cursor rather than an ok status, whether the role you hold still has a live delivery route attached to its current holder, multi-instance addressing, and Claude Code native-channel wake routing.
+Embedding Description: How live agent sessions talk through the solet — the three identity concepts, the default no-MCP `<name> watch` registered-presence receive pattern (register, claim role, drain inbox, stream events), the runner-specific Stop-hook contract (Claude can re-wake; stock Codex currently ships no Stop-hook delivery mechanism at all — async command hooks are unsupported on measured stock builds, so the binding was removed rather than left registered-but-dead — see codex-0147-async-hook-regression, 2026-08-13), the unconditional delivery contract (wake is a transport property, not a sender-declared marker — every peer_send is delivery-attempted against the resolved recipient's live binding), the delivery-outcome vocabulary (queued_for_replay / queued_notification / queued_wake / queued_watcher) and the optional "IMPORTANT" prose-emphasis convention that is stripped as cosmetic input hygiene and never branched on, what unconditional delivery means for a watcher-held recipient, drive-on-delivery for a MANAGED session (spawn_session-tracked fleet workers get an extra best-effort nudge through their driver channel alongside the ordinary delivery, including exact stable-session reconciliation for watch registrations), the on-demand state reads (fleet_status, session_context_status) that replaced the retired per-message escalation apparatus — nothing watches a session on a clock, marks it overdue or notifies a steward of its silence, peer_inbox catch-up semantics including how to read your own inbox on demand with NO MCP by calling the registered peer_inbox process with your own stable session id, the two independent inbox cursors and why role-section exhaustion is a null cursor rather than an ok status, whether the role you hold still has a live delivery route attached to its current holder, multi-instance addressing, and Claude Code native-channel wake routing.
 
 ## Purpose
 
@@ -41,7 +41,7 @@ behavior:
 | Channel and use | Address | Delivery and reconnect |
 | --- | --- | --- |
 | **Solet peer bridge — durable role or cross-session handoff.** Preferred for fleet/task assignment and any work that must survive a recipient going offline. | Use `peer_send_by_name(name=..., content=...)` (CLI process key `plugin::agent_messaging_plugin::peer_send_by_name`). The role name resolves through this solet-scoped role-binding table at send time. For example: `solet-bridge call plugin::agent_messaging_plugin::peer_send_by_name '{"name":"Coordinator","content":"Please review the fix."}'`. | The message is persisted before delivery is attempted. A role holder without a live route gets `queued_for_replay`; it is available when a holder attaches again. A queued delivery does not prove that a turn started or that the message was read. The role can have a different holder after reconnect, so resolve the current holder when exact ownership matters. |
-| **Solet peer bridge — one selected live instance.** Use when the task is specifically for one session rather than whoever holds a role. | Address with `peer_id` and `peer_agent_instance_id` (CLI process key `plugin::agent_messaging_plugin::send_peer_message`). `peer_list` exposes the instance id and session label, not the stable session id. For a reply, take `peer_agent_session_id` from the reply hint/message meta when present and pass both ids. | The exact `(peer_id, peer_agent_instance_id)` is tried first. Only when it is `peer_unreachable` does routing try the stable session id, and only if that binding's `agent_id` matches `peer_id`. Ordinary MCP instance ids identify one bridge; watcher ids remain stable across watcher reconnects, as described below. A queued result does not prove reading or model activity. |
+| **Solet peer bridge — one selected live instance.** Use when the task is specifically for one session rather than whoever holds a role. | Address with `peer_id` and `peer_agent_instance_id` (the MCP tool `peer_send`; CLI process key `plugin::agent_messaging_plugin::peer_send`, the same name). `peer_list` exposes the instance id and session label, not the stable session id. For a reply, take `peer_agent_session_id` from the reply hint/message meta when present and pass both ids. | The exact `(peer_id, peer_agent_instance_id)` is tried first. Only when it is `peer_unreachable` does routing try the stable session id, and only if that binding's `agent_id` matches `peer_id`. Ordinary MCP instance ids identify one bridge; watcher ids remain stable across watcher reconnects, as described below. A queued result does not prove reading or model activity. |
 | **Runner-native session message — temporary coordination.** Use only when both sessions are already in the same active runner-provided task, team, or conversation and no durable role handoff is needed. | Address with the recipient handle supplied by that native runner context (such as its member name or id). That handle belongs to that runner context; it is not a solet role name and is not portable to another solet or runner. | Follow the native channel's own delivery and acknowledgment contract. This route does not create a solet peer-inbox message or role replay. If the runner task or conversation ends or is recreated, resolve recipients in the new context; use the peer bridge for messages that must survive that boundary. |
 
 The durable-role row is solet-scoped: if another solet also has a
@@ -53,74 +53,6 @@ Here, “runner-native session message” means the runner's own temporary
 session-to-session feature. It is different from the **Claude Code native wake
 adapter** below: that adapter is a delivery path for an already-persisted
 solet peer-bridge message, not a second message-addressing channel.
-
-## Managed-dispatch uptake measurement
-
-`plugin::agent_messaging_plugin::managed_dispatch_uptake_rate` is a stateless,
-read-only query over existing dispatch contracts and append-only event receipts.
-Its uptake proxy is an accepted, assignment-bound, worker-authored ACK for the
-same dispatch and initial attempt. Submission, bridge delivery, heartbeat,
-inbox selection and current active state do not prove uptake. Receipt times
-are observation times, **not first model token timing**.
-
-```bash
-solet-bridge call plugin::agent_messaging_plugin::managed_dispatch_uptake_rate '{"since":"2026-10-18T00:00:00Z","as_of":"2026-10-18T04:00:00Z","window_seconds":300,"sample_size":50,"runtime":"codex","transport":"tmux"}'
-```
-
-`since` is an inclusive aware ISO timestamp for contract creation; `as_of` is
-an inclusive aware receipt cutoff and defaults to the invocation time.
-`window_seconds` defaults to 300 (range 1–86400); `sample_size` defaults to 50
-(range 1–500). Optional `runtime` and `transport` filters use the accepted
-`first-turn:1` payload's `agent_runtime` and `host`, respectively. Here
-transport means the recipient host transport (for example `tmux` or `headless`),
-not the bridge configuration's `mcp`/`cli` transport. Vendor is explicitly
-mapped from that original runtime product (`codex` → `openai`,
-`claude_code` → `anthropic`); an unproved runtime/vendor stays `unknown`.
-Current replacement-session labels are never used as historical evidence.
-
-The query selects the earliest consecutive eligible contracts by
-`(created_at,id)` within `[since,as_of]` before inspecting ACK outcomes. Known
-runtime/transport mismatches are returned in `exclusions`; unknown eligibility
-stays visible in the selected denominator. Failed starts, failed submissions
-and missing records cannot disappear through success filtering. Reads use
-at most 100 rows per page and 100 pages per inventory or dispatch event scan;
-an interrupted, malformed or budget-limited read sets `reads_complete=false`
-and cannot support a qualified SLO. A budget-limited inventory remains partial; it does not authorize changing
-the intended denominator or claiming that the unread rows are absent.
-
-Per-dispatch output includes contract and source row/event IDs, initial
-submission receipt, label provenance, `submitted_at`, `delivered_at`,
-`first_uptake_event_at`, `uptake_event_id`, latency, conversion, maturity and
-reasons/advisories. `delivered_at` is null for a failed submission. The earliest
-valid ACK after initial submission wins once; rejected, wrong-attempt,
-wrong-dispatch and non-worker receipts cannot convert. Later retries remain
-in the evidence but cannot repair or double-count the initial outcome.
-An ACK after `as_of` cannot enter that observation. A contract is mature only
-at initial submission time plus the full window; missing initial timing is
-unknown, including a failed start with no submission receipt.
-
-`conversion_rate` is timely successes divided by **all selected contracts**;
-the response also gives pending, failed and unknown counts and breakdowns by
-transport/runtime/vendor. Pending counts include timely ACKs whose observation
-window is still open. Only an explicitly filtered tmux Codex cohort with
-`sample_size=50`, `window_seconds=300`, 50 mature measurable members and
-complete reads can produce `PASS` (at least 48 timely ACKs) or `FAIL` (47 or
-fewer). Incomplete, pending or unknown cohorts return advisory `PARTIAL` or
-`UNMEASURABLE`; they never block dispatch or unrelated work. Invalid caller
-syntax remains an ordinary input error.
-
-Retain the echoed input cutoff, selected contract IDs and raw receipt IDs for
-replay. They identify read evidence, **not an atomic database snapshot**:
-backdated or newly available receipts may change a later rerun, even with the
-same cutoff. No source history is corrected or mutated; create, update, clear,
-retire, close and reopen do not apply to this derived query.
-
-Synthetic tests verify implementation only. The operating seat separately
-qualifies the next 50 consecutive tmux Codex dispatches after landing and
-deployment, freezes cutoffs/IDs, observes each for 300 seconds and requires at
-least 48 timely initial-attempt ACKs. Insufficient live evidence remains
-`LIVE-SLO-PARTIAL`; it does not close the Feature. This bridge query does
-not implement the historical request for a Project Solet `psolet` CLI verb.
 
 ## Identity model — three distinct concepts
 
@@ -245,8 +177,8 @@ from the CLI alone, keep this running in the background:
 ```
 
 Plain `<name> watch` registers presence under the recorded label without a
-claim. The heartbeat hook stays silent for these sessions, as for any session
-without a fleet ledger row (`report_alive` answers `session_not_found`).
+claim. No hook reports liveness for these sessions; a session without a fleet
+ledger row gets `session_not_found` from `report_alive`.
 Liveness is the peer registration held by the MCP bridge or by `watch`.
 
 ## Attended session without a Claude session id — `<name> attend`
@@ -410,25 +342,26 @@ live bridge queue; emission to the client happens at the forwarder's next drain,
 and whether it becomes a turn is client-side and is NOT confirmed by this field
 (REL-06 honest-return relabel — the platform can only prove "queued", so it says
 "queued"). Transport delivery itself does not prove that a `queued_*`
-delivery entered a turn. The platform's staleness signal is the recipient's
-own `report_by` promise:
-`sweep_overdue_sessions` marks a managed session overdue when it misses that
-deadline, and `_notify_steward_of_overdue` surfaces the miss to its steward.
+delivery entered a turn. Nothing on a clock checks on the recipient either:
+no sweep marks a managed session overdue for missing its `report_by` and no
+notice tells its steward about the silence. `report_by` is a recorded fact,
+and a sender who wants to know whether a recipient is working reads state on
+demand — `fleet_status` for the fleet, `session_context_status` for one session's context gauge.
 Managed Codex recipients additionally have the bounded doorbell/pickup evidence
 described below. Other delivery adapters do not acquire that evidence merely
 from a successful transport return. Never resend a stored message to compensate
 for an unproved wake.
 
-### Current overdue-notice routing (iss_a07c576f-0820-4d53-a3bb-01780bc23e18)
+### No overdue notice and no heartbeat: read state when you choose
 
-`report_by` remains a produced-work promise: a heartbeat never re-arms it.
-The overdue-notice consumer uses the server's `last_heartbeat_at` only for
-routing. A stamp no older than the shipped heartbeat hook's 180-second cadence
-emits a visible, low-priority `session_overdue_quiet_notice` and never uses the
-direct managed-driver wake. A stale or absent heartbeat retains the existing
-`session_overdue_notice` alarm and wake. In both cases the row remains
-`overdue`; this routing is tracked by iss_a07c576f-0820-4d53-a3bb-01780bc23e18
-and does not change `report_by` state.
+No timer, sweep or hook sends a session an overdue notice, a quiet notice or a
+rotation notice, and no hook reports liveness on each tool call. A worker
+declares itself with `report_alive`; a late `report_alive` from a row left in
+the `overdue` state still recovers it. `report_by` stays a recorded
+produced-work promise that no clock enforces: `fleet_status` shows it and
+computes no verdict from silence. A session that wants to know about another
+session reads `fleet_status` or
+`session_context_status` when it needs the answer, and waits for no notice.
 
 The role-addressed durability guarantee is unaffected by any of this: an
 unreachable role holder gets `queued_for_replay`, and the envelope replays
@@ -458,7 +391,7 @@ guaranteed live interrupt. Expectations to plan around:
 - An idle Claude recipient with the re-wake hook may start a turn on delivery.
   An unmanaged Codex TUI has no automatic delivery notice at all right now; it
   must poll `peer_inbox` itself, and gets a fresh unread-coordination reminder
-  only at its next `SessionStart` (startup/resume/`clear`), not per turn. A
+  only at its next `SessionStart` (startup/resume/`clear`/`compact`), not per turn. A
   managed Codex worker is unaffected — it receives an independent
   driver-channel notice from `drive_on_delivery`, which can start its next
   turn regardless of this plugin's hooks. If action is required now and the
@@ -468,9 +401,9 @@ guaranteed live interrupt. Expectations to plan around:
   watcher's long-poll cursor moves past the delivered event (it printed the
   line), the platform stamps the message consumed. There is no per-message
   escalation apparatus watching for a missed consumption anymore (A4 retired
-  it); staleness is caught at the session level instead — `report_by` /
-  `sweep_overdue_sessions` flags a session that has gone quiet against its
-  own promised deadline, independent of any one message.
+  it), and no session-level sweep replaced it: nothing flags a session that
+  has gone quiet. Read `fleet_status` or
+  `session_context_status` on demand instead.
 - The watch client's arm-time catch-up drain (`peer_inbox`) surfaces
   anything that arrived while unwatched the same way live delivery does.
 
@@ -490,24 +423,52 @@ the ordinary delivery attempt (`queued_wake` / `queued_notification` /
 `dispatch_role_send` also resolve the recipient's `managed_session` row and,
 when it is `live`/`idle`/`overdue` with a live driver channel, inject a
 short fixed notice ("delivery waiting … — drain peer_inbox") straight into
-the session's driver channel — `session_lifecycle_verbs.drive_on_delivery`.
+the session's driver channel — `session_lifecycle_verbs.drive_on_delivery` —
+**only when the send did not reach a live channel.** One rule, one table:
+
+| `delivery` of the send | recipient's binding | pane notice | `drive_on_delivery` |
+|---|---|---|---|
+| `queued_wake` | `wake_capable` true, not a watcher | not typed | `driver_not_needed` |
+| `queued_wake` | `wake_capable` false (a provider that ignores the development-channels flag) | typed | as before |
+| `queued_watcher` | watcher (a pull consumer) | typed | as before |
+| `queued_notification` | Codex, streamable | typed, or a doorbell | as before |
+| no live binding | none | no drive | `queued_for_replay` or a loud send failure, as before |
+
+A send reaches a live channel when it is `queued_wake` and the binding
+declares `wake_capable` (a Claude bridge on a live MCP connection with the
+development-channels flag). The session surfaces that message itself, so the
+notice would only repeat it and cost the session a turn; the drive then
+returns `driver_not_needed` with no pickup row and no doorbell, and
+`peer_send_outcome` reads it as `channel_queued` (delivery to the model is
+not observed; do not resend). Two residuals are declared, not fixed: a Claude
+bridge launched without the development-channels flag still declares
+`wake_capable` true, and a direct-send event queued on a bridge that closes
+before it drains is dropped, so the message waits in the inbox (a role send is
+covered by the repair drain).
+
 This is a waker, never a second copy of the message: the durable thread
 entry stays the single source of truth, and the drive never touches
-`report_by` (an inbound nudge extending a worker's report-or-die deadline
-would let a silent worker blind the overdue sweep). The same helper reroutes
-the platform sweep's own dependency-wake and overdue-steward-notice
-deliveries (`session_sweep.py`), so an armed `session_dependency` edge
-firing on a managed waiter, or an overdue worker's managed steward, get the
-same nudge.
+`report_by` (an inbound nudge must not extend a worker's recorded report
+deadline, which would hide its silence from `fleet_status`). The same helper
+reroutes the platform sweep's own dependency-wake deliveries
+(`session_sweep.py`), so an armed `session_dependency` edge firing on a
+managed waiter gets the same nudge.
 
-**Scope, stated honestly:** this covers managed sessions only. A
-non-managed session — an ordinary operator-launched one (the seat,
-Git-Controller, any session never spawned through `spawn_session`) — has no
-`managed_session` row, so `drive_on_delivery` no-ops silently for it every
-time. Everything in the "watcher-held recipient" section above is
-completely unaffected: an operator-hosted recipient keeps exactly the same
-no-waker property it always had. Do not assume a `queued_wake` to a
-non-managed session gets any extra push — it does not, by design.
+**Scope, stated honestly:** this covers sessions that have a
+`managed_session` row, and a row does not require `spawn_session`. A session
+that has no row at all — never registered through the operator path and never
+spawned — reads `not_managed`, and `drive_on_delivery` does nothing for it. A
+hand-launched operator-path Claude seat is different: registration gives it a
+row (`session_origin` `registered`) and, when its tmux pane
+is found, a tmux `host_ref`, so it is eligible and follows the one rule above:
+skipped (`driver_not_needed`) when its channel carried the message, driven
+when it is a watcher. Only the degenerate operator host with no verified pane
+has no driver channel and reads `driver_unavailable`; its durable mail waits
+for its next inbox read, and nothing is typed into it. Everything in the
+"watcher-held recipient" section above is unaffected by this section: a
+watcher's `queued_watcher` send did not reach a live channel, so its notice is
+typed when it has a row and a driver channel, and otherwise it keeps the
+no-waker property it always had.
 
 ## peer_inbox semantics
 
@@ -752,11 +713,13 @@ causal history. Message bodies remain exclusively in the existing direct or
 role inbox. Both schemas are declared through `get_schema_definitions` and
 installed through the state-management service; no separate migration runs.
 
-`driver_scheduled` proves executor admission only. Both direct and role sender
-receipts expose `send_status=stored_wake_pending`: durable mail is stored, the
-driver is merely scheduled, and wake confirmation and turn start remain
-unconfirmed. Do not resend the stored message. `stored_no_wake` still describes
-the existing watcher/replay cases where no driver was scheduled.
+`driver_scheduled` and `driver_pending` prove executor admission only. Both direct
+and role sender receipts expose `send_status=stored_not_delivered_yet`: the mail is
+stored, but nothing has reached the recipient's pane yet. The receipt's `outcome_read`
+names `plugin::agent_messaging_plugin::peer_send_outcome`, which states whether a
+wake was typed, whether the message was not delivered, or whether the recipient has
+read it. Do not resend the stored message. `stored_no_wake` still describes the
+existing watcher/replay cases where no driver was scheduled.
 
 Pane submission is confirmed only by an empty composer (`driver_sent`) or a
 new active turn (`driver_turn_observed`); neither proves inbox uptake. If the
@@ -783,6 +746,17 @@ explicit verbs `clear_session`, `compact_session` and `drive_session` report the
 same cause as `driver_delivery_failed`. Once a send does happen, the existing
 verification and its no-re-send rule are unchanged.
 
+The first turn of a generic `spawn_session` on the `claude_code` runtime and
+`tmux` host is not a driver notice and does not use the empty-composer boundary.
+The host puts the `first_message` on the `claude` command line as its launch prompt,
+after `--`, and the CLI submits it itself once it is ready, so a
+session that starts slowly still receives it. There `first_turn_delivered=true`
+means the text was handed to the host at launch; it is a receipt, not proof
+that the model read it. The Codex tmux host and the headless hosts keep the
+driver channel. A first message of about one megabyte or more fails the launch
+loudly with `host_cannot_spawn`; messages up to at least 693 KB were launched
+with identical bytes.
+
 The finished drive records
 submission separately from a live busy-status observation (`driver_turn_observed`).
 Neither proves an inbox read or task completion. An exact message id returned
@@ -792,7 +766,7 @@ and `role_entries` contribute exact returned ids, and a partial/error role
 section never substitutes for a direct-section read. Continue both independent
 cursors to finish the merged drain.
 
-Claude retains the single original first doorbell: one native send of
+When a send did not reach a live channel (the rule and table in "What unconditional delivery means for a MANAGED session"), Claude retains the single original first doorbell: one native send of
 `delivery waiting from <sender> — drain peer_inbox`, including the existing
 parked-composer interrupt when applicable. Its pickup record is claimed with
 a versioned CAS before that input, so duplicates, a restart, an explicit retry,
@@ -817,10 +791,10 @@ exact returned id from the current recipient's nonobserver inbox read, supplied
 by the existing tracking service. Current role resolution follows a successor
 without rewriting the original route; the old holder, an observer, an empty
 page, or an unrelated id cannot settle successor mail. Unknown telemetry never
-rejects durable mail or a recipient read. Legacy automatic notices from the
-overdue, dependency and rotation riders retain their durable notification
-contract; their shared `drive_on_delivery` boundary avoids additional Claude
-input while addressed pickup remains pending. The fixed first-doorbell
+rejects durable mail or a recipient read. The automatic dependency-wake notice
+from the platform sweep retains its durable notification contract; its shared
+`drive_on_delivery` boundary avoids additional Claude input while addressed
+pickup remains pending. No overdue or rotation notice exists. The fixed first-doorbell
 regressions remain in the unchanged sweep and diagnostic smokes.
 
 The Codex doorbell uses fixed wording and hash references, never a peer body or
@@ -913,7 +887,8 @@ records `pending_retry_limit`, never message loss or successful uptake. Queue
 saturation and unavailable drivers retain mail and a truthful pending/failure
 outcome. `stored_no_wake` still means stored: never resend the message.
 
-Read the existing `plugin::agent_messaging_plugin::session_status` for the
+For one message, read `plugin::agent_messaging_plugin::peer_send_outcome` with its
+`message_id`. Read the existing `plugin::agent_messaging_plugin::session_status` for the
 recipient. Its `delivery_pickup` field reports recent current projections and
 versioned history, with explicit scan bounds and `next_history_version`.
 The bounded view is evidence of those exact ids, never a complete inbox census.
@@ -985,22 +960,22 @@ collects the fresh, read-only report. Poll
 response envelope and its `data` holds the report. Collection failures retain
 the original error under the terminal error payload. Job creation and progress
 write only the existing job ledger; the observed session ledger is unchanged.
-The same collector rides the existing
-bridge lifecycle sweep (configurable `bridge_sweep_interval_seconds`, shipped
-default 300 seconds). A separately guarded rider logs its timestamped report;
-an observer fault emits an advisory and leaves the existing riders running.
-It adds no timer, cache, schema, host adoption or session action.
+The collector runs on demand. It adds no timer, cache, schema, host adoption
+or session action.
 
 The ledger reads use `StateManagementInterface`, separate `host=tmux` and
 `host=operator` filters, and `(created_at, id)` cursors with pages of at most
 100 rows. Each host has a 250-row budget, for at most 500 ledger rows per
 observation, including terminal rows. `ledger_sources` records read boundaries,
 status, row counts, completeness and a continuation cursor when unfinished.
-One argv-only `tmux list-panes -a -F` census records only session id/name,
-pane id/pid/dead/current-command. It has a five-second timeout, at most 2,000
-retained pane rows and 262,144 retained output bytes. Output is spooled to a
-private temporary file rather than captured into an unbounded memory buffer;
-excess metadata is reported as incomplete. The observer reads no pane text,
+The observer asks tmux only about distinct nonempty host references held by
+the solet's own records. Each argv-only `tmux list-panes -t =NAME: -F` probe
+uses `pane_target` for an exact session name and records only session id/name,
+pane id/pid/dead/current-command. Each probe has a five-second timeout and
+retains at most 262,144 output bytes; the combined inventory retains at most
+2,000 pane rows. Excess metadata is reported as incomplete. With no recorded
+references, no tmux probe runs. The observer lists no other host session, so a
+native session no record names is not seen or reported. It reads no pane text,
 command arguments, environment, credentials or coding-agent history.
 
 Joins require an exact `host_ref` match to a native session id or name and an
@@ -1011,14 +986,17 @@ only native process presence. All-dead joined sessions report
 metadata. Invalid or missing dead flags yield `probe_unknown`.
 `terminal_ledger_pane_present`, `duplicate_host_ref` and `host_ref_missing`
 retain the ledger row and exact native evidence rather than repairing identity.
-Operator rows without a trustworthy reference remain unresolved. Native-only
-sessions report `unbound_tmux` and `scope_unknown`; no solet ownership is inferred
-from a label, role, PID or instance suffix.
+Operator rows without a trustworthy reference remain unresolved. A reference
+that cannot be an exact session name yields `probe_unknown` without a host
+probe. Ownership is established by the solet's own records, rather than
+inferred from a label, role, PID or instance suffix.
 
-`ledger_tmux_missing` requires complete valid native and ledger observations.
-A successful complete empty census exercises that outcome; timeout, nonzero
-exit, malformed metadata and read failures never mean absence. Incomplete
-coverage reports `partial_coverage` and preserves source status and cursors.
+`ledger_tmux_missing` requires definitive absence for that reference and a
+complete ledger read, with complete valid native coverage. A successful empty
+probe, or exit 1 beginning with `can't find session`, `error connecting to` or
+`no server running`, establishes that absence. Other exits, timeouts, malformed
+metadata and read failures yield unknown evidence. Incomplete coverage reports
+`partial_coverage` and preserves source status and cursors.
 The reads are timestamped sequential snapshots, **not an atomic snapshot**;
 a pane may disappear between them. Neither presence, absence, heartbeat nor a
 queued/read/initially acknowledged message proves death, busy/idle state,
@@ -1032,42 +1010,3 @@ close or reopen, and no optimistic write premise. Historical readback is the
 retained timestamped report/log; a fresh observation corrects the current
 picture without changing earlier observations. The fixture-only smoke is
 `plugins/agent_messaging_plugin/tests/ledger_tmux_reconciliation_smoke.py`.
-
-
-### Causal managed-dispatch Unit observations
-
-A winning failed first-turn submission appends an `uptake_uncertain` Unit
-observation; a winning current-attempt host-death transition appends
-`worker_lost`. Both use the existing `managed-dispatch-link/v2` native writer.
-They run after the dispatch CAS and its causal `first_turn` or `host_dead`
-event. The observation binds prior/transition versions, causal event ID,
-dispatch, Unit, assignment digest, worker and attempt from that transition's
-local snapshot, even if a concurrent retry has already replaced the projection.
-
-The prelaunch CAS retains `annotation_source` inside `attempt_receipt`.
-It records the authenticated initiating instance, session, role and lane.
-This is historical source attribution: the source did not necessarily perform
-the later liveness probe. A source-only receipt is a reservation, not a
-completed launch. Duplicate reserved requests refuse through the existing
-pending-launch rule. Retained-host owner recovery preserves the original
-attempt/source and existing owner refusals; an incremented retry captures its
-actual authenticated initiator, including a legitimate coordinator successor.
-Launcher receipt merging cannot overwrite the source. Existing first-turn and
-spawned/failed-start evidence retains it for history.
-
-The configured register client reaches fresh and retained first turns and the
-periodic plugin sweep explicitly. Stale workers, terminal rows, duplicate
-delivery and CAS losers append no observations. Missing, malformed or
-mismatched provenance, unavailable clients and native refusals (including a
-retired historical actor) produce `register_annotation_failed` with source
-identity and precise error detail. They preserve the dispatch transition and
-original submission/liveness error, without choosing another actor or retrying
-the native write. Legacy rows receive an audit rather than invented provenance.
-
-These are append-only observations, read through existing Unit event history.
-Correction and withdrawal append targeted events and retain originals.
-Assignment correction remains cancel plus a new dispatch; snapshots are
-immutable per attempt. There is a best-effort cross-database crash gap between
-the dispatch CAS/event and native observation; exactly-once crash recovery is
-not provided. Client doubles test argv and response boundaries, not the actual
-native parser, actor resolver or PostgreSQL lifecycle.

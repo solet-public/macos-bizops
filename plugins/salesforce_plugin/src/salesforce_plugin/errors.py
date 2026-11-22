@@ -79,10 +79,12 @@ class SalesforceCliCallError(Exception):
     no driver anymore).
     """
 
-    def __init__(self, error_code: str, detail_message: str) -> None:
+    def __init__(self, error_code: str, detail_message: str, actions: tuple[str, ...] = ()) -> None:
         super().__init__(detail_message)
         self.error_code = error_code
         self.detail_message = detail_message
+        # The CLI's own recommended next steps from its --json error envelope.
+        self.actions = actions
 
 
 def classify_salesforce_error(exc: Exception) -> tuple[str, str]:

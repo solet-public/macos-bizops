@@ -215,12 +215,8 @@ def _seat_row(state: StateManagementInterface, instance: str, session: str) -> d
         state,
         ManagedSessionSpec(
             agent_instance_id=instance,
-            lane_id="channel-absent-seat",
-            assignment=None,
-            work_class="operator_seat",
-            budget_line="operator",
             host=OPERATOR_HOST,
-            provisioning_mode="operator_existing_checkout",
+            session_origin="registered",
             agent_runtime="claude_code",
             role_name=_ROLE,
             spawned_by_role="operator",

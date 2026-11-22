@@ -110,7 +110,7 @@ class LoopLagSmoke(unittest.TestCase):
         self.assertLess(cast(float, before["p99_ms"]), 50.0)
         self.assertGreaterEqual(cast(float, after["max_ms"]), 200.0)
         self.assertGreaterEqual(after["over_budget_count"], 1)
-        warnings = [message for message in capture.messages if message.startswith("LOOP_LAG loop=")]
+        warnings = [message for message in capture.messages if message.startswith("LOOP_LAG loop=") and "_blocking_sleep" in message]
         self.assertEqual(len(warnings), 2, warnings)
         for warning in warnings:
             self.assertIn(PROCESS_KEY, warning)

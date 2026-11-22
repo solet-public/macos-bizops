@@ -1,0 +1,1 @@
+plugins/postgres_state_management_plugin/tests/retired_tables_smoke.py

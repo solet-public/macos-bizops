@@ -23,10 +23,13 @@ Plus the two conditions Dawn's Q2 ruling attached to landing this gate:
       the claimant's own live ``peer_binding`` row) still produces a correct
       session_role_claim row keyed on the FILLED value — the zero-regression
       claim gets MEASURED here, not asserted.
-  (d) the §3.1 reserved-mint guard: a FRESH mint of a ``<solet>-Main``
-      shape name is refused ``reserved_role_name``; an ALREADY-legislated one
-      (a pre-existing role row) claims normally — enforce-by-class, never
-      class-assignment (Dawn ruling Q1).
+  (d) the first claim of a ``<solet>-Main`` shape name (no role row yet) is an
+      ordinary claim: it lands, and a second session claiming the same name
+      displaces it like any other role. A name whose role row already
+      exists (a pre-existing role row) still claims normally.
+  (e) the ``sys:`` keyspace gate is untouched: a general claim of a declared
+      session-filled slot and of an undeclared ``sys:`` name is still refused
+      ``system_slot_claim_denied`` and leaves no claim row behind.
 
 TRUST-MODEL HONESTY (Dawn ruling): every "displaces" / "refuses" assertion
 below is genuine only against an HONESTLY-IDENTIFIED session — this smoke
@@ -94,7 +97,9 @@ def _state() -> StateManagementInterface:
 
 def _fresh_peer_registry() -> PeerRegistry:
     store = open_store(
-        get_peer_binding_schema(), namespace=PEER_BINDING_NAMESPACE, backend="in_memory",
+        get_peer_binding_schema(),
+        namespace=PEER_BINDING_NAMESPACE,
+        backend="in_memory",
     )
     return PeerRegistry(bindings_store=store)
 
@@ -141,8 +146,11 @@ def _claim(
 def test_displacer_delete_disabled_branch_iii_repairs() -> None:
     state = _state()
     result = _claim(
-        state, name="Claude-C", agent_id="claude_code",
-        agent_instance_id="agi-loser", agent_session_id="ases-loser",
+        state,
+        name="Claude-C",
+        agent_id="claude_code",
+        agent_instance_id="agi-loser",
+        agent_session_id="ases-loser",
     )
     _check(
         getattr(result, "action", None) in ("claimed", "updated"),
@@ -155,8 +163,11 @@ def test_displacer_delete_disabled_branch_iii_repairs() -> None:
     )
     try:
         displaced = _claim(
-            state, name="Claude-C", agent_id="claude_code",
-            agent_instance_id="agi-winner", agent_session_id="ases-winner",
+            state,
+            name="Claude-C",
+            agent_id="claude_code",
+            agent_instance_id="agi-winner",
+            agent_session_id="ases-winner",
         )
     finally:
         role_claim_module.delete_session_role_claim_if_still_holds = original_delete
@@ -174,13 +185,15 @@ def test_displacer_delete_disabled_branch_iii_repairs() -> None:
     # branch (iii) rather than raising cardinality_conflict — proving
     # resilience when the displacer's delete never fired.
     repaired = _claim(
-        state, name="Claude-C-Backup-Lane", agent_id="claude_code",
-        agent_instance_id="agi-loser", agent_session_id="ases-loser",
+        state,
+        name="Claude-C-Backup-Lane",
+        agent_id="claude_code",
+        agent_instance_id="agi-loser",
+        agent_session_id="ases-loser",
     )
     _check(
         not isinstance(repaired, RoleClaimFailure),
-        f"(a) branch (iii) self-repairs the loser's next claim (not a "
-        f"cardinality_conflict) — got {repaired!r}",
+        f"(a) branch (iii) self-repairs the loser's next claim (not a cardinality_conflict) — got {repaired!r}",
     )
     healed_row = _own_row(state, "ases-loser")
     _check(
@@ -192,12 +205,18 @@ def test_displacer_delete_disabled_branch_iii_repairs() -> None:
 def test_clean_displacement_delete_fires_immediately() -> None:
     state = _state()
     _claim(
-        state, name="Coordinator-Dawn", agent_id="claude_code",
-        agent_instance_id="agi-loser2", agent_session_id="ases-loser2",
+        state,
+        name="Coordinator-Dawn",
+        agent_id="claude_code",
+        agent_instance_id="agi-loser2",
+        agent_session_id="ases-loser2",
     )
     displaced = _claim(
-        state, name="Coordinator-Dawn", agent_id="claude_code",
-        agent_instance_id="agi-winner2", agent_session_id="ases-winner2",
+        state,
+        name="Coordinator-Dawn",
+        agent_id="claude_code",
+        agent_instance_id="agi-winner2",
+        agent_session_id="ases-winner2",
     )
     _check(getattr(displaced, "action", None) == "displaced", "(b) clean displacement succeeds")
     # Assert the guard that fired: the row is gone RIGHT AFTER displacement —
@@ -205,8 +224,7 @@ def test_clean_displacement_delete_fires_immediately() -> None:
     # branch (iii) self-repair (there was no subsequent claim to trigger it).
     _check(
         _own_row(state, "ases-loser2") is None,
-        "(b) the loser's row is GONE immediately after a clean displacement "
-        "(the delete fired — not branch (iii), which never ran)",
+        "(b) the loser's row is GONE immediately after a clean displacement (the delete fired — not branch (iii), which never ran)",
     )
 
 
@@ -224,8 +242,11 @@ def test_rel07_fill_when_empty_still_works_through_gate() -> None:
         ),
     )
     result = _claim(
-        state, name="Claude-C", agent_id="claude_code",
-        agent_instance_id="agi-relfill", agent_session_id="",  # deliberately empty
+        state,
+        name="Claude-C",
+        agent_id="claude_code",
+        agent_instance_id="agi-relfill",
+        agent_session_id="",  # deliberately empty
         peer_registry=registry,
     )
     _check(
@@ -239,49 +260,82 @@ def test_rel07_fill_when_empty_still_works_through_gate() -> None:
     row = _own_row(state, "ases-relfill-stable")
     _check(
         row is not None and row.get("held_role") == "Claude-C",
-        "(c) the session_role_claim row is keyed on the FILLED value (measured, "
-        "not just asserted) — the zero-regression claim through the new gate",
+        "(c) the session_role_claim row is keyed on the FILLED value (measured, not just asserted) — the zero-regression claim through the new gate",
     )
 
 
-def test_reserved_mint_guard() -> None:
+def test_first_main_claim_succeeds() -> None:
     state = _state()
-    fresh_mint = _claim(
-        state, name="Coordinator-Main", agent_id="claude_code",
-        agent_instance_id="agi-primary", agent_session_id="ases-primary",
+    first = _claim(
+        state,
+        name="Coordinator-Main",
+        agent_id="claude_code",
+        agent_instance_id="agi-primary",
+        agent_session_id="ases-primary",
     )
     _check(
-        isinstance(fresh_mint, RoleClaimFailure) and fresh_mint.code == "reserved_role_name",
-        f"(d) a fresh mint of a <solet>-Main shape name is refused "
-        f"reserved_role_name (got {fresh_mint!r})",
+        not isinstance(first, RoleClaimFailure) and getattr(first, "action", None) == "claimed",
+        f"(d) the first claim of a <solet>-Main shape name with no role row yet is an ordinary 'claimed' (got {first!r})",
+    )
+    row = _own_row(state, "ases-primary")
+    _check(
+        row is not None and row.get("held_role") == "Coordinator-Main",
+        "(d) the first Main claim leaves the session's session_role_claim row naming Coordinator-Main",
+    )
+    second = _claim(
+        state,
+        name="Coordinator-Main",
+        agent_id="claude_code",
+        agent_instance_id="agi-primary-2",
+        agent_session_id="ases-primary-2",
     )
     _check(
-        _own_row(state, "ases-primary") is None,
-        "(d) a refused mint leaves no session_role_claim row behind",
+        getattr(second, "action", None) == "displaced",
+        f"(d) a second session claiming the same Main name displaces it, as for any role (got {second!r})",
     )
 
-    # A pre-legislated name (role row already exists) claims normally — the
-    # guard fires ONLY on a fresh mint (Dawn Q1: enforce-by-class, never
-    # class-assignment).
-    state.write_state(
+    # A name whose role row already exists still claims normally.
+    existing_state = _state()
+    existing_state.write_state(
         AGENT_ROLE_BINDING_NAMESPACE,
         {
             "table": TABLE_ROLE,
             "record": {
                 "external_id": role_binding_external_id("Coordinator-Main"),
                 "role": "Coordinator-Main",
-                "role_class": "primary",
             },
         },
     )
-    legislated = _claim(
-        state, name="Coordinator-Main", agent_id="claude_code",
-        agent_instance_id="agi-primary", agent_session_id="ases-primary",
+    existing = _claim(
+        existing_state,
+        name="Coordinator-Main",
+        agent_id="claude_code",
+        agent_instance_id="agi-primary",
+        agent_session_id="ases-primary",
     )
     _check(
-        not isinstance(legislated, RoleClaimFailure),
-        f"(d) an ALREADY-legislated <solet>-Main name claims normally "
-        f"(got {legislated!r})",
+        not isinstance(existing, RoleClaimFailure),
+        f"(d) a <solet>-Main name whose role row already exists claims normally (got {existing!r})",
+    )
+
+
+def test_sys_keyspace_still_refused() -> None:
+    state = _state()
+    for name in ("sys:autonomic", "sys:not-a-declared-slot"):
+        refused = _claim(
+            state,
+            name=name,
+            agent_id="claude_code",
+            agent_instance_id="agi-sys",
+            agent_session_id="ases-sys",
+        )
+        _check(
+            isinstance(refused, RoleClaimFailure) and refused.code == "system_slot_claim_denied",
+            f"(e) a general claim of {name!r} is refused system_slot_claim_denied (got {refused!r})",
+        )
+    _check(
+        _own_row(state, "ases-sys") is None,
+        "(e) a refused sys: claim leaves no session_role_claim row behind",
     )
 
 
@@ -289,7 +343,8 @@ def main() -> int:
     test_displacer_delete_disabled_branch_iii_repairs()
     test_clean_displacement_delete_fires_immediately()
     test_rel07_fill_when_empty_still_works_through_gate()
-    test_reserved_mint_guard()
+    test_first_main_claim_succeeds()
+    test_sys_keyspace_still_refused()
 
     print()
     print(f"PASSED: {_passed}")

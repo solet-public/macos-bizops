@@ -1,6 +1,6 @@
 """HTTP walker for Claude Code Cloud sessions (Managed Agents API).
 
-Authentication primitive (macOS Keychain) + ``GET /v1/code/sessions?beta=true``
+Authentication through the bound vault + ``GET /v1/code/sessions?beta=true``
 list pagination + ``GET /v1/code/sessions/<id>/events?beta=true`` per-session
 event fetch with cursor pagination + ``asyncio.Semaphore``-bounded parallel
 walk with exponential-backoff retry on HTTP 429. The walker produces one JSON
@@ -22,13 +22,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
-import subprocess
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+from ananta.core.services.call_context import VaultAccessDeniedError
+from ananta.services.vault_service.interfaces.public import ExternalKeychainReadError
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class ClaudeCodeCloudWalkerError(RuntimeError):
 class ClaudeCodeCloudCredentials:
     """OAuth bearer extracted from the macOS Keychain envelope."""
 
-    access_token: str
+    access_token: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,33 +91,24 @@ def load_credentials(
     *,
     keychain_service: str,
     envelope_path: str,
+    read_external_keychain: Callable[[str], str | None] | None,
 ) -> ClaudeCodeCloudCredentials:
-    """Read the macOS Keychain envelope and extract the OAuth bearer."""
-    security_bin = shutil.which("security")
-    if security_bin is None:
-        raise ClaudeCodeCloudWalkerError(
-            "auth_missing",
-            "macOS 'security' binary not found on PATH; this plugin only supports macOS Keychain credentials today.",
-        )
+    """Extract the OAuth bearer from the envelope provided by the bound vault."""
+    if read_external_keychain is None:
+        raise ClaudeCodeCloudWalkerError("auth_unreadable", "The vault is unavailable for Claude cloud backfill.")
     try:
-        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            [security_bin, "find-generic-password", "-s", keychain_service, "-w"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        raw = read_external_keychain(keychain_service)
+    except (ExternalKeychainReadError, VaultAccessDeniedError):
         raise ClaudeCodeCloudWalkerError(
             "auth_unreadable",
-            f"failed to run 'security find-generic-password': {exc}",
-        ) from exc
-    if result.returncode != 0:
+            "The vault could not read the Claude Code credential. Check the Keychain item and its access permissions.",
+        ) from None
+    if raw is None:
         raise ClaudeCodeCloudWalkerError(
             "auth_missing",
             f"Keychain entry {keychain_service!r} not found; run `claude auth login` first.",
         )
-    raw = result.stdout.strip()
+    raw = raw.strip()
     if not raw:
         raise ClaudeCodeCloudWalkerError(
             "auth_malformed",
@@ -125,11 +116,11 @@ def load_credentials(
         )
     try:
         envelope = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError:
         raise ClaudeCodeCloudWalkerError(
             "auth_malformed",
-            f"Keychain entry {keychain_service!r} is not valid JSON: {exc}",
-        ) from exc
+            f"Keychain entry {keychain_service!r} is not valid JSON.",
+        ) from None
     token = _walk_envelope_path(envelope, envelope_path)
     if not isinstance(token, str) or not token:
         raise ClaudeCodeCloudWalkerError(

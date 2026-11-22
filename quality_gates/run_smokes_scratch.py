@@ -151,6 +151,8 @@ class BatteryRuntime:
     def _remove(self, root: Path) -> None:
         try:
             shutil.rmtree(root)
+        except FileNotFoundError:
+            return
         except OSError as exc:
             self.advisory(exc)
 

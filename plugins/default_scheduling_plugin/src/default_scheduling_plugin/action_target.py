@@ -15,7 +15,7 @@ RELOAD_SAFE = True
 _MESSAGING = "plugin::agent_messaging_plugin::"
 _DESTINATION_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     _MESSAGING + "peer_send_by_name": (("role", "name"),),
-    _MESSAGING + "send_peer_message": (("instance", "peer_agent_instance_id"), ("session", "peer_agent_session_id")),
+    _MESSAGING + "peer_send": (("instance", "peer_agent_instance_id"), ("session", "peer_agent_session_id")),
     _MESSAGING + "drive_session": (("instance", "agent_instance_id"),),
 }
 
@@ -62,7 +62,7 @@ def target_for(action: ActionData, index: int) -> dict[str, Any]:
         return result
     kind, key, value = values[0]
     if kind == "session":
-        # send_peer_message resolves peer_id first; this field is only a fallback.
+        # peer_send resolves peer_id first; this field is only a fallback.
         # Changing it cannot guarantee a change to the next dispatch recipient.
         result.update(kind="unknown", value=None, advisory="session_hint_is_fallback")
         return result

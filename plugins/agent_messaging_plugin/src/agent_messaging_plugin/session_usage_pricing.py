@@ -11,7 +11,6 @@ from .model_capability_store import CatalogError, read_cells_page
 from .session_usage_helpers import (
     _USAGE_FIELDS,
     UsageVerbError,
-    _is_number,
     _known_unpriced_tokens,
     _load_catalog,
     _merge_model_totals,
@@ -160,17 +159,11 @@ def _catalog_cells(
 
 def _estimate(
     state: StateManagementInterface,
-    receipt_row: Mapping[str, Any] | None,
     observed: Sequence[tuple[int | float, tuple[str, str, str]]],
     now: datetime,
-) -> tuple[dict[str, Any], int | float | None, str | None]:
-    receipt = receipt_row.get("selection_receipt") if receipt_row is not None else None
-    selected_receipt = receipt if isinstance(receipt, Mapping) else None
-    difficulty = receipt_row.get("difficulty_score") if receipt_row is not None else None
-    difficulty_score = float(difficulty) if _is_number(difficulty) else None
-    cells, advisory = _catalog_cells(state, observed) if selected_receipt is None and observed else ([], None)
+) -> tuple[dict[str, Any], str | None]:
+    cells, advisory = _catalog_cells(state, observed) if observed else ([], None)
     estimate = estimate_for(
-        selected_receipt,
         [cell for _output, cell in sorted(observed, key=lambda item: item[0], reverse=True)],
         cells,
     )
@@ -180,7 +173,6 @@ def _estimate(
             "basis": estimate.basis,
             "cell": None if estimate.cell is None else list(estimate.cell),
         },
-        difficulty_score,
         advisory,
     )
 
@@ -245,7 +237,7 @@ def _window_pricing(
 
 
 def _validate_window_params(params: Mapping[str, Any]) -> None:
-    forbidden = sorted({"runtime_session_ids", "unit_id", "agent_instance_id"} & set(params))
+    forbidden = sorted({"runtime_session_ids", "agent_instance_id"} & set(params))
     if forbidden:
         raise UsageVerbError(
             "parameter_invalid",

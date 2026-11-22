@@ -1,13 +1,13 @@
-# Retrieval-test companion for the solet charter template article.
+# Retrieval-test companion for the solet governance statement template article.
 # Gated by service_interface::knowledge_service::test_retrieval.
 
 article_path: knowledge_bases/ananta_platform/24_operator_communication/02_solet_charter_template.md
 consumer_profile: both
 
 target_queries:
-  - "solet charter template"
-  - "which charter sections are platform constant and which does the owner fill"
-  - "how do I write the minimum viable charter with a new owner"
+  - "solet governance statement template"
+  - "which governance statement sections are platform constant and which does the owner fill"
+  - "how do I write the minimum viable governance statement with a new owner"
   - "what are the platform design values"
   - "governance model owner is final authority agents hold positions"
   - "what is a solet identity substrate sessions ephemeral"

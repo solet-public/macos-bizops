@@ -107,7 +107,7 @@ def _fixture_identity(root: Path, repo: Path, base: str, commit: str, paths: lis
         entries.append({"path": path, "base": "absent", "final": {"mode": 0o100644, "sha256": coverage.digest(data)}})
     patch = _git(repo, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", base, commit)
     identity = root / "identity.json"
-    identity.write_bytes(coverage.canonical({"unit_id": "unt_fixture", "repository_id": "rep_fixture", "base_commit_sha": base, "candidate_commit_sha": commit, "candidate_tree_sha": tree, "target_branch": "master", "patch_path": "candidate.patch", "patch_sha256": coverage.digest(patch), "entries": entries}))
+    identity.write_bytes(coverage.canonical({"repository_id": "rep_fixture", "base_commit_sha": base, "candidate_commit_sha": commit, "candidate_tree_sha": tree, "target_branch": "master", "patch_path": "candidate.patch", "patch_sha256": coverage.digest(patch), "entries": entries}))
     return identity
 
 
@@ -278,10 +278,10 @@ def _catalog_identity_template(catalog: coverage.Catalog) -> None:
 
 
 # Seat-authorized under agm-_58973f533abf4a55a416cde81adf0554. This mirrors
-# Project Solet evidence_capture.py:70-84 at f2a64b281278; extraction and
+# the external register evidence_capture.py:70-84 at f2a64b281278; extraction and
 # retirement are tracked separately by iss_32169e6c-f2bb-4afe-9e20-d4fa51823d1b.
 def _capture_accepts(argv: tuple[str, ...]) -> bool:
-    """Pinned mirror of Project Solet capture_evidence argv acceptance."""
+    """Pinned mirror of the external register capture_evidence argv acceptance."""
     return bool(argv) and all(token.strip() for token in argv) and Path(argv[0]).name not in _CAPTURE_SHELLS
 
 

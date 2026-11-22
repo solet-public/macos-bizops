@@ -36,8 +36,11 @@ seams.  Legs:
   a tracked candidate path (``CLAUDE.md``), and an in-target destination the
   target DOES ignore are classified exactly as section 6.3 says, and a
   ``.gitignore`` shipped in the candidate tree does not change the verdict;
-- ``single_color_required`` overrides a visible router; a roster plugin absent
-  from the candidate blocks before any write;
+- the shipped bundle's strategy: a ``legacy_direct`` install previews the
+  single-colour restart and promotes; a ``materialized_supervisor`` install is
+  refused with ``supervisor_launch_needs_hand_route`` (its repair names the
+  hand route) before any launchctl start or stop; a roster plugin absent from
+  the candidate blocks before any write;
 - the per-operation re-baseline admits the running solet's own
   ``knowledge_bases/<plugin>`` creation only under ``runtime_reconciling`` and
   only in its exact shape (iss_d22db98a): the same creation under any other
@@ -80,6 +83,7 @@ from _step6_support import SimulatedCrash  # noqa: E402
 from solet_manager import update_execution as execution_module  # noqa: E402
 from solet_manager import update_runtime_execution as executor  # noqa: E402
 from solet_manager.errors import ProbeDriftError, UpdateBlockedError, UpdateFailedError  # noqa: E402
+from solet_manager.launch_topology import supervisor_hand_route_guidance  # noqa: E402
 from solet_manager.local_state import observe_local_state  # noqa: E402
 from solet_manager.managed_artifact_backup import backup_root, file_sha256  # noqa: E402
 from solet_manager.models import ManagementState, ReleaseIdentity  # noqa: E402
@@ -744,11 +748,40 @@ def _assert_fleet_crash_resume(root: Path) -> None:
     _check(all((fixture.target / relative).read_text(encoding="utf-8") == text for relative, text in _CLIENT_FILES.items()), "the other client files are untouched by the resume")
 
 
+_HAND_ROUTE_ARTICLE = "plugins/default_thinking_plugin/knowledge_base_joseki/deploy_local_blue_green_release.md"
+_HAND_ROUTE_SECTION = "Installing a release the cutover refuses"
+
+
+def _assert_direct_takes_single_colour(root: Path, shipped: str) -> None:
+    """A solet its LaunchAgent launches directly (every ``solet create``) takes the shipped bundle through the single-colour restart."""
+    direct = build_fixture(root, document=lambda baseline: bundle_document(baseline, strategy=shipped))
+    advance_to_source_advanced(direct)
+    preview = preview_update_instance(direct.request)
+    _check(preview.status == "runtime_preview_ready" and data(preview.data["lifecycle"], "strategy") == "single_color_restart", f"a legacy_direct install previews the single-colour restart under the shipped strategy {shipped}: {preview.status} {data(preview.data['lifecycle'], 'unproven_reason')}")
+    applied = apply_update(direct.request, cast(str, preview.data["runtime_approval_fingerprint"]))
+    _check(applied.status == "promoted", f"a legacy_direct install updates to promoted under the shipped strategy: {applied.status} {applied.error_kind} {applied.message}")
+
+
+def _assert_supervisor_refused(root: Path, shipped: str) -> None:
+    """A solet its LaunchAgent runs through the blue-green supervisor cannot take a single-colour restart: the Manager refuses with the typed
+    reason that names the hand route, before any launchctl start or stop (the router cutover for a ``router_preferred`` bundle is the ``unproven`` leg)."""
+    supervisor = build_fixture(root, document=lambda baseline: bundle_document(baseline, strategy=shipped), router=True, roster=("github_midwife_plugin", "macos_self_deployment_plugin"))
+    advance_to_source_advanced(supervisor)
+    preview = preview_update_instance(supervisor.request)
+    reason = data(preview.data["lifecycle"], "unproven_reason")
+    repair = preview.repair or ""
+    _check(preview.status == "awaiting_user" and reason == "supervisor_launch_needs_hand_route", f"a supervisor launch is refused with the hand-route reason under the shipped strategy {shipped}: {preview.status} {reason}")
+    _check(preview.data["runtime_approval_fingerprint"] is None, "the supervisor refusal offers no runtime approval fingerprint")
+    _check((preview.message, preview.repair) == supervisor_hand_route_guidance("local.solet.fixture"), f"the supervisor refusal speaks the words its one owner gives: {preview.message} | {preview.repair}")
+    _check(_HAND_ROUTE_ARTICLE in repair and _HAND_ROUTE_SECTION in repair, f"the supervisor refusal's repair names the article and the section: {preview.repair}")
+    started = [call for call in supervisor.host.launchctl_calls if call[0] in {"bootout", "bootstrap", "kickstart"}]
+    _check(not started, f"the supervisor refusal starts and stops nothing: {started}")
+
+
 def _assert_strategy_selection(root: Path) -> None:
-    forced = build_fixture(root / "forced", document=lambda baseline: bundle_document(baseline, strategy="single_color_required"), router=True)
-    advance_to_source_advanced(forced)
-    preview = preview_update_instance(forced.request)
-    _check(data(preview.data["lifecycle"], "strategy") == "single_color_restart", "single_color_required overrides a visible router")
+    shipped = cast(str, json.loads((_ROOT / KB / "existing_install_flow.json").read_text())["lifecycle"]["strategy"])
+    _assert_direct_takes_single_colour(root / "direct", shipped)
+    _assert_supervisor_refused(root / "supervisor", shipped)
     unproven = build_fixture(root / "unproven", router=True, roster=("github_midwife_plugin", "macos_self_deployment_plugin"))
     advance_to_source_advanced(unproven)
     preview = preview_update_instance(unproven.request)

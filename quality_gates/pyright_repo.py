@@ -14,7 +14,7 @@ import sys
 import sysconfig
 import tempfile
 import tomllib
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -28,10 +28,24 @@ class PyrightUnavailableError(RuntimeError):
     """The pinned Python environment has no usable installed Pyright JS."""
 
 
+def _resolved_package_locations() -> set[Path]:
+    locations = {Path(os.path.abspath(sysconfig.get_path(kind))).resolve() for kind in ("purelib", "platlib")}
+    pythonpath = {Path(entry or os.curdir).resolve() for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)}
+    for entry in sys.path:
+        location = Path(entry or os.curdir)
+        resolved = location.resolve()
+        if location.is_dir() and resolved not in pythonpath:
+            locations.add(resolved)
+    return locations
+
+
+def _installed_pyright_distributions(locations: set[Path]) -> list[tuple[Path, importlib.metadata.Distribution]]:
+    return [(location, distribution) for location in locations for distribution in importlib.metadata.distributions(path=[str(location)]) if distribution.metadata.get("Name", "").casefold().replace("_", "-") == "pyright"]
+
+
 def installed_pyright_script() -> Path:
-    """Find Pyright only in the invoking interpreter's installed package dirs."""
-    locations = {Path(os.path.abspath(sysconfig.get_path(kind))) for kind in ("purelib", "platlib")}
-    distributions = [(location, distribution) for location in locations for distribution in importlib.metadata.distributions(path=[str(location)]) if distribution.metadata.get("Name", "").casefold().replace("_", "-") == "pyright"]
+    """Find Pyright in package folders loaded by the invoking interpreter."""
+    distributions = _installed_pyright_distributions(_resolved_package_locations())
     if not distributions:
         raise PyrightUnavailableError(f"Pyright package missing from invoking Python environment {sys.executable}")
     if len(distributions) != 1:
@@ -172,8 +186,41 @@ _ABSOLUTE_SETTINGS: tuple[str, ...] = ("venvPath", "extraPaths", "typeshedPath",
 #: the overlay instead, the same way ``exclude`` already is.
 _RELATIVE_SETTINGS: tuple[str, ...] = ("include", "ignore", "strict")
 
+#: Directories holding the fixture modules that test files import under a
+#: ``# pyright: ignore[reportMissingImports]`` comment: found by ``rg`` over
+#: ``plugins/*/tests`` and ``git ls-files`` for each module name. A selected test
+#: file's OWN directory is added for that file by ``fixture_search_paths``; these
+#: shared roots are added to every selected run. Repository-relative; a root
+#: absent from the checkout is skipped, not refused.
+_SHARED_FIXTURE_ROOTS: tuple[str, ...] = (
+    "ananta/tests/core/actions",
+    "plugins/actr_memory_plugin/migrations",
+    "plugins/agent_messaging_plugin/tests",
+    "plugins/g_suite_plugin/tests",
+    "plugins/github_midwife_plugin/coordination_hooks_common",
+    "plugins/github_midwife_plugin/tests",
+    "plugins/marketo_plugin/tests",
+    "plugins/platform_health_plugin/tests",
+    "plugins/seed_factory_plugin/tests",
+    "plugins/zuora_plugin/tests",
+)
 
-def overlay_payload(config: Path, effective: Path, settings: Mapping[str, Any], overlay_directory: Path, retained: list[str]) -> dict[str, Any]:
+
+def fixture_search_paths(origin: Path, selected: Sequence[Path], inherited: Sequence[str]) -> list[str]:
+    """The ``extraPaths`` of a selected-test overlay.
+
+    The inherited entries come first and keep their order. Then each selected
+    file's own directory, then each shared fixture root that exists in the
+    checkout. Every entry is absolute and appears once. A fixture module a test
+    file imports comes from one of these directories, so Pyright needs them on
+    its search path, and the overlay's execution root alone does not provide them.
+    """
+    additions = [str(path.parent) for path in selected]
+    additions.extend(str(origin / root) for root in _SHARED_FIXTURE_ROOTS if (origin / root).is_dir())
+    return list(dict.fromkeys([*inherited, *additions]))
+
+
+def overlay_payload(config: Path, effective: Path, settings: Mapping[str, Any], overlay_directory: Path, retained: list[str], selected: Sequence[Path]) -> dict[str, Any]:
     """The complete overlay config for a selected-test run.
 
     Extracted so the regression smoke measures THIS function rather than
@@ -183,6 +230,7 @@ def overlay_payload(config: Path, effective: Path, settings: Mapping[str, Any], 
     origin = effective.parent
     relative_origin = Path(os.path.relpath(origin, overlay_directory))
     inherited = overlay_path_settings(origin, overlay_directory, settings)
+    inherited["extraPaths"] = fixture_search_paths(origin, selected, inherited.get("extraPaths", []))
     return {
         "extends": str(config.absolute()),
         **inherited,
@@ -282,7 +330,7 @@ def selected_config(root: Path, argv: list[str]) -> Generator[list[str]]:
         # relative `extraPaths`/`include` would point at an empty temp directory
         # and every import would be reported unresolved -- a refusal nobody can
         # pass (rul_becb4bed), not a typing verdict.
-        overlay.write_text(json.dumps(overlay_payload(config, effective, settings, overlay.parent, retained)), encoding="utf-8")
+        overlay.write_text(json.dumps(overlay_payload(config, effective, settings, overlay.parent, retained, selected)), encoding="utf-8")
         print(f"Pyright selected-test config: {overlay}", file=sys.stderr, flush=True)
         yield [*forwarded, "--project", str(overlay)]
 

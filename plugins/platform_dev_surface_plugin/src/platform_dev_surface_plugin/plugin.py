@@ -94,9 +94,12 @@ class PlatformDevSurfacePlugin(PluginBase, QualityServiceInterface, RepoServiceI
         super().set_action_factory(action_factory)
         if self._quality is not None:
             try:
-                self.ensure_full_smoke_schedule()
+                from platform_dev_surface_plugin.quality.full_battery import retire_full_smoke_schedules
+
+                scheduler = self.orchestrator_ref.get_service("scheduling_service") if self.orchestrator_ref else None
+                retire_full_smoke_schedules(scheduler)
             except Exception:
-                self.logger.exception("full smoke schedule ensure failed; retry at next injection or explicit ensure")
+                self.logger.exception("full smoke schedule retirement failed during late action-factory injection")
 
     def set_active(self, active: bool) -> None:
         """Inactive blue/green providers retain schedules but produce no work."""
@@ -139,19 +142,18 @@ class PlatformDevSurfacePlugin(PluginBase, QualityServiceInterface, RepoServiceI
 
     def verify_hash_manifest(
         self,
-        unit_id: str,
         root_path: str,
         manifest: dict[str, str],
         *,
         call_context: CallContext | None = None,
     ) -> dict[str, Any]:
-        self.logger.info("quality_service.verify_hash_manifest unit=%s by %s", unit_id, _principal_label(call_context))
-        return self._quality_ops().verify_hash_manifest(unit_id, root_path, manifest)
+        self.logger.info("quality_service.verify_hash_manifest by %s", _principal_label(call_context))
+        return self._quality_ops().verify_hash_manifest(root_path, manifest)
 
     def predict_gate_smokes_merge(
         self,
         base_ref: str,
-        lane_root_path: str,
+        candidate_root_path: str,
         current_master: str,
         register_path: str = "quality_gates/gate_smokes.txt",
         *,
@@ -160,7 +162,7 @@ class PlatformDevSurfacePlugin(PluginBase, QualityServiceInterface, RepoServiceI
         self.logger.info("quality_service.predict_gate_smokes_merge by %s", _principal_label(call_context))
         return self._quality_ops().predict_gate_smokes_merge(
             base_ref,
-            lane_root_path,
+            candidate_root_path,
             current_master,
             register_path,
         )
@@ -285,17 +287,14 @@ class PlatformDevSurfacePlugin(PluginBase, QualityServiceInterface, RepoServiceI
             raise PermissionError("proof mutation requires server CallContext")
         return self._quality_ops().smoke_proof("reinstate", principal=_principal_label(call_context), key=key, request=request, expected_version=expected_version, reason=reason)
 
-    def ensure_full_smoke_schedule(self, *, call_context: CallContext | None = None) -> dict[str, Any]:
-        """Ensure the six-hour full battery and five-minute durable retry schedules."""
-        self.logger.info("quality_service.ensure_full_smoke_schedule by %s", _principal_label(call_context))
-        from platform_dev_surface_plugin.quality.full_battery import ensure_full_smoke_schedule
-
-        scheduler = self.orchestrator_ref.get_service("scheduling_service") if self.orchestrator_ref else None
-        return ensure_full_smoke_schedule(scheduler)
-
-    def trigger_full_smoke_battery(self, trigger: str = "schedule", *, call_context: CallContext | None = None) -> dict[str, Any]:
-        """Queue a full battery or retry pending work off the action queue."""
+    def trigger_full_smoke_battery(self, trigger: str = "manual", *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Request a full battery run of the newest master commit; it runs once, after any run in progress."""
         self.logger.info("quality_service.trigger_full_smoke_battery by %s", _principal_label(call_context))
         if call_context is None:
             raise PermissionError("full battery trigger requires server CallContext")
         return self._quality_ops().full_battery.trigger(trigger)
+
+    def list_full_smoke_campaigns(self, finished_after: str | None = None, limit: int = 50, *, call_context: CallContext | None = None) -> dict[str, Any]:
+        """Read closed full-battery campaign records, oldest first, without changing them."""
+        self.logger.info("quality_service.list_full_smoke_campaigns by %s", _principal_label(call_context))
+        return self._quality_ops().full_battery.list_campaigns(finished_after=finished_after, limit=limit)

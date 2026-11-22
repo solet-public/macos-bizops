@@ -5,7 +5,7 @@ Every spawned worker — Claude Code or Codex, tmux-hosted or subprocess-hosted
 — needs the CLI to be BOTH resolvable as a command and reachable at an
 absolute path:
 
-* ``heartbeat_report_alive.py`` (PostToolUse) shells out to a bare
+* ``rotation_due_watch.py`` (PostToolUse) shells out to a bare
   ``["solet-bridge", "call", ...]``;
 * ``wake_waiter.py`` (Stop) runs ``[$AGENT_WAKE_CLI, "wake", ...]``;
 * the ``/rename`` skill and the watch sidecar both invoke the CLI directly.
@@ -15,7 +15,7 @@ SERVER's environment rather than the spawning process's, both run with a
 minimal ``PATH`` that excludes the release's own ``venv/bin``. Every one of
 the consumers above then fails with ``FileNotFoundError``, and — because each
 is deliberately non-fatal (portability posture, reviewed coordination-hooks
-surface) — fails SILENTLY: exit 0, no liveness stamp, no wake, no error
+surface) — fails SILENTLY: exit 0, no gauge report, no wake, no error
 anywhere. That is the registration-loss mechanism measured on 2026-08-14
 (``workbench/2026-08-13_registration_loss_rca_lane_r_report.md``).
 
@@ -191,11 +191,7 @@ def _release_instance_root(instance_root: Path) -> Path | None:
 
 def _is_venv_console_script(path: Path) -> bool:
     """Whether a resolved path has the expected console-script shape."""
-    return (
-        path.name == CLI_COMMAND_NAME
-        and path.parent.name == "bin"
-        and path.parent.parent.name in {"venv", ".venv"}
-    )
+    return path.name == CLI_COMMAND_NAME and path.parent.name == "bin" and path.parent.parent.name in {"venv", ".venv"}
 
 
 def _is_release_family_member(candidate: Path, instance_root: Path) -> bool:
@@ -204,9 +200,7 @@ def _is_release_family_member(candidate: Path, instance_root: Path) -> bool:
     candidate_environment_root = candidate.parent.parent.parent
     if release_root is None or candidate_environment_root.parent != release_root:
         return False
-    return candidate_environment_root.name == CURRENT_LINK_NAME or (
-        candidate_environment_root.name.startswith(RELEASE_ID_PREFIX)
-    )
+    return candidate_environment_root.name == CURRENT_LINK_NAME or (candidate_environment_root.name.startswith(RELEASE_ID_PREFIX))
 
 
 def _is_instance_cli(
@@ -254,21 +248,23 @@ def _discover_solet_bin(
     source of a candidate, not an authority to cross the instance boundary.
     """
     if explicit is not None:
-        return explicit if _is_instance_cli(
-            explicit, python_executable=python_executable,
-        ) else ""
+        return (
+            explicit
+            if _is_instance_cli(
+                explicit,
+                python_executable=python_executable,
+            )
+            else ""
+        )
     discovered = shutil.which(CLI_COMMAND_NAME)
     if discovered and _is_instance_cli(
-        discovered, python_executable=python_executable,
+        discovered,
+        python_executable=python_executable,
     ):
         return discovered
     executable = Path(python_executable or sys.executable)
     sibling = executable.parent / CLI_COMMAND_NAME
-    if (
-        sibling.is_file()
-        and os.access(sibling, os.X_OK)
-        and _is_instance_cli(str(sibling), python_executable=python_executable)
-    ):
+    if sibling.is_file() and os.access(sibling, os.X_OK) and _is_instance_cli(str(sibling), python_executable=python_executable):
         return str(sibling)
     return ""
 
@@ -412,23 +408,28 @@ class WakeCliResolver:
         # has become unusable, which is precisely the case the pre-R11 cache
         # handled correctly and a naive re-resolve regressed.
         self._fallback = resolve_solet_bin(
-            override, python_executable=self._python_executable,
+            override,
+            python_executable=self._python_executable,
         )
 
     def resolve(self) -> str:
         """The wake CLI to hand a worker, resolved now."""
         fresh = resolve_solet_bin(
-            self._override, python_executable=self._python_executable,
+            self._override,
+            python_executable=self._python_executable,
         )
         if fresh and Path(fresh).is_file() and os.access(fresh, os.X_OK):
             return fresh
-        if self._fallback and Path(self._fallback).is_file() and os.access(
-            self._fallback, os.X_OK,
+        if (
+            self._fallback
+            and Path(self._fallback).is_file()
+            and os.access(
+                self._fallback,
+                os.X_OK,
+            )
         ):
             logger.warning(
-                "wake CLI %r no longer resolves to an executable; falling back to "
-                "the construction-time stable path %r (a cutover moved `current` "
-                "away from this process's release and the old release was reaped)",
+                "wake CLI %r no longer resolves to an executable; falling back to the construction-time stable path %r (a cutover moved `current` away from this process's release and the old release was reaped)",
                 fresh,
                 self._fallback,
             )
@@ -467,7 +468,10 @@ def worker_path(solet_bin: str) -> str:
 
 
 def watch_sidecar_argv(
-    solet_bin: str, *, agent_id: str, spool: bool,
+    solet_bin: str,
+    *,
+    agent_id: str,
+    spool: bool,
 ) -> list[str]:
     """The registered-presence sidecar's argv, minus ``--exit-with-parent``
     (each host supplies its own parent pid: a literal for a tracked

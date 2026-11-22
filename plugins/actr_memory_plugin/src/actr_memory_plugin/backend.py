@@ -21,12 +21,14 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, cast
 
 from ananta.core.domain.enums import ActionStatus
 from ananta.error_handling import FrameworkError
+from ananta.interfaces.embedding_service_interface import TokenBudget
 from ananta.services.memory_service.actr import (
     DEFAULT_TOP_K,
     EPISODIC_CONSOLIDATION_THRESHOLD,
@@ -60,9 +62,11 @@ from .memory_store import (
     get_all_memorizations,
     get_memorization,
     get_memory,
+    memory_vector_metadata,
     save_memorization,
     save_memory,
     store_memory_vector,
+    store_memory_vectors,
     update_memory_strength,
 )
 from .record_helpers import (
@@ -84,6 +88,13 @@ from .session_query import (
     convert_memory_record,
     query_event_summary,
     query_namespace_breakdown,
+)
+from .vector_segments import (
+    delete_memory_vectors,
+    memory_id_of,
+    segment_external_id,
+    split_embedding_input,
+    uncovered_memory_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -159,6 +170,39 @@ CONSOLIDATION_EXCLUDED_TAGS: set[str] = {
 # is reseeded after a purge).
 PURGE_PROTECTED_TAGS: frozenset[str] = frozenset({KNOWLEDGE_OFFICIAL_TAG, AGENT_MEMORY_TAG})
 
+# The knowledge indexer prepends these metadata lines to every chunk
+# (default_knowledge_plugin.kb_indexing.build_chunk_preamble). They are generic,
+# identical across articles, and take a large share of a short chunk's embedding,
+# so a knowledge chunk is EMBEDDED without them while the stored text keeps them
+# (search results, the layer post-filter and title detection parse the stored text).
+_KB_PREAMBLE_LINE_PREFIXES: Final[tuple[str, ...]] = ("Source: ", "Article Layer:", "Article Role:", "Article Tags:")
+
+
+def _without_kb_preamble(content: str) -> str:
+    """``content`` minus its leading indexer-preamble lines; unchanged when it has none or nothing else.
+
+    Only the leading block goes: it ends at the first line that is none of the
+    four preamble line types. A chunk that is nothing but preamble is returned
+    as stored, since an empty string is not a valid embedder input.
+    """
+    lines = content.split("\n")
+    leading = 0
+    while leading < len(lines) and lines[leading].startswith(_KB_PREAMBLE_LINE_PREFIXES):
+        leading += 1
+    remainder = "\n".join(lines[leading:])
+    return remainder if leading and remainder.strip() else content
+
+
+def _embedder_text(content: str, tags: Sequence[str] | None) -> str:
+    """The text the embedder receives for a memory's ``content``.
+
+    A ``knowledge:official`` memory goes without its leading indexer preamble; everything else,
+    including a query (no ``tags``), goes as stored. Segments are cut from this text, so the stored
+    content never changes.
+    """
+    return _without_kb_preamble(content) if tags is not None and KNOWLEDGE_OFFICIAL_TAG in tags else content
+
+
 # Max orphaned memories reindexed per reconcile pass (was the raw query's
 # `LIMIT 1000`). The reconcile is idempotent: reindexed memories gain an active
 # vector and drop out of the next pass, so the backlog drains over repeated runs.
@@ -166,9 +210,12 @@ _REINDEX_BATCH_LIMIT: Final[int] = 1000
 
 
 def _validate_vector_match(match: dict[str, Any]) -> tuple[str, float]:
-    """Extract and validate memory_id and similarity from a vector match."""
-    memory_id = match.get("external_id")
-    if not memory_id:
+    """Extract and validate the memory id and similarity from a vector match.
+
+    A hit on any segment of a memory (``<memory id>:<k>``) maps back to that memory.
+    """
+    external_id = match.get("external_id")
+    if not external_id:
         raise FrameworkError(
             message=f"Vector match missing 'external_id': {match.keys()}",
             error_code="memory.vector_error",
@@ -179,7 +226,7 @@ def _validate_vector_match(match: dict[str, Any]) -> tuple[str, float]:
             message=f"Vector match missing 'distance': {match.keys()}",
             error_code="memory.vector_error",
         )
-    return str(memory_id), 1.0 - float(distance)
+    return memory_id_of(str(external_id)), 1.0 - float(distance)
 
 
 def _memory_passes_tag_filter(
@@ -483,15 +530,21 @@ class ACTRMemoryBackend:
     # ACT-R MEMORY HELPERS
     # -------------------------------------------------------------------------
 
-    def _generate_embedding(self, content: str) -> list[float]:
-        """Generate embedding for content. Raises FrameworkError on failure."""
+    def _generate_embedding(self, content: str, *, tags: Sequence[str] | None = None) -> list[float]:
+        """Generate embedding for content. Raises FrameworkError on failure.
+
+        The one place the embedder input is built. A memory tagged
+        ``knowledge:official`` is embedded without its leading indexer preamble;
+        everything else, including a query (no ``tags``), is embedded as given.
+        """
         if self.embedding_service is None:
             raise FrameworkError(
                 message="Embedding service not available",
                 error_code="memory.embedding_unavailable",
             )
 
-        embedding_result = self.embedding_service.generate_embeddings(inputs=[content])
+        embedder_text = _embedder_text(content, tags)
+        embedding_result = self.embedding_service.generate_embeddings(inputs=[embedder_text])
 
         # Check for error response from embedding service
         if embedding_result.get("action_status") == ActionStatus.ERROR.value:
@@ -514,6 +567,24 @@ class ACTRMemoryBackend:
             )
 
         return embedding
+
+    def _embedding_budget(self) -> TokenBudget | None:
+        """The bound provider's input budget (``None``: it declares none). Segments are sized by its own counter, never a constant here."""
+        if self.embedding_service is None:
+            raise FrameworkError(
+                message="Embedding service not available",
+                error_code="memory.embedding_unavailable",
+            )
+        return self.embedding_service.input_token_budget()
+
+    def _embed_segments(self, content: str, *, tags: Sequence[str] | None) -> list[list[float]]:
+        """One embedding per budgeted segment of ``content``, in order; the whole text is covered, none truncated.
+
+        A memory that fits yields a single embedding. Each segment is embedded as given: the preamble
+        strip for ``knowledge:official`` memories has already been applied to the text that was cut.
+        """
+        windows = split_embedding_input(_embedder_text(content, tags), self._embedding_budget())
+        return [self._generate_embedding(window) for window in windows]
 
     # -------------------------------------------------------------------------
     # ACT-R CORE MEMORY OPERATIONS
@@ -561,13 +632,15 @@ class ACTRMemoryBackend:
         if embed and len(content) <= EMBEDDING_MAX_CHARS:
             # Fail-fast: generate embedding BEFORE creating any records so a
             # failed embedding never leaves behind a persisted memory with no vector.
-            embedding = self._generate_embedding(content)
+            embedding = self._generate_embedding(content, tags=normalized_tags)
             memory = create_memory_record(content, normalized_tags, source_file, session_id, now_iso)
             memory_id = save_memory(self.state_service, memory)
             store_memory_vector(self.vector_service, memory_id, embedding, now_iso, normalized_tags)
         elif embed:
             # Content exceeds EMBEDDING_MAX_CHARS — store without vector
-            # rather than sending a truncated blob to the embedding model.
+            # rather than sending a truncated blob to the embedding model; the
+            # orphan reconcile (_reindex_memory_batch) later embeds it whole, in
+            # budgeted segments.
             logger.warning(
                 "EMBEDDING_SKIPPED: content length %d exceeds EMBEDDING_MAX_CHARS %d — storing memory without vector",
                 len(content),
@@ -718,13 +791,20 @@ class ACTRMemoryBackend:
         score_by_similarity: bool = False,
         exclude_tag_set: frozenset[str] = frozenset(),
     ) -> list[dict[str, Any]]:
-        """Process vector matches into scored memory results."""
-        results: list[dict[str, Any]] = []
+        """Process vector matches into scored memory results.
+
+        Several segments of one memory can match; the memory is returned once, at its best similarity.
+        """
+        best_similarity: dict[str, float] = {}
         for match in matches:
             memory_id, similarity = _validate_vector_match(match)
             if memory_id in exclude_set:
                 continue
+            if similarity > best_similarity.get(memory_id, float("-inf")):
+                best_similarity[memory_id] = similarity
 
+        results: list[dict[str, Any]] = []
+        for memory_id, similarity in best_similarity.items():
             memory = get_memory(self.state_service, memory_id)
             if not memory:
                 logger.debug(f"Orphaned vector skipped (run cleanup_orphaned_vectors): {memory_id}")
@@ -770,17 +850,15 @@ class ACTRMemoryBackend:
         memory["status"] = "archived"
         save_memory(self.state_service, memory)
 
-        # Delete the embedding (memory_id is the vector's external_id). The memory
+        # Delete the embeddings (memory_id is the external_id of the first segment's
+        # vector, ``<memory_id>:<k>`` of the rest). The memory
         # row is already archived above and PERSISTS (archive != hard-delete), so
         # the ordering is memory-first by design — but fail-loud, do NOT swallow:
         # a swallowed vector-delete leaves an archived-but-still-searchable memory
         # (a silent fast-fail violation). (delete_by_external_ids returns COMPLETED
         # for an already-absent external_id, so the old "vector may not exist"
         # case is not an error.)
-        delete_result = self.vector_service.delete_by_external_ids(
-            namespace=VECTOR_NAMESPACE,
-            external_ids=[memory_id],
-        )
+        delete_result = delete_memory_vectors(self.vector_service, [memory_id])
         if delete_result.get("action_status") != ActionStatus.COMPLETED.value:
             raise FrameworkError(
                 message=f"Failed to delete embedding for archived {memory_id}: {delete_result.get('error')}",
@@ -824,11 +902,8 @@ class ACTRMemoryBackend:
         # swallow: a swallowed vector-delete failure silently reintroduces the
         # orphan-vector this ordering exists to design out. (delete_by_external_ids
         # returns COMPLETED for an already-absent external_id, so the old
-        # "vector may not exist" case is not an error.)
-        delete_result = self.vector_service.delete_by_external_ids(
-            namespace=VECTOR_NAMESPACE,
-            external_ids=[memory_id],
-        )
+        # "vector may not exist" case is not an error.) Every segment goes with it.
+        delete_result = delete_memory_vectors(self.vector_service, [memory_id])
         if delete_result.get("action_status") != ActionStatus.COMPLETED.value:
             raise FrameworkError(
                 message=f"Failed to delete embedding for {memory_id}: {delete_result.get('error')}",
@@ -864,11 +939,8 @@ class ACTRMemoryBackend:
 
         memory_ids = [m["id"] for m in memories]
 
-        # 2. Delete embeddings using VectorService API (memory_id = external_id)
-        delete_result = self.vector_service.delete_by_external_ids(
-            namespace=VECTOR_NAMESPACE,
-            external_ids=memory_ids,
-        )
+        # 2. Delete embeddings using VectorService API (every segment of each memory)
+        delete_result = delete_memory_vectors(self.vector_service, memory_ids)
 
         if delete_result.get("action_status") != ActionStatus.COMPLETED.value:
             raise FrameworkError(
@@ -911,11 +983,8 @@ class ACTRMemoryBackend:
                 "data": {"deleted_count": 0, "message": "No memory ids provided"},
             }
 
-        # 1. Cascade VECTOR-FIRST: delete embeddings (memory_id = external_id).
-        delete_result = self.vector_service.delete_by_external_ids(
-            namespace=VECTOR_NAMESPACE,
-            external_ids=ids,
-        )
+        # 1. Cascade VECTOR-FIRST: delete embeddings (every segment of each memory).
+        delete_result = delete_memory_vectors(self.vector_service, ids)
         if delete_result.get("action_status") != ActionStatus.COMPLETED.value:
             raise FrameworkError(
                 message=f"Failed to delete embeddings: {delete_result.get('error')}",
@@ -972,10 +1041,7 @@ class ACTRMemoryBackend:
         deleted_count = 0
         if existing_ids:
             assert self.vector_service is not None
-            delete_result = self.vector_service.delete_by_external_ids(
-                namespace=VECTOR_NAMESPACE,
-                external_ids=existing_ids,
-            )
+            delete_result = delete_memory_vectors(self.vector_service, existing_ids)
             if delete_result.get("action_status") == ActionStatus.COMPLETED.value:
                 deleted_count = delete_memory_records(self.state_service, existing_ids)
             else:
@@ -2163,26 +2229,21 @@ class ACTRMemoryBackend:
             return False
 
         try:
-            embedding = self._generate_embedding(memory["content"])
+            embeddings = self._embed_segments(memory["content"], tags=normalize_tags(memory.get("tags")))
         except FrameworkError as e:
             logger.error(f"Failed to generate embedding for import: {e}")
             return False
 
         try:
-            self.vector_service.store_vectors(
-                VECTOR_NAMESPACE,
-                [
-                    {
-                        "external_id": memory["id"],
-                        "vector": embedding,
-                        "dimension": len(embedding),
-                        "metadata": {
-                            "memory_type": memory.get("memory_type", "episodic"),
-                            "status": memory.get("status", "active"),
-                            "created_at": memory.get("created_at", ""),
-                        },
-                    }
-                ],
+            store_memory_vectors(
+                self.vector_service,
+                memory["id"],
+                embeddings,
+                {
+                    "memory_type": memory.get("memory_type", "episodic"),
+                    "status": memory.get("status", "active"),
+                    "created_at": memory.get("created_at", ""),
+                },
             )
         except Exception as e:
             logger.error(f"Failed to store vector for import: {e}")
@@ -2215,12 +2276,9 @@ class ACTRMemoryBackend:
         # 1. Get memory IDs (excluding purge-protected entries)
         all_memory_ids = self._get_all_memory_ids(exclude_protected=True)
 
-        # 2. Delete embeddings for non-knowledge memories
+        # 2. Delete embeddings for non-knowledge memories (every segment of each)
         if all_memory_ids:
-            delete_result = self.vector_service.delete_by_external_ids(
-                namespace=VECTOR_NAMESPACE,
-                external_ids=all_memory_ids,
-            )
+            delete_result = delete_memory_vectors(self.vector_service, all_memory_ids)
 
             if delete_result.get("action_status") != ActionStatus.COMPLETED.value:
                 raise FrameworkError(
@@ -2546,6 +2604,10 @@ class ACTRMemoryBackend:
         ``is_deleted=1`` memory exists) but faithfully preserves the original
         WHERE.
 
+        SEGMENTS: a memory over the provider's embedding budget holds one vector
+        per segment (``vector_segments``), and is orphaned until ALL of them have
+        an active vector; a memory that fits needs only the one under its own id.
+
         Capped at ``_REINDEX_BATCH_LIMIT`` (the reconcile drains over idempotent
         re-runs: reindexed memories gain an active vector and drop out).
         """
@@ -2554,8 +2616,8 @@ class ACTRMemoryBackend:
         if not by_id:
             return []
 
-        missing_ids = self._memory_ids_without_vector(list(by_id.keys()))
-        orphaned = [{"id": memory_id, "content": str(by_id[memory_id].get("content", ""))} for memory_id in missing_ids]
+        missing_ids = self._memory_ids_without_vector(by_id)
+        orphaned = [{"id": memory_id, "content": str(by_id[memory_id].get("content", "")), "tags": normalize_tags(by_id[memory_id].get("tags"))} for memory_id in missing_ids]
         # SCALE NOTE: unlike the old DB-side LIMIT, this materializes all active
         # memories + the full missing set in Python before truncating. Fine for a
         # periodic idempotent reconcile bounded by the active-memory count; if
@@ -2563,75 +2625,66 @@ class ACTRMemoryBackend:
         # rather than scanning all in Python.
         return orphaned[:_REINDEX_BATCH_LIMIT]
 
-    def _memory_ids_without_vector(self, candidate_ids: list[str]) -> list[str]:
-        """The subset of ``candidate_ids`` with no ACTIVE vector, via the owning
-        ``vector_service`` (D1: foreign reads route through the owning
-        interface, not raw ``pgvector__embeddings`` SQL). Fails fast on a missing
-        service or a non-completed envelope; extracts ``data.result.missing``."""
-        if self.vector_service is None:
-            raise FrameworkError(
-                message="Vector service not available for orphan reconcile",
-                error_code="memory.vector_service_unavailable",
-            )
-        result = self.vector_service.find_missing_external_ids(
-            namespace=VECTOR_NAMESPACE,
-            candidate_external_ids=candidate_ids,
+    def _memory_ids_without_vector(self, by_id: Mapping[str, Mapping[str, Any]]) -> list[str]:
+        """The ids in ``by_id`` (memory id -> record) whose vectors do not cover them.
+
+        A memory is covered only when every segment of it has an ACTIVE vector, via
+        the owning ``vector_service`` (D1: foreign reads route through the owning
+        interface, not raw ``pgvector__embeddings`` SQL). A memory that fits has the
+        one vector under its own id; the provider's counter runs only for memories
+        already segmented (``vector_segments.uncovered_memory_ids``). Fails fast on
+        a missing service or a non-completed envelope.
+        """
+        return uncovered_memory_ids(
+            self.vector_service,
+            list(by_id),
+            lambda memory_id: _embedder_text(str(by_id[memory_id].get("content", "")), normalize_tags(by_id[memory_id].get("tags"))),
+            self._embedding_budget,
         )
-        if result.get("action_status") != ActionStatus.COMPLETED.value:
-            raise FrameworkError(
-                message=f"find_missing_external_ids failed: {result.get('error')}",
-                error_code="memory.vector_query_failed",
-            )
-        data = cast(dict[str, Any], result.get("data", {}))
-        inner = cast(dict[str, Any], data.get("result", {}))
-        return cast(list[str], inner.get("missing", []))
 
     def _reindex_memory_batch(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
-        """Index each record independently, reporting refusals without truncation."""
+        """Index each record independently, reporting refusals without truncation.
+
+        A memory over the provider's budget is embedded in budgeted segments and
+        every segment is stored; no part of it is dropped or shortened.
+        """
         now_iso = datetime.now(UTC).isoformat()
         reindexed = 0
         failed: list[dict[str, Any]] = []
         for row in rows:
             memory_id = row.get("id")
             content = row.get("content")
-            tokens: int | None = None
             try:
                 if not memory_id or not content:
                     raise FrameworkError(
                         message="Invalid memory record: missing id or content",
                         error_code="memory.invalid_record",
                     )
-                tokens = self._check_reindex_input_budget(content)
-                embedding = self._generate_embedding(content)
-                store_memory_vector(self.vector_service, memory_id, embedding, now_iso)
+                embeddings = self._embed_segments(content, tags=row.get("tags"))
+                self._replace_memory_vectors(memory_id, embeddings, now_iso)
             except Exception as exc:
-                # The provider's count is retained even for an over-budget refusal.
-                if isinstance(exc, FrameworkError):
-                    counted = exc.details.get("token_count")
-                    if isinstance(counted, int):
-                        tokens = counted
-                failed.append({"memory_id": memory_id, "token_count": tokens, "error": str(exc)})
-                logger.exception("Memory reindex failed: memory_id=%s token_count=%s error=%s", memory_id, tokens, exc)
+                failed.append({"memory_id": memory_id, "error": str(exc)})
+                logger.exception("Memory reindex failed: memory_id=%s error=%s", memory_id, exc)
             else:
                 reindexed += 1
         return {"reindex_count": reindexed, "failed_records": failed}
 
-    def _check_reindex_input_budget(self, content: str) -> int | None:
-        """Use the bound provider's counter; never invent a ceiling or shorten text."""
-        if self.embedding_service is None:
-            raise FrameworkError("Embedding service not available", "memory.embedding_unavailable")
-        budget = self.embedding_service.input_token_budget()
-        if budget is None:
-            # A provider with no declared budget still receives the complete input.
-            return None
-        tokens: int = budget.count(content)
-        if tokens > budget.max_input_tokens:
+    def _replace_memory_vectors(self, memory_id: str, embeddings: list[list[float]], now_iso: str) -> None:
+        """Make ``embeddings`` the memory's whole set of vectors: clear what it already has, then store them.
+
+        The store keeps one vector per external id, so a memory reindexed while some of its
+        vectors survive (a partial earlier write, a lost segment) must not collide with them.
+        Clearing comes first, so a crash between the two leaves an orphan memory the next
+        reconcile redoes, never an orphan vector.
+        """
+        also = [segment_external_id(memory_id, index) for index in range(1, len(embeddings))]
+        cleared = delete_memory_vectors(self.vector_service, [memory_id], also=also)
+        if cleared.get("action_status") != ActionStatus.COMPLETED.value:
             raise FrameworkError(
-                message=f"Input has {tokens} tokens, exceeds embedding limit {budget.max_input_tokens}",
-                error_code="memory.embedding_input_too_long",
-                details={"token_count": tokens, "max_input_tokens": budget.max_input_tokens},
+                message=f"Failed to clear the old vectors of {memory_id}: {cleared.get('error')}",
+                error_code="memory.embedding_delete_failed",
             )
-        return tokens
+        store_memory_vectors(self.vector_service, memory_id, embeddings, memory_vector_metadata(now_iso))
 
     def store_compaction_summary(
         self,

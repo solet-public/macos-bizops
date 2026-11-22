@@ -40,7 +40,7 @@ reads ``git ls-files --cached``, so it sees a candidate once staged, which is
 where Git-Controller runs it.
 
 WRONG-TREE DEFENCE. The installed ``seed_factory_plugin`` package resolves
-through this checkout's ``.venv``, which in a lane worktree is a SYMLINK to
+through this checkout's ``.venv``, which in a linked worktree is a SYMLINK to
 the shared checkout's ``.venv`` — its editable ``.pth`` pointer names the
 SHARED checkout's source, not the worktree's. A naive
 ``from seed_factory_plugin import ...`` would therefore silently measure the

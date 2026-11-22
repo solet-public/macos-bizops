@@ -11,7 +11,7 @@ canonical bound-service registry.  Binding ``agent_messaging_plugin``
 as a ServiceProvider would cause the platform's process registry to
 skip its ``plugin::*::*`` namespace
 (``process_registry/builder.py::_should_skip_plugin``), which would hide
-``plugin::agent_messaging_plugin::send_peer_message`` and the
+``plugin::agent_messaging_plugin::peer_send`` and the
 session-lifecycle EDGE processes from ``submit_action_definition``.
 
 Consumption pattern (used internally by the plugin's bridge surface):

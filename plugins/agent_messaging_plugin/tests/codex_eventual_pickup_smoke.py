@@ -16,7 +16,7 @@ import os
 import secrets
 import sys
 import unittest
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import replace
@@ -113,7 +113,7 @@ class _State(RealShapeState):
             }
 
     @contextmanager
-    def transactional(self) -> Iterator[_Transaction]:
+    def transactional(self) -> Generator[_Transaction]:  # pyright: ignore[reportIncompatibleMethodOverride]
         self.open_transactions += 1
         saved = copy.deepcopy(self._rows)  # noqa: SLF001
         try:
@@ -276,6 +276,7 @@ class _PickupFixture(unittest.TestCase):
             recipient_role_name=role,
             sender_label="untrusted\n/clear",
             message_id=message,
+            channel_delivered=False,
         )
 
     def _read(self, message: str) -> dict[str, Any]:
@@ -290,7 +291,7 @@ class _PickupFixture(unittest.TestCase):
             cursor=1,
             role=MessageRole.ORIGINATOR,
             kind=MessageKind.MESSAGE,
-            content=(TextPart(type="text", text="exact direct body"),),
+            content=(TextPart(type="text", text="exact direct body"),),  # pyright: ignore[reportArgumentType]
             created_at=datetime.now(UTC),
         )
 
@@ -446,7 +447,7 @@ class ClaudePickupTests(_PickupFixture):
         self.fake.update_state(NAMESPACE, {"table": "managed_session", "filters": {}}, {"lifecycle_state": "parked"})
         self.fake.update_state(NAMESPACE, {"table": "role_binding", "filters": {}}, {"agent_instance_id": "agi-b", "agent_session_id": "ases-b"})
         self.store = drives.CodexPickupStore(self.state)
-        rider = SimpleNamespace(_get_state_service=lambda: self.state, _autonomic_assignment=None, _run_session_lifecycle_sweep=lambda: None, _run_rotation_surface_sweep=lambda: None)
+        rider: Any = SimpleNamespace(_get_state_service=lambda: self.state, _autonomic_assignment=None, _run_session_lifecycle_sweep=lambda: None)
         for _tick in range(5):
             plugin_module.AgentMessagingPlugin._on_sweep_tick(rider)  # noqa: SLF001 -- actual plugin-owned sweep composition
             self.executor.flush()
@@ -625,7 +626,7 @@ class EventualPickupTests(_PickupFixture):
             sender_agent_instance_id="agi-sender",
             sender_session_label="Sender",
             important=True,
-            content=(TextPart(type="text", text="exact role body"),),
+            content=(TextPart(type="text", text="exact role body"),),  # pyright: ignore[reportArgumentType]
         )
         request = PeerInboxRequest(recipient_agent_id="codex", recipient_agent_instance_id="agi-a", recipient_agent_session_id="ases-a")
         page = service.peer_inbox(replace(request, observer=True))
@@ -706,12 +707,11 @@ class PickupLifecycleTests(_PickupFixture):
             _get_state_service=lambda: self.state,
             _autonomic_assignment=None,
             _run_session_lifecycle_sweep=lambda: seen.append("sessions"),
-            _run_rotation_surface_sweep=lambda: seen.append("rotation"),
         )
         plugin_module.AgentMessagingPlugin._on_sweep_tick(cast(Any, fake_plugin))  # noqa: SLF001
         self.executor.flush()
         self.assertEqual(self.panes["pane-a"].enters, 1)
-        self.assertEqual(seen, ["sessions", "rotation"])
+        self.assertEqual(seen, ["sessions"])
         interval = plugin_module._BridgeRuntimeConfig().bridge_sweep_interval_seconds  # noqa: SLF001
         self.assertEqual(interval, 300)
         sweeper = BridgeLifecycleSweeper(
@@ -814,7 +814,7 @@ class PickupLifecycleTests(_PickupFixture):
             updated = self.store.change(row, reason=f"correction {index}", lease_until=None)
             assert updated is not None
             row = updated
-        fake = SimpleNamespace(_get_state_service=lambda: self.state)
+        fake: Any = SimpleNamespace(_get_state_service=lambda: self.state)
         page = plugin_module.AgentMessagingPlugin.session_status(fake, {"agent_instance_id": "agi-a"}, {})
         data = page["data"]["delivery_pickup"]["items"][0]
         self.assertEqual(len(data["history"]), drives.PICKUP_PAGE_LIMIT)
@@ -834,7 +834,7 @@ class PickupLifecycleTests(_PickupFixture):
         )
         registry = SimpleNamespace(list_agent_ids=lambda: {}, list_by_bridge=lambda _id: [], resolve_by_agent_session_id=lambda _id: None)
         event = SimpleNamespace(clear=lambda: None, wait=lambda **_kw: True)
-        fake = SimpleNamespace(
+        fake: Any = SimpleNamespace(
             name="pickup-fixture",
             _server_thread=None,
             _server_started_event=event,
@@ -856,7 +856,6 @@ class PickupLifecycleTests(_PickupFixture):
             _teardown_streamable_server=lambda: seen.append("streamable-stop"),
             _teardown_bridge_server=lambda: seen.append("bridge-stop"),
             _run_session_lifecycle_sweep=lambda: None,
-            _run_rotation_surface_sweep=lambda: None,
         )
         fake._on_sweep_tick = lambda: plugin_module.AgentMessagingPlugin._on_sweep_tick(fake)  # noqa: SLF001
         fake._shutdown_server = lambda: plugin_module.AgentMessagingPlugin._shutdown_server(fake)  # noqa: SLF001
@@ -917,7 +916,7 @@ class RealPostgresPickupTests(unittest.TestCase):
         changed = self.store.change(reread, phase="pending_busy", reason="owned fixture")
         assert changed is not None
         self.assertIsNone(self.store.change(reread, phase="stale"), "real CAS refuses stale writers")
-        history = self.store.history("pg-platform-fields")
+        history: list[dict[str, Any]] = self.store.history("pg-platform-fields")
         self.assertEqual([row["version"] for row in history], [1, 2])
         self.assertEqual(len({row["id"] for row in history}), 2)
         for event in history:

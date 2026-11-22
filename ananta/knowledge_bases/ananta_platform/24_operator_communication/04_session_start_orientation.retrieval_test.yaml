@@ -7,7 +7,7 @@ target_queries:
   - "session start orientation"                                         # the literal pinned C9 bootstrap query — must never drop out of top rank
   - "session start orientation standing governance documents"
   - "what documents should a fresh session anchor on"
-  - "where do I find the charter and standing positions at session start"
+  - "where do I find the governance statement and standing positions at session start"
   - "is this governance question already settled somewhere"
   - "what do I do first when a new session starts"
   - "the knowledge base search came back empty what do I check next"

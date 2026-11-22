@@ -12,7 +12,8 @@ Discoverability Policy (Task #47, 2026-05-24):
 - Adding a new method without ``is_discoverable=True`` will SILENTLY exclude it
   from ``process_search`` and the agent will not be able to find it. Always set
   the flag explicitly when authoring a new vault operation.
-- Runtime ``use`` and typed ``metadata`` are internal caller-bound methods.
+- Runtime ``use``, typed ``metadata`` and the external Keychain reader are
+  internal caller-bound methods.
   The transitional runtime ``retrieve`` method is also internal; none is a
   session-callable process in this API.
 - Selected host/credential/crypto registrations return an owned job receipt;
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import builtins
 from abc import ABC, abstractmethod
+from typing import Protocol, runtime_checkable
 
 from ananta.core.actions.action_metadata import (
     MergeErrorProcessorCustomizations,
@@ -43,6 +45,19 @@ from ananta.core.domain.types import ActionResult
 from ananta.core.services.call_context import CallContext
 from ananta.core.services.service_interface_decorator import service_interface_process
 from ananta.core.state.registered_job_operations import registered_job_return_schema
+
+
+class ExternalKeychainReadError(RuntimeError):
+    """The vault could not read the external credential."""
+
+
+@runtime_checkable
+class ExternalKeychainReader(Protocol):
+    """Optional in-process provider capability for an authorized external item."""
+
+    def read_external_keychain(self, service: str, *, call_context: CallContext) -> str | None:
+        """Return the transient envelope or ``None`` when the item is missing."""
+        ...
 
 
 class VaultQualificationAPI(ABC):

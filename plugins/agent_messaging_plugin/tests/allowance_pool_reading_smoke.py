@@ -100,20 +100,6 @@ def test_no_reading_does_not_exclude_claude() -> None:
     cell = selection["selected"]
     _check(cell["runtime"] == "claude_code", "no reading at all: runtime=claude_code selects a fresh accepted Claude cell (refused before iss_3ff06701)")
     _check("quota_unknown" not in selection["excluded"], "an unknown quota is no longer an exclusion class")
-    verified = _refusal(
-        lambda: verbs.verify_selection_receipt(
-            state,
-            difficulty_score=40.0,
-            selection_receipt=selection["selection_receipt"],
-            dispatch_kind="implement",
-            scope_tags=(),
-            agent_runtime=cell["runtime"],
-            model=cell["model"],
-            effort=cell["effort"],
-            now=_NOW,
-        )
-    )
-    _check(verified == ("", ""), "the receipt of a reading-free Claude selection verifies for its spawn tuple")
     sonnet = verbs.select_dispatch_tier(state, {**_SELECT, "required_score": 24.0}, now=_NOW)
     _check(sonnet["selected"]["model"].startswith("claude-sonnet"), "no reading: a Sonnet cell is selectable, which no pool reading could ever make true before")
     free = verbs.select_dispatch_tier(state, {"required_score": 40.0, "cost_tolerance": 0}, now=_NOW)
@@ -126,22 +112,7 @@ def test_recorded_reading_makes_claude_selectable() -> None:
     _record(state, _ALL_POOLS)
     selection = verbs.select_dispatch_tier(state, dict(_SELECT), now=_NOW)
     cell = selection["selected"]
-    receipt = selection["selection_receipt"]
     _check(cell["runtime"] == "claude_code", "current readings on the applicable pools: runtime=claude_code selects a Claude cell")
-    verified = _refusal(
-        lambda: verbs.verify_selection_receipt(
-            state,
-            difficulty_score=40.0,
-            selection_receipt=receipt,
-            dispatch_kind="implement",
-            scope_tags=(),
-            agent_runtime=cell["runtime"],
-            model=cell["model"],
-            effort=cell["effort"],
-            now=_NOW,
-        )
-    )
-    _check(cell["runtime"] == "claude_code" and verified == ("", ""), "the receipt verifies for the claude_code spawn tuple")
     _check("expired_allowance_readings" not in selection, "allowance fields are absent from selection")
 
 
@@ -170,8 +141,8 @@ def test_expiry_makes_pools_unknown_again() -> None:
     _check(_refusal(lambda: verbs.select_dispatch_tier(state, dict(_SELECT), now=_NOW))[0] == "", "control: exhausted readings leave enabled claude_code eligible")
     later = _NOW + timedelta(hours=3)
     _check(verbs.select_dispatch_tier(state, dict(_SELECT), now=later)["selected"]["runtime"] == "claude_code", "past next_reset_at: an expired exhausted reading no longer excludes")
-    code, message = _refusal(lambda: verbs.select_dispatch_tier(state, {**_SELECT, "required_score": 1000.0}, now=later))
-    _check(code == "no_cell_clears_threshold" and "Expired allowance readings" not in message, "a capability refusal has no allowance telemetry")
+    below = verbs.select_dispatch_tier(state, {**_SELECT, "required_score": 1000.0}, now=later)
+    _check(below["shortfall"]["gap"] == 1000.0 - below["selected"]["capability_score"] and "expired_allowance_readings" not in below, "strongest fallback has exact shortfall and no allowance telemetry")
     free = verbs.select_dispatch_tier(state, {"required_score": 40.0, "cost_tolerance": 0}, now=later)
     _check("expired_allowance_readings" not in free, "selection carries no expired allowance reading field")
     _record(state, ("rolling-five-hour",), next_reset_at=None, expires_at=(_NOW + timedelta(minutes=30)).isoformat())

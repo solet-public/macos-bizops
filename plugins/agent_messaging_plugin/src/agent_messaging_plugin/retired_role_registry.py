@@ -2,8 +2,8 @@
 
 Operator ruling ``arm-2305256f5b4cdf9d657a48cc466bc479`` names ONE retired-role
 name set: this solet owns it, every role-addressed transport refuses a name in
-it, and project-solet's content guard consumes the same set through an explicit
-versioned read and fails closed when that read fails. There is no static
+it, and the same set is served through an explicit versioned read
+(``list_retired_roles``) that fails closed when it cannot be read. There is no static
 fallback list anywhere, and a vacant binding is not proof of retirement — the
 only proof is a row in this table.
 
@@ -38,11 +38,6 @@ from typing import TYPE_CHECKING
 from ananta.llm.agent_messaging.role_binding import (
     AGENT_ROLE_BINDING_NAMESPACE,
     COL_ROLE,
-    COL_ROLE_CLASS,
-    ROLE_CLASS_PRIMARY,
-    ROLE_CLASS_PRINCIPAL,
-    TABLE_ROLE,
-    role_binding_external_id,
 )
 from ananta.llm.agent_messaging.state_results import (
     StateOperationError,
@@ -55,7 +50,7 @@ from ananta.services.state_service.bounded_read import (
     iter_table_rows,
 )
 
-from .role_binding_store import RoleBindingMalformedError, list_roles_for_agent_instance
+from .role_binding_store import RoleBindingMalformedError
 from .schema import TABLE_RETIRED_ROLE
 
 if TYPE_CHECKING:
@@ -80,22 +75,14 @@ _EXTERNAL_ID_PREFIX = "retired_role:"
 # any vocabulary an operator could steward, which is the condition worth
 # failing loudly on.
 _REGISTRY_CEILING = 1_000
-_CEILING_REASON = (
-    "one row per retired role name; retirement is an operator or Main-seat act, "
-    "so the registry grows with governance decisions, not traffic."
-)
-
-# The seats allowed to retire a role. Classes, never names: primary is the
-# reserved <solet>-Main seat, principal is the legislated operator-grade seat
-# (legislate_role is the one path that stamps either).
-_RETIRING_ROLE_CLASSES = frozenset({ROLE_CLASS_PRIMARY, ROLE_CLASS_PRINCIPAL})
+_CEILING_REASON = "one row per retired role name; retirement is a governance decision, so the registry grows with those decisions, not traffic."
 
 # The migration seed (iss_d9c955a2 brief, step 1). Register-Lead was retired by
 # iss_bfdb51c1 on 2026-09-28; it is the required fixture of ruling arm-2305256f.
 SEED_ROLE = "Register-Lead"
 SEED_RETIRED_AT = "2026-09-28T00:00:00+00:00"
 SEED_RETIRED_BY = "iss_bfdb51c1-7a31-443f-b9c9-e15a6bcd7d8c"
-SEED_REASON = "role retired; triage is filed as project-solet register tickets"
+SEED_REASON = "role retired"
 
 
 class RetiredRoleRegistryError(RuntimeError):
@@ -130,16 +117,8 @@ class RetiredRole:
 
     def refusal_message(self) -> str:
         """The sender-facing refusal: what was retired, why, and where to go."""
-        successor = (
-            f"send to its successor {self.successor!r} instead"
-            if self.successor
-            else "it has no successor role"
-        )
-        return (
-            f"role {self.role!r} is retired (since {self.retired_at}, by "
-            f"{self.retired_by}): {self.reason}; {successor}. Nothing was sent "
-            "or persisted."
-        )
+        successor = f"send to its successor {self.successor!r} instead" if self.successor else "it has no successor role"
+        return f"role {self.role!r} is retired (since {self.retired_at}, by {self.retired_by}): {self.reason}; {successor}. Nothing was sent or persisted."
 
 
 class RoleRetiredError(Exception):
@@ -210,8 +189,7 @@ def _parse_row(row: dict[str, object]) -> RetiredRole:
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         raise RetiredRoleRegistryError(
             CODE_REGISTRY_UNAVAILABLE,
-            f"retired_role row {row.get('id')!r} has no positive integer "
-            f"registry_version (got {version!r})",
+            f"retired_role row {row.get('id')!r} has no positive integer registry_version (got {version!r})",
         )
     retired_at = row.get(COL_RETIRED_AT)
     if isinstance(retired_at, datetime):
@@ -246,7 +224,8 @@ def _read_rows(state: StateManagementInterface) -> list[RetiredRole]:
         )
     except (PagedReadError, ReadCeilingError, StateOperationError) as exc:
         raise RetiredRoleRegistryError(
-            CODE_REGISTRY_UNAVAILABLE, f"retired-role registry read failed: {exc}",
+            CODE_REGISTRY_UNAVAILABLE,
+            f"retired-role registry read failed: {exc}",
         ) from exc
     return [_parse_row(row) for row in rows]
 
@@ -257,13 +236,12 @@ def read_retired_role_registry(state: StateManagementInterface) -> RetiredRoleRe
     if not roles:
         raise RetiredRoleRegistryError(
             CODE_REGISTRY_UNAVAILABLE,
-            "retired-role registry is empty: the Register-Lead seed has not run, so "
-            "the registry cannot vouch for any name. Refusing rather than answering "
-            "'nothing is retired'.",
+            "retired-role registry is empty: the Register-Lead seed has not run, so the registry cannot vouch for any name. Refusing rather than answering 'nothing is retired'.",
         )
     ordered = tuple(sorted(roles, key=lambda role: role.registry_version))
     return RetiredRoleRegistry(
-        registry_version=ordered[-1].registry_version, roles=ordered,
+        registry_version=ordered[-1].registry_version,
+        roles=ordered,
     )
 
 
@@ -321,39 +299,41 @@ def _insert(state: StateManagementInterface, role: RetiredRole) -> None:
     except StateOperationError as exc:
         raise RetiredRoleRegistryError(
             "retired_role_write_conflict",
-            f"retiring {role.role!r} at registry_version {role.registry_version} "
-            f"was refused ({exc}); another retirement may have taken that version. "
-            "Re-read the registry and retry.",
+            f"retiring {role.role!r} at registry_version {role.registry_version} was refused ({exc}); another retirement may have taken that version. Re-read the registry and retry.",
         ) from exc
 
 
 def _validate_request(state: StateManagementInterface, req: RetireRoleRequest) -> None:
     if not req.role.strip() or not req.reason.strip():
         raise RetiredRoleRegistryError(
-            "missing_argument", "retire_role requires non-empty 'name' and 'reason'.",
+            "missing_argument",
+            "retire_role requires non-empty 'name' and 'reason'.",
         )
     if find_retired_role(state, req.role) is not None:
         raise RetiredRoleRegistryError(
-            "role_already_retired", f"role {req.role!r} is already retired.",
+            "role_already_retired",
+            f"role {req.role!r} is already retired.",
         )
     successor = req.successor.strip()
     if not successor:
         return
     if normalize_role_name(successor) == normalize_role_name(req.role):
         raise RetiredRoleRegistryError(
-            "invalid_successor", "a retired role cannot be its own successor.",
+            "invalid_successor",
+            "a retired role cannot be its own successor.",
         )
     if find_retired_role(state, successor) is not None:
         raise RetiredRoleRegistryError(
-            "invalid_successor", f"successor {successor!r} is itself retired.",
+            "invalid_successor",
+            f"successor {successor!r} is itself retired.",
         )
 
 
 def retire_role(state: StateManagementInterface, req: RetireRoleRequest) -> RetiredRole:
     """Append one retirement at the next registry version.
 
-    Authorization and the live-holder check are the verb's job (they need the
-    caller identity and the bridge); this is the registry write alone.
+    The caller identity and the live-holder check are the verb's job (they
+    need the bridge); this is the registry write alone.
     """
     _validate_request(state, req)
     registry = read_retired_role_registry(state)
@@ -389,25 +369,6 @@ def seed_retired_role_registry(state: StateManagementInterface) -> str:
     return "seeded"
 
 
-def retiring_authority(state: StateManagementInterface, agent_instance_id: str) -> str | None:
-    """The caller's primary- or principal-class role that may retire a role, else ``None``."""
-    if not agent_instance_id:
-        return None
-    for role in list_roles_for_agent_instance(state, agent_instance_id):
-        records = require_records(
-            state.query_state(
-                AGENT_ROLE_BINDING_NAMESPACE,
-                {
-                    "table": TABLE_ROLE,
-                    "filters": {_COL_EXTERNAL_ID: role_binding_external_id(role)},
-                },
-            ),
-        )
-        if records and records[0].get(COL_ROLE_CLASS) in _RETIRING_ROLE_CLASSES:
-            return role
-    return None
-
-
 @dataclass(frozen=True, slots=True)
 class RetireRoleCall:
     """``retire_role`` as the verb received it, with the server-derived caller."""
@@ -425,24 +386,21 @@ def retire_role_for_caller(
     call: RetireRoleCall,
     live_holder_label: Callable[[str], str | None],
 ) -> RetiredRole:
-    """The ``retire_role`` verb body: authorize, refuse a live holder, then append.
+    """The ``retire_role`` verb body: name the actor, refuse a live holder, then append.
+
+    Any registered caller may retire a role no live session holds; the appended
+    row records who did it. A call carrying no caller identity is refused,
+    because the append-only row would otherwise have no actor.
 
     ``live_holder_label`` returns the live holder's label for a role, or ``None``
     when no live session holds it; the verb binds it to the bridge's liveness
     predicate (the same one the claim gate uses).
     """
-    try:
-        seat = retiring_authority(state, call.caller_instance_id)
-    except StateOperationError as exc:
+    actor = call.caller_instance_id.strip()
+    if not actor:
         raise RetiredRoleRegistryError(
-            "retire_role_authority_unreadable",
-            f"retire_role could not read the caller's role classes: {exc}",
-        ) from exc
-    if seat is None:
-        raise RetiredRoleRegistryError(
-            "retire_role_not_authorized",
-            "retire_role is an operator or Main-seat act: the caller must hold a "
-            "primary- or principal-class role (legislate_role assigns them).",
+            "retire_role_caller_unattributed",
+            "retire_role records who retired the role, and this call carried no caller identity. Call it from a registered session.",
         )
     name = call.name.strip()
     authority = call.authority.strip()
@@ -454,26 +412,26 @@ def retire_role_for_caller(
     try:
         holder = live_holder_label(name)
     except (
-        PagedReadError, ReadCeilingError, RoleBindingMalformedError, StateOperationError,
+        PagedReadError,
+        ReadCeilingError,
+        RoleBindingMalformedError,
+        StateOperationError,
     ) as exc:
         raise RetiredRoleRegistryError(
             "role_binding_unreadable",
-            f"retire_role could not read the role bindings to check for a live "
-            f"holder of {name!r}: {exc}. Refusing rather than retiring a role "
-            "that may be held.",
+            f"retire_role could not read the role bindings to check for a live holder of {name!r}: {exc}. Refusing rather than retiring a role that may be held.",
         ) from exc
     if holder is not None:
         raise RetiredRoleRegistryError(
             "role_held_live",
-            f"role {name!r} is held by live session {holder}; it must release the "
-            "role (peer_release_role) before it can be retired.",
+            f"role {name!r} is held by live session {holder}; it must release the role (peer_release_role) before it can be retired.",
         )
     return retire_role(
         state,
         RetireRoleRequest(
             role=name,
             reason=call.reason,
-            retired_by=f"{seat}; {authority}",
+            retired_by=f"{actor}; {authority}",
             retired_at=call.retired_at,
             successor=call.successor,
         ),
@@ -496,6 +454,5 @@ __all__ = [
     "refuse_if_retired",
     "retire_role",
     "retire_role_for_caller",
-    "retiring_authority",
     "seed_retired_role_registry",
 ]

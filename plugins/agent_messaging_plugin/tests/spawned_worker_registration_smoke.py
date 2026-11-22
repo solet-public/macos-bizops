@@ -69,10 +69,7 @@ from agent_messaging_plugin.tmux_adapter import (  # noqa: E402
 )
 
 _RENAME_SKILL = REPO_ROOT / ".claude" / "commands" / "rename.md"
-_RENAME_TEMPLATE = (
-    REPO_ROOT / "plugins" / "github_midwife_plugin" / "knowledge_base"
-    / "hydration_templates" / "rename_skill_SKILL.md.template"
-)
+_RENAME_TEMPLATE = REPO_ROOT / "plugins" / "github_midwife_plugin" / "knowledge_base" / "hydration_templates" / "rename_skill_SKILL.md.template"
 
 _passed = 0
 _failed: list[str] = []
@@ -107,18 +104,22 @@ def _env_map(pairs: list[str]) -> dict[str, str]:
 
 
 def _tmux_env(solet_bin: str, *, transport: str = "watch") -> dict[str, str]:
-    return _env_map(_env_pairs(
-        agent_instance_id="agi-test", agent_session_id="ases-agi-test",
-        label="lane-x", solet_name="testsolet", solet_bin=solet_bin,
-        allowed_tools=(), transport=transport,
-        context_gauge_reporter_path=(
-            Path(solet_bin).parent / "rotation_due_watch.py"
-        ),
-        # The spawn's RESOLVED lane root (2026-09-07, iss_2236d297) -- these
-        # CLI/PATH assertions are indifferent to which root it is, so this
-        # passes the same directory the fixture already built.
-        cwd=Path(solet_bin).parent,
-    ))
+    return _env_map(
+        _env_pairs(
+            agent_instance_id="agi-test",
+            agent_session_id="ases-agi-test",
+            label="lane-x",
+            solet_name="testsolet",
+            solet_bin=solet_bin,
+            allowed_tools=(),
+            transport=transport,
+            context_gauge_reporter_path=(Path(solet_bin).parent / "rotation_due_watch.py"),
+            # The spawn's RESOLVED lane root (2026-09-07, iss_2236d297) -- these
+            # CLI/PATH assertions are indifferent to which root it is, so this
+            # passes the same directory the fixture already built.
+            cwd=Path(solet_bin).parent,
+        )
+    )
 
 
 def _managed_identity_precedence_is_documented(body: str) -> bool:
@@ -127,20 +128,25 @@ def _managed_identity_precedence_is_documented(body: str) -> bool:
         for fragment in (
             'WATCH_ID="${AGENT_INSTANCE_ID:-}"',
             'if [[ -z "$WATCH_ID" ]]; then',
-            'shasum -a 256 | cut -c1-24',
+            "shasum -a 256 | cut -c1-24",
         )
     )
 
 
 def _rename_recipe(body: str, cli_name: str) -> str:
     for block in body.split("```bash")[1:]:
-        if 'WATCH_CLI=' in block and 'PEER_LIST=' in block and 'WATCH_BRANCH=' in block:
+        if "WATCH_CLI=" in block and "PEER_LIST=" in block and "WATCH_BRANCH=" in block:
             return block.split("```", 1)[0].replace("{{SOLET_NAME}}", cli_name)
     return ""
 
 
 def _run_rename_recipe(
-    recipe: str, *, cli_name: str, case: str, session_id: str, managed_id: str,
+    recipe: str,
+    *,
+    cli_name: str,
+    case: str,
+    session_id: str,
+    managed_id: str,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -151,17 +157,13 @@ def _run_rename_recipe(
         process_file = root / "process.txt"
         resolved_id = managed_id if case != "bare-watcher" else resolve_watch_instance_id(session_id, None)
         has_row = case != "absence"
-        peer_data = {"result": {"success": True, "data": {"instances": {
-            "claude_code": ([{"agent_instance_id": resolved_id, "parent_pid": 4242}] if has_row else [])
-        }}}}
+        peer_data = {"result": {"success": True, "data": {"instances": {"claude_code": ([{"agent_instance_id": resolved_id, "parent_pid": 4242}] if has_row else [])}}}}
         peer_file.write_text(__import__("json").dumps(peer_data), encoding="utf-8")
         process_command = f"{cli_name} watch --no-claim" if case in {"managed-watcher", "bare-watcher"} else "claude mcp application-bridge"
         process_file.write_text(process_command, encoding="utf-8")
         cli = bindir / cli_name
         cli.write_text(
-            "#!/bin/sh\n"
-            'printf \'%s\\n\' "$*" >> "$CALL_LOG"\n'
-            'if [ "$1" = call ] && [ "$2" = plugin::agent_messaging_plugin::peer_list ]; then cat "$PEER_FILE"; fi\n',
+            '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$CALL_LOG"\nif [ "$1" = call ] && [ "$2" = plugin::agent_messaging_plugin::peer_list ]; then cat "$PEER_FILE"; fi\n',
             encoding="utf-8",
         )
         cli.chmod(0o755)
@@ -186,6 +188,7 @@ def _run_rename_recipe(
         result = subprocess.run(["bash", "-c", recipe], env=env, capture_output=True, text=True, check=False)
         calls = call_log.read_text(encoding="utf-8").splitlines() if call_log.exists() else []
         return result, calls, resolved_id
+
 
 def test_tmux_env_exports_absolute_cli_and_path() -> None:
     print("\ntmux adapter exports an absolute CLI and a PATH that finds it")
@@ -219,16 +222,22 @@ def test_tmux_pane_command_arms_registration_sidecar_with_spool() -> None:
         bin_dir = Path(tmp)
         solet_bin = _executable(bin_dir, "solet-bridge")
         pane = _pane_command(
-            ["claude", "--print"], label="lane-x",
-            solet_bin=solet_bin, transport="watch",
+            ["claude", "--print"],
+            label="lane-x",
+            solet_bin=solet_bin,
+            transport="watch",
         )
         mcp_pane = _pane_command(
-            ["claude", "--print"], label="lane-x",
-            solet_bin=solet_bin, transport="mcp",
+            ["claude", "--print"],
+            label="lane-x",
+            solet_bin=solet_bin,
+            transport="mcp",
         )
         no_cli_pane = _pane_command(
-            ["claude", "--print"], label="lane-x",
-            solet_bin="", transport="watch",
+            ["claude", "--print"],
+            label="lane-x",
+            solet_bin="",
+            transport="watch",
         )
     _check(
         f"{shlex.quote(solet_bin)} watch" in pane or f"{solet_bin} watch" in pane,
@@ -237,8 +246,7 @@ def test_tmux_pane_command_arms_registration_sidecar_with_spool() -> None:
     _check("--no-claim" in pane, "the sidecar registers presence WITHOUT claiming a role")
     _check(
         "--no-spool" not in pane,
-        "the Claude sidecar keeps its spool (wake_waiter.py consumes it) — "
-        "copying Codex's --no-spool would re-deafen the wake",
+        "the Claude sidecar keeps its spool (wake_waiter.py consumes it) — copying Codex's --no-spool would re-deafen the wake",
     )
     _check("--exit-with-parent $$" in pane, "the sidecar dies with the pane's shell")
     # find(), not index(): a mutation that removes the sidecar must RED this
@@ -254,7 +262,8 @@ def test_tmux_pane_command_arms_registration_sidecar_with_spool() -> None:
     )
     _check("watch" not in mcp_pane, "no sidecar on the mcp transport (the bridge registers)")
     _check(
-        "watch" not in no_cli_pane and no_cli_pane.endswith(
+        "watch" not in no_cli_pane
+        and no_cli_pane.endswith(
             f"exec {shlex.join(['claude', '--print'])}",
         ),
         "an unresolvable CLI degrades to the pre-fix pane, never a broken one",
@@ -283,29 +292,42 @@ def test_headless_env_and_watcher() -> None:
         bin_dir.mkdir(parents=True)
         solet_bin = _executable(bin_dir, "solet-bridge")
         driver = HeadlessHostDriver(
-            claude_bin="/bin/true", solet_name="testsolet", solet_bin=solet_bin,
-            transport="watch", cwd=Path(tmp),
-            python_executable=str(bin_dir / "python3"), popen_fn=_popen,
+            claude_bin="/bin/true",
+            solet_name="testsolet",
+            solet_bin=solet_bin,
+            transport="watch",
+            cwd=Path(tmp),
+            python_executable=str(bin_dir / "python3"),
+            popen_fn=_popen,
         )
         env = driver._spawn_env(  # noqa: SLF001 -- offline shape assertion
-            agent_instance_id="agi-test", agent_session_id="ases-agi-test",
-            label="lane-x", allowed_tools=(), transport="watch",
-            context_gauge_reporter_path=(
-                Path(tmp) / ".claude" / "hooks" / "rotation_due_watch.py"
-            ),
+            agent_instance_id="agi-test",
+            agent_session_id="ases-agi-test",
+            label="lane-x",
+            allowed_tools=(),
+            transport="watch",
+            context_gauge_reporter_path=(Path(tmp) / ".claude" / "hooks" / "rotation_due_watch.py"),
         )
         watcher = _arm_watcher(
-            _popen, solet_bin, Path(tmp), 999, env, "watch",
+            _popen,
+            solet_bin,
+            Path(tmp),
+            999,
+            env,
+            "watch",
         )
         none_on_mcp = _arm_watcher(
-            _popen, solet_bin, Path(tmp), 999, env, "mcp",
+            _popen,
+            solet_bin,
+            Path(tmp),
+            999,
+            env,
+            "mcp",
         )
 
     _check(env.get("AGENT_WAKE_CLI") == solet_bin, "headless AGENT_WAKE_CLI is absolute")
     _check(
-        env.get("AGENT_CONTEXT_GAUGE_REPORTER_PATH", "").endswith(
-            ".claude/hooks/rotation_due_watch.py"
-        ),
+        env.get("AGENT_CONTEXT_GAUGE_REPORTER_PATH", "").endswith(".claude/hooks/rotation_due_watch.py"),
         "headless exports its designated gauge reporter path",
     )
     _check(
@@ -327,8 +349,7 @@ def test_headless_env_and_watcher() -> None:
         "headless watcher keeps its spool for wake_waiter.py",
     )
     _check(
-        "--exit-with-parent" in argv
-        and argv[argv.index("--exit-with-parent") + 1] == "999",
+        "--exit-with-parent" in argv and argv[argv.index("--exit-with-parent") + 1] == "999",
         "the watcher is bound to the worker's pid, not its own",
     )
 
@@ -355,8 +376,7 @@ def test_resolver_falls_back_to_the_active_venv() -> None:
         "owned explicit path wins",
     )
     _check(
-        resolve_solet_bin(None, python_executable="/nope/python3") == ""
-        or Path(resolve_solet_bin(None, python_executable="/nope/python3")).is_absolute(),
+        resolve_solet_bin(None, python_executable="/nope/python3") == "" or Path(resolve_solet_bin(None, python_executable="/nope/python3")).is_absolute(),
         "unresolvable returns empty rather than a bogus relative path",
     )
     degraded: dict[str, str] = {"PATH": "/usr/bin"}
@@ -410,9 +430,8 @@ def test_sidecar_argv_contract() -> None:
 def test_presence_and_liveness_regress_independently() -> None:
     """RCA of record (Lane R, 2026-08-14): PRESENCE (the watch sidecar
     ``_pane_command`` arms) and LIVENESS (the ``AGENT_WAKE_CLI``/``PATH``
-    export ``_env_pairs``/``expose_worker_cli`` build, which
-    ``heartbeat_report_alive.py``'s bare ``subprocess.run(["solet-bridge", ...])``
-    depends on to resolve) are two separate mechanisms built by two
+    export ``_env_pairs``/``expose_worker_cli`` build for worker coordination
+    subprocesses) are two separate mechanisms built by two
     functions that never call each other or share mutable state. A future
     change could restore one without the other and still look green if
     nothing asserts them side by side. This pins that they redden
@@ -427,35 +446,29 @@ def test_presence_and_liveness_regress_independently() -> None:
         bin_dir.mkdir(parents=True)
         solet_bin = _executable(bin_dir, "solet-bridge")
         pane = _pane_command(
-            ["claude", "--print"], label="lane-x",
-            solet_bin=solet_bin, transport="watch",
+            ["claude", "--print"],
+            label="lane-x",
+            solet_bin=solet_bin,
+            transport="watch",
         )
         env = _tmux_env(solet_bin)
         # Resolved while the stub `solet-bridge` still exists on disk -- shutil.which
         # stats the candidate, so this must run inside the tempdir's lifetime.
         liveness_ok = shutil.which("solet-bridge", path=env.get("PATH", "")) == solet_bin
     presence_ok = "watch" in pane and "--no-claim" in pane
-    # The literal dependency heartbeat_report_alive.py's bare
-    # `subprocess.run(["solet-bridge", ...])` has on PATH -- not a proxy for it.
+    # The worker coordination CLI remains resolvable on PATH independently of
+    # whether the watch sidecar was armed.
     _check(
         presence_ok,
-        "LEG 1 baseline: presence assertion is green (sidecar armed in the pane) -- "
-        "named mutation: neuter the `if transport == 'watch' and solet_bin:` block "
-        "in tmux_adapter.py::_pane_command; must redden ONLY this assertion",
+        "LEG 1 baseline: presence assertion is green (sidecar armed in the pane) -- named mutation: neuter the `if transport == 'watch' and solet_bin:` block in tmux_adapter.py::_pane_command; must redden ONLY this assertion",
     )
     _check(
         liveness_ok,
-        "LEG 2 baseline: liveness assertion is green (PATH resolves the bare "
-        "`solet-bridge` heartbeat_report_alive.py shells out to) -- named mutation: "
-        "skip the PATH-prepend in solet_cli.py::expose_worker_cli; must redden "
-        "ONLY this assertion",
+        "LEG 2 baseline: liveness assertion is green (PATH resolves the worker coordination CLI) -- named mutation: skip the PATH-prepend in solet_cli.py::expose_worker_cli; must redden ONLY this assertion",
     )
     _check(
         presence_ok and liveness_ok,
-        "LEG 3: both assertions are green from the SAME baseline build, so a "
-        "mutation applied to only one of _pane_command/expose_worker_cli has "
-        "exactly one of these two checks available to redden -- see the "
-        "report for the two separate single-mutation runs",
+        "LEG 3: both assertions are green from the SAME baseline build, so a mutation applied to only one of _pane_command/expose_worker_cli has exactly one of these two checks available to redden -- see the report for the two separate single-mutation runs",
     )
 
 
@@ -472,42 +485,54 @@ def _rename_arm_contract(calls: list[str], live: bool) -> bool:
 
 
 def _rename_case_contract_holds(
-    result: subprocess.CompletedProcess[str], calls: list[str],
-    expected_branch: str, identity: str, expected_live: bool,
+    result: subprocess.CompletedProcess[str],
+    calls: list[str],
+    expected_branch: str,
+    identity: str,
+    expected_live: bool,
 ) -> bool:
     branch = f"WATCH_BRANCH={expected_branch} WATCH_ID={identity}"
-    return (
-        result.returncode == 0
-        and branch in result.stdout
-        and _rename_claim_contract(calls, identity, expected_live)
-        and _rename_arm_contract(calls, expected_live)
-    )
+    return result.returncode == 0 and branch in result.stdout and _rename_claim_contract(calls, identity, expected_live) and _rename_arm_contract(calls, expected_live)
 
 
 def _unsafe_bridge_mutant_violates_contract(
-    recipe: str, cli_name: str, session_id: str, managed_id: str, identity: str,
+    recipe: str,
+    cli_name: str,
+    session_id: str,
+    managed_id: str,
+    identity: str,
 ) -> bool:
     mutant = recipe.replace("*) BRANCH=1c ;;", "*) BRANCH=1b ;;")
     result, calls, _ = _run_rename_recipe(
-        mutant, cli_name=cli_name, case="managed-bridge",
-        session_id=session_id, managed_id=managed_id,
+        mutant,
+        cli_name=cli_name,
+        case="managed-bridge",
+        session_id=session_id,
+        managed_id=managed_id,
     )
     return not _rename_case_contract_holds(result, calls, "1c", identity, True)
 
 
 def _qualify_rename_case(
-    name: str, recipe: str, cli_name: str, case: str,
-    expected_branch: str, session_id: str, managed_id: str,
+    name: str,
+    recipe: str,
+    cli_name: str,
+    case: str,
+    expected_branch: str,
+    session_id: str,
+    managed_id: str,
 ) -> None:
     result, calls, identity = _run_rename_recipe(
-        recipe, cli_name=cli_name, case=case,
-        session_id=session_id, managed_id=managed_id,
+        recipe,
+        cli_name=cli_name,
+        case=case,
+        session_id=session_id,
+        managed_id=managed_id,
     )
     live = case != "absence"
     _check(
         _rename_case_contract_holds(result, calls, expected_branch, identity, live),
-        f"{name}: {case} selects {expected_branch}, claims the resolved id, and "
-        f"{'never arms a live incumbent' if live else 'arms only when absent'}",
+        f"{name}: {case} selects {expected_branch}, claims the resolved id, and {'never arms a live incumbent' if live else 'arms only when absent'}",
     )
     if case == "managed-bridge":
         _check(
@@ -547,8 +572,7 @@ def test_watch_id_recipe_matches_the_code() -> None:
     managed_id = "agi-managed-watch-fixture-01"
     derived = "agi-watch-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
     _check(
-        resolve_watch_instance_id(session_id, None) == derived
-        == f"{WATCH_AGENT_INSTANCE_PREFIX}{watch_instance_digest(session_id)}",
+        resolve_watch_instance_id(session_id, None) == derived == f"{WATCH_AGENT_INSTANCE_PREFIX}{watch_instance_digest(session_id)}",
         "bare-watch fixture matches the Python digest implementation",
     )
     _check(

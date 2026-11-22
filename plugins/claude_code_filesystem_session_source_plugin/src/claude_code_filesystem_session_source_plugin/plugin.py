@@ -37,6 +37,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import re
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -92,6 +93,9 @@ from ananta.llm.session_ledger.vendor.claude_code import (
     PAYLOAD_KIND_TOOL_RESULT,
     parse_line,
 )
+
+from claude_code_filesystem_session_source_plugin import session_activity
+from claude_code_filesystem_session_source_plugin.async_jobs import AsyncJobs
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +159,7 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
         self.name = "claude_code_filesystem_session_source_plugin"
         self._sweep_lock = threading.Lock()
         self._next_sweep_at: dict[Path, float] = {}
+        self._activity_jobs = AsyncJobs(self.name)
 
     # ------------------------------------------------------------------
     # PluginBase lifecycle
@@ -185,6 +190,15 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
                 name="qualify",
                 result_processor_template_customizations=MergeResultProcessorCustomizations(
                     result_type="claude_code_filesystem_session_source_qualification",
+                ),
+                error_processor_template_customizations=MergeErrorProcessorCustomizations(
+                    retryable=True,
+                ),
+            ),
+            "measure_session_activity": EdgeProcessDefinition(
+                name="measure_session_activity",
+                result_processor_template_customizations=MergeResultProcessorCustomizations(
+                    result_type="claude_code_session_activity",
                 ),
                 error_processor_template_customizations=MergeErrorProcessorCustomizations(
                     retryable=True,
@@ -232,6 +246,84 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
             "error": None,
             "timestamp": datetime.now(UTC).isoformat(),
         }
+
+    @platform_process(
+        name="measure_session_activity",
+        is_async=True,
+        is_discoverable=True,
+        context_handling=ContextHandling.NONE,
+        parameters={
+            "since": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Inclusive window start, an ISO-8601 timestamp with a time zone, for example 2026-11-12T11:50:00Z.",
+            ),
+            "until": ParameterMetadata(
+                type=ParameterType.STRING,
+                required=True,
+                description="Exclusive window end, an ISO-8601 timestamp with a time zone, later than since.",
+            ),
+            "command_patterns": ParameterMetadata(
+                type=ParameterType.DICT,
+                required=False,
+                description="Optional {name: regular expression}. Each pattern counts the model's tool calls whose text matches: 'Bash <command>' for a shell call, '<tool name> <input as compact sorted JSON>' for any other.",
+            ),
+            "session_ids": ParameterMetadata(
+                type=ParameterType.LIST,
+                required=False,
+                description="Optional transcript ids to measure; omitted means every transcript touched in the window.",
+            ),
+        },
+        output_type="object",
+        output_description="Queued job; its result is the per-session activity document for the window.",
+        return_value_schema=ReturnValueSchema(
+            type=ParameterType.OBJECT,
+            description="Job handle; read the document from the completed job.",
+            properties={
+                "job_id": ParameterMetadata(type=ParameterType.STRING, description="Read this job through job_service.get_job."),
+                "status": ParameterMetadata(type=ParameterType.STRING, description="queued."),
+            },
+        ),
+        processor_policy_category=ProcessorPolicyCategory.EDGE,
+        result_processor_customizations=MergeResultProcessorCustomizations(
+            result_type="claude_code_session_activity",
+        ),
+        error_processor_customizations=MergeErrorProcessorCustomizations(retryable=True),
+    )
+    def measure_session_activity(self, params: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+        """Queue one read-only measurement of how each Claude Code session was woken and what it ran."""
+        try:
+            _activity_request(params)
+        except ValueError as exc:
+            return _parameter_failure(exc)
+        return self._activity_jobs.submit(self, "measure_session_activity", params, state, self._measure_activity_now)
+
+    def _measure_activity_now(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Read the transcripts on the job worker; only the enabled source's root is ever read."""
+        since, until, patterns, session_ids = _activity_request(params)
+        root, advisories = self._activity_root()
+        document = session_activity.measure(root, since, until, patterns, session_ids=session_ids, advisories=advisories)
+        return {
+            "action_status": ActionStatus.COMPLETED.value,
+            "data": document,
+            "actions": [],
+            "error": None,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+
+    def _activity_root(self) -> tuple[Path | None, list[str]]:
+        """The consented transcript root, or None with the advisory that says why there is none."""
+        try:
+            ledger = self._require_ledger_service()
+        except RuntimeError:
+            return None, ["ledger_service_unavailable"]
+        listed = ledger.list_sources()
+        sources = listed.get("sources") if isinstance(listed, dict) else None
+        source = _registered_source(sources, IngestSourceKind.CLAUDE_CODE_LOCAL.value) if isinstance(sources, list) else None
+        root_uri = source.get("root_uri") if source is not None else None
+        if not isinstance(root_uri, str) or not root_uri:
+            return None, ["source_not_registered"]
+        return root_uri_to_path(root_uri), []
 
     def _require_ledger_service(self) -> Any:
         if self.orchestrator_ref is None:
@@ -366,7 +458,7 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
         return ExternalSessionRef(
             external_session_id=candidate.external_id,
             vendor_session_label=metadata.agent_name,
-            project_path=_decode_project_dir(shape[0].name),
+            project_path=_resolve_project_path(metadata.cwd, shape[0].name, candidate.external_id),
             first_seen_at=datetime.fromtimestamp(candidate.path.stat().st_ctime, tz=UTC),
             originator_session_label=metadata.agent_name,
             originator_agent_instance_id=metadata.bridge_session_id,
@@ -424,7 +516,6 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
             if high_water is not None and mtime <= high_water:
                 continue
             first_seen_at = datetime.fromtimestamp(stat.st_ctime, tz=UTC)
-            project_path = _decode_project_dir(project_dir.name)
             # Per 2026-05-31 Architect ruling §3 (Option (a) per
             # Coordinator's 2026-05-31 contract lock): pre-scan the
             # rollout file for promoted session metadata. The vendor
@@ -434,7 +525,7 @@ class ClaudeCodeFilesystemSessionSourcePlugin(
             yield ExternalSessionRef(
                 external_session_id=session_id,
                 vendor_session_label=metadata.agent_name,
-                project_path=project_path,
+                project_path=_resolve_project_path(metadata.cwd, project_dir.name, session_id),
                 first_seen_at=first_seen_at,
                 originator_session_label=metadata.agent_name,
                 originator_agent_instance_id=metadata.bridge_session_id,
@@ -671,14 +762,32 @@ def _augment_with_offset(event: RawSessionEvent, offset: int) -> RawSessionEvent
     )
 
 
+def _resolve_project_path(cwd: str | None, dir_name: str, session_id: str) -> str | None:
+    """Return the session's project path: the transcript's ``cwd``, else the flagged decode.
+
+    The transcript records the real working directory, so it is the identity.
+    Only when it has no usable ``cwd`` do we fall back to decoding the
+    directory name, and that is announced: the decode is lossy, so the ref is
+    still produced (nothing is excluded) but the WARNING names the session.
+    """
+    if cwd is not None:
+        return cwd
+    logger.warning(
+        "project_path for session %s decoded from directory name %r: transcript has no usable cwd, hyphens and dots may be wrong",
+        session_id,
+        dir_name,
+    )
+    return _decode_project_dir(dir_name)
+
+
 def _decode_project_dir(name: str) -> str | None:
-    """Best-effort decode of Claude Code's encoded project-directory name.
+    """Degraded fallback: decode Claude Code's encoded project-directory name.
 
     Claude Code encodes ``cwd`` as ``cwd.replace('/', '-')`` when picking
-    the directory name. The reverse is ambiguous for paths that legitimately
-    contain ``-``; we recover the absolute-path shape and surface it as
-    ``project_path``. The first JSONL line still carries the authoritative
-    ``cwd`` field for any consumer that needs to disambiguate.
+    the directory name. The reverse is lossy: a legitimate ``-`` becomes a
+    ``/`` and a ``.`` cannot be recovered. Use :func:`_resolve_project_path`,
+    which prefers the transcript's authoritative ``cwd`` and calls this only
+    when the transcript has none.
     """
     if not name:
         return None
@@ -857,6 +966,27 @@ def _qualification_failure(exc: Exception) -> dict[str, object]:
         "data": {},
         "actions": [],
         "error": {"code": "source_qualification_failed", "message": str(exc)},
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+def _activity_request(params: dict[str, Any]) -> tuple[datetime, datetime, dict[str, re.Pattern[str]], list[str] | None]:
+    """Validate a measure_session_activity request; any malformed parameter is a ValueError."""
+    since, until = session_activity.parse_window(params.get("since"), params.get("until"))
+    raw_patterns = params.get("command_patterns")
+    patterns = session_activity.compile_patterns({} if raw_patterns is None else raw_patterns)
+    session_ids = params.get("session_ids")
+    if session_ids is not None and not (isinstance(session_ids, list) and all(isinstance(item, str) and item for item in session_ids)):
+        raise ValueError("session_ids must be a list of non-empty strings")
+    return since, until, patterns, session_ids
+
+
+def _parameter_failure(exc: Exception) -> dict[str, object]:
+    return {
+        "action_status": ActionStatus.FAILED.value,
+        "data": {},
+        "actions": [],
+        "error": {"code": "parameter_invalid", "message": str(exc)},
         "timestamp": datetime.now(UTC).isoformat(),
     }
 

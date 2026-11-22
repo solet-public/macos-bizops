@@ -35,7 +35,7 @@ runs, in a child interpreter whose import roots are the tree under test:
 A plugin whose constructor or ``get_schema_definitions()`` raises is a finding
 too (``plugin_boot_error``): it would crash startup the same way.
 
-WRONG-TREE DEFENCE. A lane worktree's ``.venv`` is a symlink to the shared
+WRONG-TREE DEFENCE. A linked worktree's ``.venv`` is a symlink to the shared
 checkout's, whose editable ``.pth`` pointers name the SHARED checkout, so a
 naive ``import ananta`` from a worktree tests master, not the candidate
 (``iss_ec0db9c7`` / ``iss_77fe09ad`` class). The child is started with
@@ -135,11 +135,7 @@ def _import_roots(root: Path) -> list[Path]:
     plugins_dir = root / "plugins"
     if plugins_dir.is_dir():
         roots.extend(
-            sorted(
-                child / "src"
-                for child in plugins_dir.iterdir()
-                if (child / "src").is_dir() and not child.name.startswith(_BUNDLED_VENV_PREFIX)
-            ),
+            sorted(child / "src" for child in plugins_dir.iterdir() if (child / "src").is_dir() and not child.name.startswith(_BUNDLED_VENV_PREFIX)),
         )
     contracts = root / "solet_setup_contracts" / "src"
     if contracts.is_dir():
@@ -160,7 +156,7 @@ def _entry_points(root: Path) -> list[_EntryPoint]:
             raise _GateUsageError(f"unreadable plugin manifest {manifest}: {exc}") from exc
         group = data.get("project", {}).get("entry-points", {}).get(_ENTRY_POINT_GROUP, {})
         if not isinstance(group, dict):
-            raise _GateUsageError(f"{manifest}: [project.entry-points.\"{_ENTRY_POINT_GROUP}\"] is not a table")
+            raise _GateUsageError(f'{manifest}: [project.entry-points."{_ENTRY_POINT_GROUP}"] is not a table')
         for plugin_name, target in group.items():
             module, separator, attribute = str(target).partition(":")
             if not separator or not module or not attribute:
@@ -200,8 +196,14 @@ def _run_child(root: Path, entry_points: list[_EntryPoint], dimensions: int) -> 
     argv = [sys.executable, str(Path(__file__).resolve()), _WORKER_FLAG]
     try:
         completed = subprocess.run(
-            argv, input=json.dumps(request), capture_output=True, text=True, env=env, cwd=str(root),
-            timeout=_CHILD_TIMEOUT_SECONDS, check=False,
+            argv,
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(root),
+            timeout=_CHILD_TIMEOUT_SECONDS,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise _ChildCrashError(f"schema boot child timed out after {_CHILD_TIMEOUT_SECONDS}s") from exc
@@ -219,10 +221,9 @@ def _parse_child_verdict(completed: subprocess.CompletedProcess[str]) -> dict[st
     start, end = stdout.find(marker_start), stdout.find(marker_end)
     if start < 0 or end < 0:
         raise _ChildCrashError(
-            f"schema boot child exited {completed.returncode} without a verdict.\n"
-            f"--- child stdout ---\n{stdout.strip()}\n--- child stderr ---\n{completed.stderr.strip()}",
+            f"schema boot child exited {completed.returncode} without a verdict.\n--- child stdout ---\n{stdout.strip()}\n--- child stderr ---\n{completed.stderr.strip()}",
         )
-    payload = stdout[start + len(marker_start):end].strip()
+    payload = stdout[start + len(marker_start) : end].strip()
     try:
         verdict = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -249,7 +250,9 @@ def _findings(verdict: dict[str, object], allowlist: frozenset[str], raw_mode: b
         key = str(entry["key"])
         findings.append(
             _Finding(
-                kind=str(entry["kind"]), key=key, detail=str(entry["detail"]),
+                kind=str(entry["kind"]),
+                key=key,
+                detail=str(entry["detail"]),
                 allowlisted=not raw_mode and key in allowlist,
             ),
         )
@@ -300,9 +303,7 @@ def _print_stale(stale: set[str]) -> None:
 def _report(verdict: dict[str, object], findings: list[_Finding], allowlist_active: bool, touching: bool | None) -> int:
     live = [f for f in findings if not f.allowlisted]
     print(
-        f"\nschema-init gate: booted {verdict.get('plugins_booted')} plugin(s), "
-        f"{verdict.get('schema_count')} schema(s), {verdict.get('installed')} lifecycle install(s) recorded; "
-        f"ananta resolved from {verdict.get('ananta_file')}",
+        f"\nschema-init gate: booted {verdict.get('plugins_booted')} plugin(s), {verdict.get('schema_count')} schema(s), {verdict.get('installed')} lifecycle install(s) recorded; ananta resolved from {verdict.get('ananta_file')}",
     )
     if touching is not None:
         print(f"  scope schema_touching: {'true' if touching else 'false'} (the whole tree was booted regardless)")
@@ -322,7 +323,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw", action="store_true", help="Diagnostic: allowlist IGNORED; every finding blocks.")
     parser.add_argument("--scope-file", type=Path, default=None, help="Sorted repo-relative landing scope; reported only.")
     parser.add_argument(
-        "--embedding-dimensions", type=int, default=_DEFAULT_EMBEDDING_DIMENSIONS,
+        "--embedding-dimensions",
+        type=int,
+        default=_DEFAULT_EMBEDDING_DIMENSIONS,
         help="Placeholder vector width for the dimension-parameterised schemas (never read by the standardizer).",
     )
     return parser
@@ -391,8 +394,7 @@ def _prove_import_root(root: Path) -> str:
     ananta_file = Path(str(ananta.__file__)).resolve()
     if not ananta_file.is_relative_to(root.resolve()):
         raise _GateUsageError(
-            f"import-root mismatch: ananta resolved to {ananta_file}, outside the tree under test {root}. "
-            "The gate would have measured a different checkout (the wrong-tree defect class).",
+            f"import-root mismatch: ananta resolved to {ananta_file}, outside the tree under test {root}. The gate would have measured a different checkout (the wrong-tree defect class).",
         )
     return str(ananta_file)
 

@@ -92,6 +92,7 @@ _REGISTERED_JOB_OPERATIONS: Final[dict[str, frozenset[str]]] = {
             "consolidate_cron",
             "delete_memories_by_ids",
             "delete_memories_by_tag",
+            "ensure_schedules",
             "forget",
             "get_memories_by_tag",
             "get_recent_memory",
@@ -118,14 +119,14 @@ _REGISTERED_JOB_OPERATIONS: Final[dict[str, frozenset[str]]] = {
     ),
     "job_service": frozenset({"get_latest_job", "list_unreached_job_completions", "detect_unresolved_completion_tokens", "sweep_stale_jobs"}),
     "knowledge_service": frozenset({"archive_file", "browse", "create_file", "delete_file", "edit_file", "ingest", "install", "purge_orphaned_chunks", "read_file", "refresh_plugin_process", "refresh_plugin_processes", "search", "search_planning_references", "test_retrieval", "uninstall", "update"}),
-    "plugin_schema_service": frozenset({"install_plugin_schema", "update_plugin_schema", "uninstall_plugin_schema", "purge_plugin_schema"}),
+    "plugin_schema_service": frozenset({"install_plugin_schema", "update_plugin_schema", "uninstall_plugin_schema", "purge_plugin_schema", "get_installed_schema"}),
     "quality_service": frozenset(
         {
             "clear_smoke_proof",
             "correct_smoke_proof",
-            "ensure_full_smoke_schedule",
             "get_smoke_proof",
             "get_smoke_proof_history",
+            "list_full_smoke_campaigns",
             "list_gates",
             "list_smoke_proofs",
             "predict_gate_smokes_merge",
@@ -192,6 +193,9 @@ _REGISTERED_JOB_OPERATIONS: Final[dict[str, frozenset[str]]] = {
             "backfill_session_source_kinds",
             "backfill_summary_embedding_vector_ids",
             "embed_missing_event_content",
+            "ensure_periodic_embed_schedule",
+            "ensure_periodic_poll_schedule",
+            "ensure_periodic_summarize_schedule",
             "lift_canonical_pointer_for_duplicate_sessions",
             "lift_codex_stage1_summaries",
             "push_session_summary_chunk",
@@ -1843,7 +1847,11 @@ class ActionProcessor:
         for var_name, var_value in global_variables.items():
             global_pattern = f"<<<{var_name}>>>"
             if global_pattern in text:
-                text = text.replace(global_pattern, str(var_value))
+                if isinstance(var_value, dict | list):
+                    rendered = json.dumps(var_value)
+                else:
+                    rendered = str(var_value) if var_value is not None else ""
+                text = text.replace(global_pattern, rendered)
         return text
 
     def _apply_template_functions(self, text: str, action: QueuedActionProtocol) -> str:

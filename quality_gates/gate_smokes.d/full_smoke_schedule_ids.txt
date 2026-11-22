@@ -1,0 +1,3 @@
+# Registers the scheduled full battery's flow and session id check for frq_e2cdefed (Change chg_5578d2b4).
+# Smoke for the r74-q3-a2 schedule fix: the schedule's firing ids must pass the action factory's normalizers.
+plugins/platform_dev_surface_plugin/tests/full_smoke_schedule_ids_smoke.py

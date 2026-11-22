@@ -26,9 +26,11 @@ Exercises:
   4. ACTION_HANDLERS carries all 23 migrated/added verbs (the 9 original
      D0.3-migrated verbs, the 4 lane-sf-bulk-v2 Bulk v2 ingest verbs,
      authenticated_request and the composite/tooling/bulk_jobs/reports/
-     dashboards/rest_resources/actions/metadata/content_files families) —
-     a name typo here would silently strand a verb's queued jobs forever
-     (the drain loop only polls names present in this dict).
+     dashboards/rest_resources/actions/metadata/content_files families),
+     ORG_HANDLERS the 7 build 6 org verbs, and ACTION_NAMES both — a name
+     typo here would silently strand a verb's queued jobs forever (the
+     drain loop only polls names present in ACTION_NAMES). Every worker
+     result names the bound org it ran against (org, org_id).
   5. ensure_worker_started is idempotent: two calls produce the same thread
      object, not two threads.
 
@@ -58,7 +60,12 @@ sys.path.insert(0, str(REPO_ROOT / "plugins" / "salesforce_plugin" / "src"))
 
 from salesforce_plugin import async_jobs  # noqa: E402
 from salesforce_plugin.errors import SalesforceCliCallError  # noqa: E402
+from salesforce_plugin.org_service import ResolvedOrg  # noqa: E402
+from salesforce_plugin.orgs import OrgBinding  # noqa: E402
 from salesforce_plugin.plugin import SalesforcePlugin  # noqa: E402
+
+# Build 6: the worker resolves every org-reaching job to a bound org.
+BOUND = OrgBinding(org_id="00DR0000000Q7PqMAK", alias="prod", target_org="operator@example.com", username="operator@example.com", instance_host="example.my.salesforce.com")
 
 _passed = 0
 _failed: list[str] = []
@@ -117,6 +124,10 @@ def _plugin_with_fake_manager() -> tuple[SalesforcePlugin, _FakeAsyncJobManager]
     plugin.initialize({})
     fake_manager = _FakeAsyncJobManager()
     plugin._async_job_manager = fake_manager  # noqa: SLF001
+    # One bound org whose executor is whatever the test put in _cli_executor.
+    orgs = MagicMock()
+    orgs.resolve.side_effect = lambda _params: ResolvedOrg(binding=BOUND, executor=plugin._require_executor())  # noqa: SLF001
+    plugin._orgs = orgs  # noqa: SLF001
     return plugin, fake_manager
 
 
@@ -184,6 +195,13 @@ def test_all_verbs_dispatch_async() -> None:
         "actions": {"operation": "list_custom"},
         "metadata": {"operation": "deploy_status", "deploy_request_id": "0AfR000000014UoKAI"},
         "content_files": {"operation": "delete_document", "content_document_id": "069R0000000yZ9CIAU"},
+        "list_orgs": {},
+        "bind_org": {"target_org": "operator@example.com"},
+        "login": {"method": "web", "flags": {"instance-url": "https://example.my.salesforce.com"}},
+        "logout": {"org": "prod"},
+        "set_default_org": {"org": "prod"},
+        "disconnect_org": {"org": "prod"},
+        "org_lifecycle": {"operation": "list"},
     }
     for action_name, params in calls.items():
         method = getattr(plugin, action_name)
@@ -193,7 +211,7 @@ def test_all_verbs_dispatch_async() -> None:
             result["action_status"] == "completed" and result["data"].get("status") == "queued",
             str(result),
         )
-    _assert("twenty-three jobs created, one per verb", len(fake_manager._jobs) == 23)
+    _assert("thirty jobs created, one per verb", len(fake_manager._jobs) == 30)
 
 
 def test_worker_completes_get_record_on_success() -> None:
@@ -214,6 +232,7 @@ def test_worker_completes_get_record_on_success() -> None:
     completed = fake_manager.update_calls[-1][1]
     _assert("completed result carries the real record", completed["result"]["record"]["Name"] == "Acme", str(completed))
     _assert("attributes stripped by the real record_actions function", "attributes" not in completed["result"]["record"])
+    _assert("the result names the bound org it ran against", (completed["result"]["org"], completed["result"]["org_id"]) == ("prod", BOUND.org_id), str(completed))
 
 
 def test_worker_completes_create_record_write() -> None:
@@ -279,6 +298,7 @@ def test_worker_completes_test_connection_on_success() -> None:
     completed_result = fake_manager.update_calls[-1][1]["result"]
     _assert("test_connection worker returns ok True", completed_result["ok"] is True)
     _assert("test_connection worker carries org_id", completed_result["org_id"] == "00Dxx", str(completed_result))
+    _assert("test_connection names the bound org's alias", completed_result["org"] == "prod", str(completed_result))
     _assert("test_connection worker carries username", completed_result["username"] == "bot@example.com")
 
 
@@ -337,6 +357,9 @@ def test_action_handlers_covers_all_thirteen_verbs() -> None:
         set(async_jobs.ACTION_HANDLERS.keys()) == expected,
         str(sorted(async_jobs.ACTION_HANDLERS.keys())),
     )
+    org_verbs = {"list_orgs", "bind_org", "login", "logout", "set_default_org", "disconnect_org", "org_lifecycle"}
+    _assert("ORG_HANDLERS carries exactly the 7 build 6 org verbs", set(async_jobs.ORG_HANDLERS) == org_verbs, str(sorted(async_jobs.ORG_HANDLERS)))
+    _assert("the drain loop polls all 30 verbs", set(async_jobs.ACTION_NAMES) == expected | org_verbs and len(async_jobs.ACTION_NAMES) == 30, str(async_jobs.ACTION_NAMES))
 
 
 def test_worker_bulk_job_results_writes_csvs_via_csv_export_path_gate() -> None:

@@ -515,9 +515,9 @@ def postgres_install_actions(observed: PostgresObservation) -> list[dict[str, An
         actions.append(
             planned_action(
                 "postgres.install_pgvector_formula",
-                "Install the pgvector Homebrew formula",
+                "Build pgvector from its pinned, checksummed source for PostgreSQL 17",
                 "package_install",
-                "homebrew:pgvector",
+                "pgvector-source-build:postgresql@17",
                 "pgvector_not_available",
             ),
         )

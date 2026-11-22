@@ -17,12 +17,12 @@ from __future__ import annotations
 import copy
 import json
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 _ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_ROOT))
@@ -37,13 +37,16 @@ from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE
 
 import agent_messaging_plugin  # noqa: E402
 from agent_messaging_plugin import accepted_authorization_verbs as verbs  # noqa: E402
-from agent_messaging_plugin.held_authorization_store import record_held_authorization, retire_held_authorization  # noqa: E402
-from agent_messaging_plugin.register_unit_client import VerbError  # noqa: E402
+from agent_messaging_plugin.held_authorization_store import (  # noqa: E402
+    record_held_authorization,
+    retire_held_authorization,
+)
 from agent_messaging_plugin.schema import (  # noqa: E402
     TABLE_ACCEPTED_AUTHORIZATION,
     TABLE_ACCEPTED_AUTHORIZATION_EVENT,
     get_accepted_authorization_schema_definition,
 )
+from agent_messaging_plugin.verb_errors import VerbError  # noqa: E402
 
 if TYPE_CHECKING:
     from agent_messaging_plugin.plugin import AgentMessagingPlugin
@@ -211,7 +214,7 @@ class _ProbedState:
         return getattr(self._inner, name)
 
     @contextmanager
-    def transactional(self) -> Iterator[_ProbedTransaction]:
+    def transactional(self) -> Generator[_ProbedTransaction]:
         with self._inner.transactional() as txn:
             yield _ProbedTransaction(txn, self.probe)
 
@@ -246,7 +249,7 @@ def test_pending_visible() -> None:
             },
             {},
         )
-        _check(recorded["action_status"] == "completed", "record_accepted_authorization_completes")
+        _check(cast(Any, recorded)["action_status"] == "completed", "record_accepted_authorization_completes")
     successor = _plugin(state)
     entries = successor.list_held_authorizations({"owed_by_role": "Git-Controller"}, {})["data"]["entries"]
     _check(
@@ -507,9 +510,9 @@ def _process_factory(method: Any, key: str) -> ActionFactory:
     metadata = method._platform_process_metadata
     return ActionFactory(
         process_registry={"processes": {key: {"parameters": {name: parameter.to_dict() for name, parameter in metadata.parameters.items()}}}},
-        template_engine=SimpleNamespace(resolve_templates=lambda action_def, context: action_def),
-        state_service=SimpleNamespace(generate_unique_string=lambda **_kwargs: {"action_status": "completed", "data": {"random_string": "accepted-smoke"}}),
-        action_event_recorder=SimpleNamespace(store_action_event=lambda _action: "ae-accepted-smoke"),
+        template_engine=cast(Any, SimpleNamespace(resolve_templates=lambda action_def, context: action_def)),
+        state_service=cast(Any, SimpleNamespace(generate_unique_string=lambda **_kwargs: {"action_status": "completed", "data": {"random_string": "accepted-smoke"}})),
+        action_event_recorder=cast(Any, SimpleNamespace(store_action_event=lambda _action: "ae-accepted-smoke")),
     )
 
 
@@ -561,7 +564,7 @@ def test_public_surface() -> None:
     _check(all(_bridge_accepts(verb, arguments[verb]) and _bridge_refuses_unknown(verb) for verb in VERBS), "bridge_registers_every_lifecycle_parameter")
     plugin_class = _plugin_class()
     edges = plugin_class.get_edge_process_definitions(object.__new__(plugin_class))
-    _check([edges[verb].error_processor_template_customizations.retryable for verb in VERBS] == [False, False, True, True], "edge_definitions_never_replay_writes")
+    _check([cast(Any, edges[verb].error_processor_template_customizations).retryable for verb in VERBS] == [False, False, True, True], "edge_definitions_never_replay_writes")
     documents = [json.loads((PROCESSES / f"{verb}.json").read_text(encoding="utf-8")) for verb in VERBS]
     _check([(doc["process_key"], doc["processor_policy_category"]) for doc in documents] == [(PLUGIN_KEY + verb, "edge") for verb in VERBS], "process_documents_match_registered_keys")
     state = _state()

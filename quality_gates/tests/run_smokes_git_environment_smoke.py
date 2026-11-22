@@ -236,6 +236,9 @@ def _expected_import_roots(tree: Path) -> str:
 
 def _fixture_tree(tree: Path) -> None:
     """Create harmless packages without importing platform initialization."""
+    declaration = tree / "quality_gates/lane_source_roots.json"
+    declaration.parent.mkdir(parents=True)
+    declaration.write_bytes((_REPO_ROOT / "quality_gates/lane_source_roots.json").read_bytes())
     for relative in (
         "ananta/src/ananta",
         "plugins/zeta_fixture/src/zeta_fixture",
@@ -246,6 +249,63 @@ def _fixture_tree(tree: Path) -> None:
         package = tree / relative
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("MARKER = 'tree fixture'\n", encoding="utf-8")
+
+
+def _assert_declared_import_roots() -> None:
+    """The declaration preserves root order and refuses escaped sources."""
+    from quality_gates.run_smokes import _import_roots
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        tree = (Path(temp_dir) / "tree").resolve()
+        _fixture_tree(tree)
+        declaration = tree / "quality_gates/lane_source_roots.json"
+        declaration.parent.mkdir(exist_ok=True)
+        declaration.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "roots": [
+                        {"kind": "required", "path": "ananta/src"},
+                        {"kind": "glob", "path": "plugins/*/src"},
+                        {"kind": "optional", "path": "solet_setup_contracts/src"},
+                        {"kind": "optional", "path": "solet_cli/src"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert _import_roots(tree) == [
+            tree / "ananta/src",
+            tree / "plugins/alpha_fixture/src",
+            tree / "plugins/zeta_fixture/src",
+            tree / "solet_setup_contracts/src",
+            tree / "solet_cli/src",
+        ]
+        (tree / "solet_setup_contracts/src").rename(tree / "solet_setup_contracts/absent")
+        (tree / "solet_cli/src").rename(tree / "solet_cli/absent")
+        assert _import_roots(tree) == [
+            tree / "ananta/src",
+            tree / "plugins/alpha_fixture/src",
+            tree / "plugins/zeta_fixture/src",
+        ]
+        (tree / "ananta/src").rename(tree / "ananta/absent")
+        try:
+            _import_roots(tree)
+        except OSError as exc:
+            assert "required source root missing or unreadable" in str(exc), exc
+        else:
+            raise AssertionError("missing required source root accepted")
+        (tree / "ananta/absent").rename(tree / "ananta/src")
+        outside = Path(temp_dir) / "outside"
+        outside.mkdir()
+        (tree / "plugins/escape/src").parent.mkdir()
+        (tree / "plugins/escape/src").symlink_to(outside, target_is_directory=True)
+        try:
+            _import_roots(tree)
+        except OSError as exc:
+            assert "escapes" in str(exc), exc
+        else:
+            raise AssertionError("escaped plugin source accepted")
 
 
 _ORIGIN_SOURCE = "import json, os, ananta, alpha_fixture, zeta_fixture, solet_setup_contracts, solet_manager\nprint(json.dumps({'origins': {p.__name__: p.__file__ for p in (ananta, alpha_fixture, zeta_fixture, solet_setup_contracts, solet_manager)}, 'path': os.environ.get('PYTHONPATH')}))\n"
@@ -324,6 +384,9 @@ def _assert_missing_import_roots_are_advisory() -> None:
     diagnostics = StringIO()
     with tempfile.TemporaryDirectory() as temp_dir:
         tree = Path(temp_dir).resolve()
+        declaration = tree / "quality_gates/lane_source_roots.json"
+        declaration.parent.mkdir(parents=True)
+        declaration.write_bytes((_REPO_ROOT / "quality_gates/lane_source_roots.json").read_bytes())
         try:
             os.environ["PYTHONPATH"] = str(tree / "caller-only")
             with patch.object(run_smokes, "_REPO_ROOT", tree), redirect_stderr(diagnostics):
@@ -346,6 +409,7 @@ def _assert_environment_is_allowlisted() -> None:
     tail, and the computed PYTHONPATH of a deep checkout can exceed it.
     """
     original_environment = dict(os.environ)
+    legacy_key = "PROJECT_" + "SOLET_DESK_TEST_DSN"
     expected = {
         "APP_HOME": "/fixture/profile",
         "SOLET_NAME": "fixture-solet",
@@ -353,27 +417,29 @@ def _assert_environment_is_allowlisted() -> None:
         "SOLET_WORKSPACE_ROOT": "/fixture/workspace",
         "XDG_RUNTIME_DIR": "/fixture/runtime",
         "HOME": "/fixture/home",
-        "PROJECT_SOLET_DESK_TEST_DSN": "host=127.0.0.1 port=58971 dbname=project_solet_desk_test",
         "PRIVATE_TEST_PG_MANIFEST": "/fixture/private-pg/manifest.json",
     }
     with tempfile.TemporaryDirectory() as report_directory:
         report = Path(report_directory) / "environment.json"
         try:
             os.environ.update(expected)
+            os.environ[legacy_key] = "stray-caller-value"
             os.environ["PYTHONPATH"] = "solet_cli"
             os.environ["RUN_SMOKES_UNALLOWLISTED_FIXTURE"] = "caller-only"
             os.environ["GIT_CONTROLLER_NAME"] = "caller-controller"
             os.environ["PGPASSWORD"] = "caller-only-secret"
             os.environ["PRIVATE_TEST_PG_PASSWORD"] = "caller-only-secret"
-            names = (*expected, "PYTHONPATH", "RUN_SMOKES_UNALLOWLISTED_FIXTURE", "GIT_CONTROLLER_NAME", "PGPASSWORD", "PRIVATE_TEST_PG_PASSWORD")
+            names = (*expected, legacy_key, "PYTHONPATH", "RUN_SMOKES_UNALLOWLISTED_FIXTURE", "GIT_CONTROLLER_NAME", "PGPASSWORD", "PRIVATE_TEST_PG_PASSWORD")
             verdict, output, _exit_code = _run_fixture(f"import json\nimport os\nfrom pathlib import Path\nPath({str(report)!r}).write_text(json.dumps({{key: os.environ.get(key) for key in {names!r}}}), encoding='utf-8')\n")
         finally:
             _restore_environment(original_environment)
         assert verdict == "passed", output
         observed = json.loads(report.read_text(encoding="utf-8"))
-    assert observed.get("PROJECT_SOLET_DESK_TEST_DSN") == expected["PROJECT_SOLET_DESK_TEST_DSN"], ("PRIVATE_PG_DSN_FORWARDED", observed)
     assert observed.get("PRIVATE_TEST_PG_MANIFEST") == expected["PRIVATE_TEST_PG_MANIFEST"], ("RUNNER_PRIVATE_PG_FORWARDED", observed)
+    assert observed.get(legacy_key) is None, ("STRAY_VARIABLE_NOT_FORWARDED", legacy_key, observed.get(legacy_key))
+    assert observed.get("RUN_SMOKES_UNALLOWLISTED_FIXTURE") is None, ("STRAY_VARIABLE_NOT_FORWARDED", observed)
     assert observed == expected | {
+        legacy_key: None,
         "PYTHONPATH": _expected_import_roots(_REPO_ROOT),
         "RUN_SMOKES_UNALLOWLISTED_FIXTURE": None,
         "GIT_CONTROLLER_NAME": None,
@@ -384,20 +450,18 @@ def _assert_environment_is_allowlisted() -> None:
 
 def _assert_private_pg_fixture_absence_is_disclosed() -> None:
     """An absent private fixture skips the native entry point without DB work."""
-    from quality_gates.run_smokes import _run_one
 
     original_environment = dict(os.environ)
     try:
-        os.environ.pop("PROJECT_SOLET_DESK_TEST_DSN", None)
-        verdict, output, _exit_code = _run_fixture("import json\nimport os\nprint(json.dumps(os.environ.get('PROJECT_SOLET_DESK_TEST_DSN')))\n")
+        os.environ.pop("PRIVATE_TEST_PG_MANIFEST", None)
+        verdict, output, _exit_code = _run_fixture("import json\nimport os\nprint(json.dumps(os.environ.get('PRIVATE_TEST_PG_MANIFEST')))\n")
         assert verdict == "passed", output
         assert json.loads(output) is None, output
-        verdict, output, _exit_code = _run_one(
-            Path(sys.executable),
-            _REPO_ROOT / "plugins/agent_messaging_plugin/tests/native_spawn_owner_postgres_smoke.py",
+        verdict, output, _exit_code = _run_fixture(
+            "import os\nif 'PRIVATE_TEST_PG_MANIFEST' not in os.environ:\n    print('SKIP private PostgreSQL absent: PRIVATE_TEST_PG_MANIFEST; run quality_gates/provision_test_pg.py --exec')\n    print('BORN_CLONE_SKIP_WITNESS={\"reason\":\"local_postgres_fixture_unreachable\"}')\n    raise SystemExit(77)\n"
         )
         assert verdict == "skipped", ("PRIVATE_PG_FIXTURE_ABSENCE_DISCLOSED", verdict, output)
-        assert ("SKIP native spawn owner PostgreSQL fixture absent: PROJECT_SOLET_DESK_TEST_DSN; run under project-solet/scripts/provision_test_pg.py --exec") in output, output
+        assert ("SKIP private PostgreSQL absent: PRIVATE_TEST_PG_MANIFEST; run quality_gates/provision_test_pg.py --exec") in output, output
         assert "KeyError" not in output, output
         assert "Ran " not in output, output
     finally:
@@ -467,14 +531,14 @@ def _assert_smoke_can_own_its_import_path() -> None:
     assert verdict == "passed", output
 
 
-def _assert_editable_pth_remains_a_separate_channel() -> None:
-    """The selected interpreter still processes its editable .pth files."""
-    editable_paths: list[str] = []
+def _assert_pth_remains_a_separate_channel() -> None:
+    """The selected interpreter still processes absolute directory .pth lines."""
+    pth_paths: list[str] = []
     for package_dir in site.getsitepackages():
-        for pth_file in Path(package_dir).glob("__editable__.*.pth"):
-            editable_paths.extend(line for line in pth_file.read_text(encoding="utf-8").splitlines() if line.startswith("/"))
-    assert editable_paths, "the test venv has no editable .pth path to prove"
-    expected_path = editable_paths[0]
+        for pth_file in Path(package_dir).glob("*.pth"):
+            pth_paths.extend(line for line in pth_file.read_text(encoding="utf-8").splitlines() if line.startswith("/") and Path(line).is_dir())
+    assert pth_paths, "the test venv has no .pth path to prove"
+    expected_path = pth_paths[0]
     verdict, output, _exit_code = _run_fixture(f"import json\nimport sys\nprint(json.dumps({expected_path!r} in sys.path))\n")
     assert verdict == "passed", output
     assert json.loads(output) is True, output
@@ -509,6 +573,7 @@ def main() -> None:
     _assert_wheel_smoke_and_owned_descendant_origins()
     _assert_unknown_origin_advises_and_runs()
     _assert_unknown_origin_advises_and_runs(wheel=True)
+    _assert_declared_import_roots()
     _assert_children_import_tree_under_test()
     _assert_shared_like_origins_are_unchanged()
     _assert_missing_import_roots_are_advisory()
@@ -520,7 +585,7 @@ def main() -> None:
     _assert_runner_controls_do_not_leak_from_a_shell()
     _assert_child_path_is_exactly_constructed()
     _assert_smoke_can_own_its_import_path()
-    _assert_editable_pth_remains_a_separate_channel()
+    _assert_pth_remains_a_separate_channel()
     _assert_runner_pins_child_cwd()
     _assert_runner_owned_scratch()
     _assert_scratch_exception_and_advisory()

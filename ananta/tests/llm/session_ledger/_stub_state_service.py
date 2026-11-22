@@ -21,6 +21,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from ananta.llm.session_ledger.schema import TABLE_SESSION
+from ananta.services.key_value_operations.value_codec import decode_value, encode_value
 
 # Naive baseline used when a smoke drives ``append_event`` without planting a
 # ``__session`` row: the migrated ``_touch_session_counters`` reads the row's
@@ -298,7 +299,8 @@ class StubStateService:
     query_ordered_calls: list[QueryOrderedCall] = field(default_factory=list)
     query_state_calls: list[QueryStateCall] = field(default_factory=list)
     # In-memory key-value store backing set_key_value/get_key_value, keyed by
-    # (namespace, key, scope). Backs the LED-01 Lane-1 drain cursor round-trip.
+    # (namespace, key, scope). Holds the value_codec text the real store keeps, so
+    # a read returns the value as written. Backs the LED-01 Lane-1 drain cursor.
     key_values: dict[tuple[str, str, str], object] = field(default_factory=dict)
     _update_rows_affected: int = 1
     _delete_rows_affected: int = 1
@@ -695,7 +697,17 @@ class StubStateService:
     ) -> dict[str, Any]:
         """In-memory KV write; mirrors the state-interface envelope shape."""
         del ttl
-        self.key_values[(namespace, key, scope)] = value
+        try:
+            encoded = encode_value(value)
+        except (TypeError, ValueError) as error:
+            return {
+                "action_status": "failed",
+                "data": {},
+                "actions": [],
+                "error": {"code": "kv.set_failed", "message": str(error)},
+                "timestamp": "",
+            }
+        self.key_values[(namespace, key, scope)] = encoded
         return {
             "action_status": "completed",
             "data": {},
@@ -710,11 +722,14 @@ class StubStateService:
         key: str,
         scope: str = "GLOBAL",
     ) -> dict[str, Any]:
-        """In-memory KV read; absent key → empty ``data`` (no ``value``)."""
-        value = self.key_values.get((namespace, key, scope))
+        """In-memory KV read; absent key → ``value`` None and ``found`` False, as the real store answers."""
+        stored = self.key_values.get((namespace, key, scope))
+        # A smoke may plant a row straight into ``key_values``; text is decoded as the
+        # real store decodes it, anything else is returned as planted.
+        value = decode_value(stored) if isinstance(stored, str) else stored
         return {
             "action_status": "completed",
-            "data": {} if value is None else {"value": value},
+            "data": {"namespace": namespace, "key": key, "scope": scope, "value": value, "found": stored is not None},
             "actions": [],
             "error": None,
             "timestamp": "",

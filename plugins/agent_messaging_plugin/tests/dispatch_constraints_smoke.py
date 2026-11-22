@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Constraint filtering, bridge declaration and immutable receipt replay."""
+"""Constraint filtering and bridge declaration."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from _real_state_fake import RealShapeState  # noqa: E402
 from ananta.core.actions.action_factory import ActionFactory  # noqa: E402
 from ananta.interfaces.state_management_interface import StateManagementInterface  # noqa: E402
 from ananta.llm.agent_messaging.role_binding import AGENT_ROLE_BINDING_NAMESPACE  # noqa: E402
+from dispatch_pin_smoke import metered_profile  # noqa: E402
 
 from agent_messaging_plugin import model_capability_verbs as verbs  # noqa: E402
 from agent_messaging_plugin.dispatch_tier_selection import TierSelectionError  # noqa: E402
@@ -29,15 +30,12 @@ from agent_messaging_plugin.platform_surface import BridgeError, PlatformSurface
 from agent_messaging_plugin.plugin import AgentMessagingPlugin  # noqa: E402
 from agent_messaging_plugin.process_exposure import ProcessExportPolicy  # noqa: E402
 from agent_messaging_plugin.schema import TABLE_MODEL_CAPABILITY_CELL  # noqa: E402
-from agent_messaging_plugin.spawn_selection_receipts import SelectionReceiptError, replay_selection_receipt  # noqa: E402
 
 NOW = datetime(2026, 10, 16, 12, tzinfo=UTC)
-KEYS = {"effort_ceiling": None, "exclude_model_prefixes": [], "exclude_runtimes": []}
 GOLDEN: dict[str, Any] = {
     "freshness_window": {"hours": 72.0, "cell_hours": 72, "source": "request", "policy_revision_id": None, "advisories": []},
     "advisories": {"stale_reading_used": 0},
     "billing_objective": "metered_usd",
-    "capability_floors": [],
     "catalog_run_id": "gen-6",
     "dominated": [
         {
@@ -50,16 +48,14 @@ GOLDEN: dict[str, Any] = {
         },
     ],
     "effective_required_score": 42.0,
-    "excluded": {"below_threshold": 1, "capability_floor_disallowed": 0, "not_accepted": 0, "operator_disabled": 0, "unknown_effort": 0, "unpriced": 0},
+    "excluded": {"below_threshold": 1, "not_accepted": 0, "operator_disabled": 0, "unknown_effort": 0, "unpriced": 0},
     "frontier": [
         {"enabled": True, "acceptance": "accepted", "capability_score": 60.0, "cost_per_task_usd": 1.0, "effort": "xhigh", "measured_at": "2026-10-16T12:00:00+00:00", "model": "cheap-model", "relative_cost_multiplier": 2.0, "runtime": "codex"},
         {"enabled": True, "acceptance": "accepted", "capability_score": 65.0, "cost_per_task_usd": 5.0, "effort": "xhigh", "measured_at": "2026-10-16T12:00:00+00:00", "model": "other-model", "relative_cost_multiplier": 10.0, "runtime": "claude_code"},
     ],
     "ladder": [{"cost_delta": 1.5, "from_effort": "low", "points_per_cost_unit": 16.666666666666668, "score_gain": 25.0, "to_effort": "high"}, {"cost_delta": -1.0, "from_effort": "high", "points_per_cost_unit": None, "score_gain": 5.0, "to_effort": "xhigh"}],
-    "policy_version": None,
     "required_score": 42.0,
     "selected": {"enabled": True, "acceptance": "accepted", "capability_score": 60.0, "cost_per_task_usd": 1.0, "effort": "xhigh", "measured_at": "2026-10-16T12:00:00+00:00", "model": "cheap-model", "relative_cost_multiplier": 2.0, "runtime": "codex"},
-    "selection_receipt": {"billing_objective": "metered_usd", "cost_tolerance": 0.05, "max_staleness_hours": 72, "required_score": 42.0, "runtime_constraint": None, "score_margin": 0.0, "selected": {"effort": "xhigh", "model": "cheap-model", "runtime": "codex"}},
     "stale_readings": [],
     "unscored_cells": 0,
 }
@@ -85,7 +81,7 @@ def state() -> StateManagementInterface:
 
 
 def select(**kwargs: Any) -> dict[str, Any]:
-    return verbs.select_dispatch_tier(state(), {"required_score": 42, "billing_objective": "metered_usd", "max_staleness_hours": 72, **kwargs}, now=NOW)
+    return verbs.select_dispatch_tier(state(), {"required_score": 42, "max_staleness_hours": 72, **kwargs}, now=NOW)
 
 
 def check(condition: object, name: str) -> None:
@@ -96,7 +92,7 @@ def check(condition: object, name: str) -> None:
 def refusal(callback: Any) -> tuple[str, str]:
     try:
         callback()
-    except (CatalogError, TierSelectionError, SelectionReceiptError) as exc:
+    except (CatalogError, TierSelectionError) as exc:
         return exc.code, exc.message
     return "", ""
 
@@ -147,29 +143,25 @@ class FixturePlugin(AgentMessagingPlugin):
 
 def bridge_accepts_constraints() -> None:
     key = "plugin::agent_messaging_plugin::select_dispatch_tier"
-    metadata = AgentMessagingPlugin.select_dispatch_tier._platform_process_metadata
+    metadata = cast(Any, AgentMessagingPlugin.select_dispatch_tier)._platform_process_metadata
     recorder = Recorder()
     factory = ActionFactory(
         process_registry={"processes": {key: {"parameters": {name: parameter.to_dict() for name, parameter in metadata.parameters.items()}}}},
         template_engine=Template(),
-        state_service=StateService(),
+        state_service=cast(Any, StateService()),
         action_event_recorder=recorder,
     )
-    surface = PlatformSurface(action_factory=factory, flow_manager=Flows(), compilation_context_builder=Context(), bridge_manager=Bridges(), export_policy=ProcessExportPolicy(allow_patterns=("plugin::*",)))
+    surface = PlatformSurface(action_factory=factory, flow_manager=Flows(), compilation_context_builder=Context(), bridge_manager=cast(Any, Bridges()), export_policy=ProcessExportPolicy(allow_patterns=("plugin::*",)))
     error = None
     try:
-        surface.process_call(key, {"required_score": 42, "billing_objective": "metered_usd", "effort_ceiling": "max", "exclude_model_prefixes": ["unused"], "exclude_runtimes": ["codex"]}, trigger_data={"bridge_id": "agc-constraints", "session_id": "sess-constraints"}, deliver_to_bridge=False)
+        surface.process_call(key, {"required_score": 42, "effort_ceiling": "max", "exclude_model_prefixes": ["unused"], "exclude_runtimes": ["codex"]}, trigger_data={"bridge_id": "agc-constraints", "session_id": "sess-constraints"}, deliver_to_bridge=False)
     except BridgeError as exc:
         error = exc.code
     check(error is None and len(recorder.actions) == 1, "BRIDGE_ACCEPTS_CONSTRAINTS")
     plugin = object.__new__(FixturePlugin)
     result = AgentMessagingPlugin.select_dispatch_tier(plugin, recorder.actions[0]["parameters"], {})
     answer = result["data"]
-    check(answer["selection_receipt"]["selected"] == {"runtime": "claude_code", "model": "other-model", "effort": "low"} and all(key in answer["selection_receipt"] for key in KEYS), "BRIDGE_ACCEPTS_CONSTRAINTS wrapper tuple and receipt")
-
-
-def replay(receipt: dict[str, Any]) -> dict[str, Any]:
-    return replay_selection_receipt(state(), synthetic_qualification=False, enforce=True, difficulty_score=42, selection_receipt=receipt, dispatch_kind="fix", scope_tags=(), agent_runtime=receipt["selected"]["runtime"], model=receipt["selected"]["model"], effort=receipt["selected"]["effort"])
+    check({key: answer["selected"][key] for key in ("runtime", "model", "effort")} == {"runtime": "claude_code", "model": "other-model", "effort": "low"}, "BRIDGE_ACCEPTS_CONSTRAINTS wrapper tuple")
 
 
 def pure_assertions() -> None:
@@ -180,7 +172,9 @@ def pure_assertions() -> None:
     runtime = select(exclude_runtimes=["codex"])
     check(runtime["selected"]["runtime"] == "claude_code" and runtime["excluded"]["constraint_runtime"] == 3, "EXCLUDE_RUNTIME_REMOVES_CELLS_AND_COUNTS")
     empty = refusal(lambda: select(exclude_runtimes=["codex", "claude_code"]))
-    check(empty[0] == "no_cell_clears_threshold" and "'constraint_runtime': 6" in empty[1] and select(exclude_runtimes=[])["selected"]["model"] == "cheap-model", "CONSTRAINTS_EMPTY_SET_REFUSES_NAMING_CONSTRAINT")
+    check(empty[0] == "catalog_ineligible" and "'constraint_runtime': 6" in empty[1] and select(exclude_runtimes=[])["selected"]["model"] == "cheap-model", "CONSTRAINTS_EMPTY_SET_REFUSES_NAMING_CONSTRAINT")
+    below = select(required_score=70, effort_ceiling="high", exclude_runtimes=["claude_code"])
+    check(below["selected"]["effort"] == "high" and below["shortfall"]["gap"] == 15 and below["excluded"]["constraint_runtime"] == 3, "CONSTRAINED_STRONGEST_REMAINS_ELIGIBLE_BELOW_THRESHOLD")
 
 
 def invalid_parameters() -> None:
@@ -189,36 +183,15 @@ def invalid_parameters() -> None:
     check(select(effort_ceiling="max", exclude_model_prefixes=["unused"], exclude_runtimes=["unused"])["selected"]["effort"] == "xhigh", "CONSTRAINT_PARAMETER_INVALID valid companion")
 
 
-def replay_matches(receipt: dict[str, Any]) -> bool:
-    try:
-        return replay(receipt) == receipt
-    except SelectionReceiptError:
-        return False
-
-
-def receipt_assertions() -> None:
+def correction_assertions() -> None:
     plain = select()
-    prefix = select(exclude_model_prefixes=["cheap"])
     stripped = copy.deepcopy(plain)
-    for key in (*KEYS, "pin", "pin_basis"):
-        stripped["selection_receipt"].pop(key)
     for key in ("selection_mode", "pin_basis", "pin_cost_delta", "pin_overrides_constraints", "pin_below_threshold"):
         stripped.pop(key)
     check(stripped == GOLDEN, "UNPINNED_ANSWER_IDENTICAL_EXCEPT_NEW_KEYS")
-    check(all(plain["selection_receipt"][key] == value for key, value in KEYS.items()) and prefix["selection_receipt"]["exclude_model_prefixes"] == ["cheap"], "RECEIPT_HAS_THREE_CONSTRAINT_KEYS_ALWAYS")
-    receipt = prefix["selection_receipt"]
-    check(replay_matches(receipt), "REPLAY_WITH_CONSTRAINTS_PASSES")
-    changed = copy.deepcopy(receipt)
-    changed["exclude_model_prefixes"] = []
-    check(refusal(lambda: replay(changed))[0] == "selection_receipt_mismatch", "REPLAY_WITH_CHANGED_CONSTRAINT_MISMATCHES")
-    legacy = copy.deepcopy(GOLDEN["selection_receipt"])
-    before = copy.deepcopy(legacy)
-    check(replay(legacy) is legacy and legacy == before, "REPLAY_PREDEPLOY_CONSTRAINT_DEFAULTS_PASSES")
-    saved = copy.deepcopy(receipt)
     corrected = select(effort_ceiling="high", exclude_model_prefixes=[], exclude_runtimes=["claude_code"])
     cleared = select(effort_ceiling=None, exclude_model_prefixes=[], exclude_runtimes=[])
-    unknown = {**receipt, "unknown": True}
-    check(corrected["selected"]["effort"] == "high" and cleared == plain and receipt == saved and refusal(lambda: replay(unknown))[0] == "selection_receipt_invalid", "CONSTRAINT_CORRECTION_AND_CLEAR")
+    check(corrected["selected"]["effort"] == "high" and cleared == plain, "CONSTRAINT_CORRECTION_AND_CLEAR")
 
 
 def main() -> int:
@@ -228,9 +201,10 @@ def main() -> int:
     bridge_accepts_constraints()
     pure_assertions()
     invalid_parameters()
-    receipt_assertions()
+    correction_assertions()
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    with metered_profile():
+        raise SystemExit(main())

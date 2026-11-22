@@ -620,6 +620,7 @@ def test_drain_receptive_delivers_once() -> None:
 
 _NOTICE = "delivery waiting from Coordinator \u2014 drain peer_inbox"
 _DRAFT = "my half-typed draft"
+_SUGGESTION = "GO, start the review"
 
 
 @contextlib.contextmanager
@@ -726,6 +727,77 @@ def test_real_pane_deadline_sends_nothing_and_reports_not_delivered() -> None:
         _check(outcome == "driver_error" and fixture.events() == events_before, f"the delivery layer reports driver_error and the pane is still untouched ({outcome})")
 
 
+def test_real_pane_faint_suggestion_is_typed_over_and_submitted() -> None:
+    """A composer whose text is Claude Code's faint prompt suggestion counts as
+    empty: the notice is typed over it (the pane drops a suggestion on input),
+    so the pane receives the notice alone -- replaced, never appended -- and
+    submits it. Before this, the boundary waited its bound, pasted nothing and
+    the message waited for a hand-typed wake."""
+    with _claude_like_pane("--suggestion", _SUGGESTION) as fixture:
+        channel = _real_channel(fixture, boundary_seconds=5.0)
+        raised: list[Exception] = []
+        try:
+            channel.send(_NOTICE)
+        except DriverChannelSendError as exc:
+            raised.append(exc)
+        with contextlib.suppress(AssertionError):
+            fixture.wait_for(lambda events: any(event["kind"] == "submit" for event in events), "the notice was submitted")
+        _check(not raised, f"send() raised no DriverChannelSendError over a faint suggestion ({raised})")
+        _check(_pastes(fixture) == [_NOTICE], f"exactly the notice was pasted ({_pastes(fixture)})")
+        _check(fixture.submissions() == [_NOTICE], f"the notice was submitted alone: the suggestion was replaced, not appended ({fixture.submissions()})")
+        _check(fixture.state()["text"] == "", "the composer is empty afterwards")
+
+
+def test_real_pane_normal_colour_text_is_not_typed_over() -> None:
+    """The same words as the suggestion, but as a human's own draft (bright
+    white 97, or reset 0), keep the composer protected: nothing is pasted, no
+    key is sent, the pane is byte-for-byte unchanged and the send reports not
+    delivered, exactly as for any other occupied composer."""
+    for sgr in ("97", "0"):
+        with _claude_like_pane("--claude-text-sgr", sgr) as fixture:
+            channel = _real_channel(fixture, boundary_seconds=1.5)
+            fixture.human(_SUGGESTION)
+            screen_before, events_before = _screen(fixture), fixture.events()
+            raised: list[Exception] = []
+            try:
+                channel.send(_NOTICE)
+            except DriverChannelSendError as exc:
+                raised.append(exc)
+            _check(len(raised) == 1 and "nothing was sent" in str(raised[0]), f"SGR {sgr}: send() raises the existing DriverChannelSendError ({raised})")
+            _check(fixture.events() == events_before, f"SGR {sgr}: the pane received no paste and no key (event log unchanged)")
+            _check(_screen(fixture) == screen_before, f"SGR {sgr}: the rendered pane is byte-for-byte unchanged")
+            _check(fixture.state()["text"] == _SUGGESTION and fixture.buffers() == [], f"SGR {sgr}: the text is intact and no tmux buffer was even loaded")
+
+
+def test_faint_idle_classification_table() -> None:
+    """``_classify_drive_sample``'s idle verdict, one pane string per shape,
+    with ``_NOTICE`` as the driven text. A composer whose text is entirely SGR
+    faint (the prompt suggestion) reads idle; every other shape stays occupied.
+    Offline: a fake runner, no tmux."""
+    glyph, nbsp, faint, reset, bright = "❯", "\xa0", "\x1b[2m", "\x1b[0m", "\x1b[97m"
+    idle_rows = {
+        "bare glyph and NBSP": f"{glyph}{nbsp}",
+        "faint suggestion after the glyph": f"{glyph}{nbsp}{faint}{_SUGGESTION}{reset}",
+        "faint glyph and faint suggestion": f"{faint}{glyph}{nbsp}{faint}{_SUGGESTION}{reset}",
+        "reset-then-faint in one code": f"{glyph}{nbsp}\x1b[0;2m{_SUGGESTION}{reset}",
+    }
+    occupied_rows = {
+        "bright-white draft": f"{glyph}{nbsp}{bright}{_SUGGESTION}{reset}",
+        "unstyled draft": f"{glyph}{nbsp}{_SUGGESTION}",
+        "faint part, reset, normal tail": f"{glyph}{nbsp}{faint}GO, start{reset} the review",
+        "faint part, SGR 22, normal tail": f"{glyph}{nbsp}{faint}GO, start\x1b[22m the review",
+        "256-colour foreground index 2 is not faint": f"{glyph}{nbsp}\x1b[38;5;2m{_SUGGESTION}{reset}",
+        "256-colour background index 2 is not faint": f"{glyph}{nbsp}\x1b[48;5;2m{_SUGGESTION}{reset}",
+        "faint text that is a prefix of the driven text": f"{glyph}{nbsp}{faint}delivery waiting from{reset}",
+        "faint glyph row above a normal-colour draft row": f"{glyph}{nbsp}{faint}{_SUGGESTION}{reset}\n{glyph}{nbsp}{bright}{_DRAFT}{reset}",
+    }
+    channel = tmux_module._TmuxSendKeysDriverChannel(tmux_bin="tmux", session="s1", run_fn=_FakeTmuxRunner())  # noqa: SLF001
+    for label, pane in idle_rows.items():
+        _check(channel._classify_drive_sample(pane, _NOTICE)[2] is True, f"idle: {label}")  # noqa: SLF001
+    for label, pane in occupied_rows.items():
+        _check(channel._classify_drive_sample(pane, _NOTICE)[2] is False, f"occupied: {label}")  # noqa: SLF001
+
+
 def test_driver_channel_carries_the_shipped_bound_and_direct_channels_do_not_wait() -> None:
     """The wiring: only ``driver_channel()`` enables the wait; a directly
     constructed channel keeps the legacy blind send (bound 0)."""
@@ -780,11 +852,14 @@ def main() -> int:
     test_stable_failure_rolls_back_to_verified_idle_composer()
     test_stable_failure_does_not_wedge_the_next_ready_gate()
     test_ready_gate_busy_pane_remains_a_benign_no_paste_failure()
+    test_faint_idle_classification_table()
     real_pane_unmeasured = tmux_missing()
     if not real_pane_unmeasured:
         test_real_pane_send_waits_for_the_composer_to_empty_then_submits_exactly_once()
         test_real_pane_send_into_an_already_empty_composer_does_not_wait()
         test_real_pane_deadline_sends_nothing_and_reports_not_delivered()
+        test_real_pane_faint_suggestion_is_typed_over_and_submitted()
+        test_real_pane_normal_colour_text_is_not_typed_over()
         test_driver_channel_carries_the_shipped_bound_and_direct_channels_do_not_wait()
         test_real_pane_no_resend_invariant_and_drive_classification_are_unchanged()
     _check(run_checks(), "Codex eventual-pickup driver and sweep regressions")
@@ -794,7 +869,7 @@ def main() -> int:
             print(f"  FAILED: {label}")
         return 1
     if real_pane_unmeasured:
-        return report_tmux_unmeasured(f"the five real-pane tests did not run; the {_passed} stub-driven checks ran and passed")
+        return report_tmux_unmeasured(f"the seven real-pane tests did not run; the {_passed} stub-driven checks ran and passed")
     return 0
 
 

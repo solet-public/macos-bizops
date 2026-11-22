@@ -1,0 +1,2 @@
+# Start-time exact host-reference check of non-ended managed-session records.
+plugins/agent_messaging_plugin/tests/session_record_check_smoke.py

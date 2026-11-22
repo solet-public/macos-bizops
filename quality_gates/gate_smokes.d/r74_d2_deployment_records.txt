@@ -1,0 +1,2 @@
+# r74-d2-a1: deployment record store smoke; offline, exits 0 when run once under the gate environment.
+ananta/tests/lifecycle_management_service/deployment_records_smoke.py

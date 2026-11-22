@@ -204,8 +204,7 @@ class HostNotDeclaredError(Exception):
 
     def __init__(self) -> None:
         super().__init__(
-            "host_not_declared: no host resolved (no per-spawn override, no "
-            f"{_ENV_FLEET_SESSION_HOST} env, no default).",
+            f"host_not_declared: no host resolved (no per-spawn override, no {_ENV_FLEET_SESSION_HOST} env, no default).",
         )
 
 
@@ -226,9 +225,7 @@ class AgentRuntimeNotSupportedError(Exception):
     def __init__(self, agent_runtime: str) -> None:
         self.agent_runtime = agent_runtime
         super().__init__(
-            f"agent_runtime_unsupported: {agent_runtime!r} is not one of "
-            f"{sorted(SUPPORTED_AGENT_RUNTIMES)}; agent_runtime uses the exact "
-            "peer-registry agent_id vocabulary.",
+            f"agent_runtime_unsupported: {agent_runtime!r} is not one of {sorted(SUPPORTED_AGENT_RUNTIMES)}; agent_runtime uses the exact peer-registry agent_id vocabulary.",
         )
 
 
@@ -250,8 +247,7 @@ class OperatorHostDriver:
     def spawn(self, spec: Mapping[str, object]) -> str:
         del spec
         raise HostCannotSpawnError(
-            "the operator host driver cannot spawn; launch manually: "
-            "SOLET_NAME=<name> python -m ananta.cli --app-home <profile>",
+            "the operator host driver cannot spawn; launch manually: SOLET_NAME=<name> python -m ananta.cli --app-home <profile>",
         )
 
     def alive(self, host_ref: str) -> bool:
@@ -261,8 +257,7 @@ class OperatorHostDriver:
     def terminate(self, host_ref: str, grace_seconds: int) -> None:
         del host_ref, grace_seconds
         raise HostCannotSpawnError(
-            "the operator host driver cannot terminate a session it did not "
-            "spawn; stop the process manually.",
+            "the operator host driver cannot terminate a session it did not spawn; stop the process manually.",
         )
 
     def driver_channel(self, host_ref: str) -> DriverChannel | None:
@@ -290,9 +285,7 @@ class SyntheticHostDriver:
     def spawn(self, spec: Mapping[str, object]) -> str:
         del spec
         raise HostCannotSpawnError(
-            "the synthetic host driver cannot spawn; a canary's lifecycle "
-            "row is minted directly by register_synthetic_session, never "
-            "through spawn_session.",
+            "the synthetic host driver cannot spawn; a canary's lifecycle row is minted directly by register_synthetic_session, never through spawn_session.",
         )
 
     def alive(self, host_ref: str) -> bool:
@@ -302,8 +295,7 @@ class SyntheticHostDriver:
     def terminate(self, host_ref: str, grace_seconds: int) -> None:
         del host_ref, grace_seconds
         raise HostCannotSpawnError(
-            "the synthetic host driver has no process to terminate; a "
-            "canary's row has none behind it by construction.",
+            "the synthetic host driver has no process to terminate; a canary's row has none behind it by construction.",
         )
 
     def driver_channel(self, host_ref: str) -> DriverChannel | None:
@@ -326,10 +318,8 @@ class QualificationHostDriver:
     def spawn(self, spec: Mapping[str, object]) -> str:
         instance_id = str(spec.get("agent_instance_id") or "")
         role = str(spec.get("local_name") or "")
-        if not instance_id or not role or str(spec.get("worktree_path") or ""):
-            raise HostCannotSpawnError(
-                "qualification host requires an identity, role, and no worktree"
-            )
+        if not instance_id or not role or str(spec.get("workspace") or ""):
+            raise HostCannotSpawnError("qualification host requires an identity, role, and no workspace")
         if shutil.which("solet-bridge") is None:
             raise HostCannotSpawnError("solet-bridge is required for qualification host")
         env = dict(os.environ)
@@ -371,9 +361,7 @@ class QualificationHostDriver:
         return {"host": QUALIFICATION_HOST, "topology": "bounded-watch", "inspectable_via": ["pid"]}
 
     def verify_config(self) -> list[str]:
-        return [] if shutil.which("solet-bridge") else [
-            "solet-bridge is required for qualification host"
-        ]
+        return [] if shutil.which("solet-bridge") else ["solet-bridge is required for qualification host"]
 
 
 RegistryKey = str | tuple[str, str]
@@ -388,12 +376,12 @@ def _build_registry() -> dict[RegistryKey, HostDriver]:
 
     return {
         (AGENT_RUNTIME_CLAUDE_CODE, OPERATOR_HOST): OperatorHostDriver(),
-        (AGENT_RUNTIME_CLAUDE_CODE, "headless"): HeadlessHostDriver(),
+        (AGENT_RUNTIME_CLAUDE_CODE, "headless"): HeadlessHostDriver(end_notice=True),
         (AGENT_RUNTIME_CLAUDE_CODE, "tmux"): TmuxHostDriver(),
         (AGENT_RUNTIME_CLAUDE_CODE, SYNTHETIC_HOST): SyntheticHostDriver(),
         (AGENT_RUNTIME_CLAUDE_CODE, QUALIFICATION_HOST): QualificationHostDriver(),
         (AGENT_RUNTIME_CODEX, OPERATOR_HOST): OperatorHostDriver(),
-        (AGENT_RUNTIME_CODEX, "headless"): CodexAppServerHostDriver(),
+        (AGENT_RUNTIME_CODEX, "headless"): CodexAppServerHostDriver(end_notice=True),
         (AGENT_RUNTIME_CODEX, "tmux"): CodexTmuxHostDriver(),
         (AGENT_RUNTIME_CODEX, SYNTHETIC_HOST): SyntheticHostDriver(),
         (AGENT_RUNTIME_CODEX, QUALIFICATION_HOST): QualificationHostDriver(),
@@ -470,10 +458,7 @@ def resolve_host_driver(
         registered = _registered_hosts(agent_runtime)
         raise HostMechanismMissingError(
             host,
-            f"no host driver registered for agent_runtime={agent_runtime!r}, "
-            f"host={host!r} in this build "
-            f"(registered: {registered}) — pass one of those or wait for a "
-            "new host driver to land.",
+            f"no host driver registered for agent_runtime={agent_runtime!r}, host={host!r} in this build (registered: {registered}) — pass one of those or wait for a new host driver to land.",
         )
     return driver, host
 

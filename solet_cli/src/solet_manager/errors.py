@@ -232,6 +232,7 @@ STEP7_REASON_CODES = (
     "preserved_surface_in_transition",
     "service_offline_before_transition",
     "staged_changes_present",
+    "supervisor_launch_needs_hand_route",
     "tracked_overlap_present",
     "tracked_shape_changed",
 )

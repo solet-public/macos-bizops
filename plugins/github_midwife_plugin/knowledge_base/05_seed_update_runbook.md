@@ -154,7 +154,7 @@ the `solet-manager` command. `solet inspect` is a different, active probe.
 **A pre-Manager plain clone (a `git clone` of the seed, not `solet create`), r64.**
 The Manager proves a plain clone only at a seed commit it lists: the
 channel's own release, or a stable seed in its reviewed anchor table (every
-`supported_predecessors` row, r43 `8207c151` through r72 `d7b0fcc9`).
+`supported_predecessors` row, r43 `8207c151` through r73 `9af3e784`).
 `git -C <clone> rev-parse HEAD` tells you which case you have:
 
 1. HEAD is a listed seed commit: run the six commands below unchanged.
@@ -441,8 +441,14 @@ the healthy state, not an error.
   not the router plugin is on its roster) and `lifecycle.cutover` only for a
   materialized supervisor release behind the router; readiness is
   `bridge_health_healthy` within the bundle's budget. A release the old preflight cannot install is
-  expressed by the candidate bundle declaring `single_color_required`; you
-  no longer need to know that exception. On a `legacy_direct` solet the restart
+  expressed by the candidate bundle declaring `single_color_required`, and
+  release 74 declares it. A solet launched directly restarts single-colour. A
+  solet whose LaunchAgent runs the blue-green supervisor
+  (`materialized_supervisor`) is refused at the runtime preview with
+  `supervisor_launch_needs_hand_route`, nothing started, because launchd runs
+  the supervisor and never a colour; it installs by the hand route in
+  `plugins/default_thinking_plugin/knowledge_base_joseki/deploy_local_blue_green_release.md`,
+  section "Installing a release the cutover refuses". On a `legacy_direct` solet the restart
   is single-colour even when the router plugin has served blue-green swaps
   inside the running solet. Before it, the preview reads the process table and
   proves single-colour only when the LaunchAgent's pid is the one colour
@@ -941,9 +947,10 @@ stop and repair before continuing, do not rename it ad hoc.
    ```bash
    <clone>/.venv/bin/python3 <clone>/deployment/scripts/migrate_to_solet.py --scan-stale
    ```
-   Report-only, case-insensitive, over `~/.claude/`, this clone's own
-   `.claude/`, and `CLAUDE*.md`. Three categories, because the fix differs by
-   category — never auto-rewritten, in any of them:
+   Report-only. It scans `~/.claude/`, this clone's own `.claude/`, and
+   `CLAUDE*.md` case-insensitively, and it asks each router under
+   `~/.ananta/runtime` for its `status`. Four categories, because the fix
+   differs by category — never auto-rewritten, in any of them:
    - **historical** (a transcript, log, or other append-only record —
      `projects/*/*.jsonl`, `file-history/`, `history.jsonl`, `jobs/`,
      `paste-cache/`, `backups/`, `*.pre-*`, and siblings): leave alone,
@@ -957,6 +964,31 @@ stop and repair before continuing, do not rename it ad hoc.
      together. A blind substitution breaks that triple and leaves dangling
      links; fix those by hand, one fact at a time, never with a bulk
      find-and-replace.
+   - **router binding held by a pre-rename process** (the separate
+     `ROUTER BINDINGS` section of the report, not a file): a process started
+     under the old name keeps the router's active binding for as long as it
+     keeps heartbeating, so every file scan above can be clean while a swap or
+     rollback from the renamed solet refuses with `not_active_instance`
+     ("router status() did not show this instance as the active color"). A
+     hit names the router socket, the colour, the instance id
+     (`homunculus-<colour>-<id>` instead of `solet-<colour>-<id>`), the port,
+     the heartbeat age, and the listening pid. The script only asks the router
+     for `status`; it never quits a process and never writes to the router.
+     Recover by hand, in this order:
+     1. Confirm it is the pre-rename process with
+        `ps -p <pid> -o lstart=,command=` (when the pid reads `unresolved`,
+        find the listener with `lsof -nP -iTCP:<port> -sTCP:LISTEN`).
+     2. Quit that process yourself. The router drops its binding about 35
+        seconds after the last heartbeat.
+     3. Start the solet under its migrated label so it registers as
+        `solet-<colour>-<id>`.
+     4. Re-run `--scan-stale` until the section shows `0 stale`.
+
+     The summary line
+     `N router(s) checked: S stale, K ok, U unrecognized, X unreachable` is
+     the proof the check ran. A `NOT checked` line (no router socket, or a
+     router that did not answer) means unknown, not clean: look at the router
+     before trusting the sweep.
 
 ## Step 4 — restart and WAIT
 
@@ -1706,23 +1738,24 @@ resolve correctly without further setup:
   rung 2 (`root_manifest.yaml`, only valid once genesis has rewritten it)
   or rung 3 (`CLAUDE_PROJECT_DIR`'s basename) — both work, but rung 1 is
   the reliable one and doesn't depend on either.
-- **The heartbeat and rotation-due watch hooks' identity.** Both hooks
-  (new in `0.4.0`/`0.4.1`) call into other platform verbs that also read
-  `SOLET_NAME` for identity. (Separately: those two hooks additionally
-  need `AGENT_INSTANCE_ID` exported to arm at all — without it they are
-  silent no-ops, by design, not a bug; see `SECURITY.md`'s Configuration
-  surface section, "Adopter setup note," for the exact arming variables
-  and the full default-off/default-on table across all thirteen hooks.)
+- **The rotation-due watch hook's identity.** The hook (new in `0.4.0`,
+  since narrowed to the context gauge report) calls into other platform
+  verbs that also read `SOLET_NAME` for identity. (Separately: it
+  additionally needs `AGENT_INSTANCE_ID` and `AGENT_SESSION_ID` exported,
+  with a valid owner receipt, to arm at all — without them it does not
+  report, by design, not a bug; see `SECURITY.md`'s Configuration surface
+  section, "Adopter setup note," for the exact arming variables and the
+  default-off/default-on counts across all fourteen hooks.)
 
 `SOLET_NAME` is a soft dependency for the origin ladder (rungs 2/3
-still resolve it) but the only path to a reliable heartbeat/rotation-due
+still resolve it) but the only path to a reliable context-gauge
 identity — export it before first launch rather than discovering the gap
 later.
 
 **2. This checkout's own project-scope `.claude/hooks/` stack is being
 folded INTO the coordination-hooks plugin by `0.4.0`, not layered
 alongside it.** Earlier in this release cycle, the heartbeat
-(`heartbeat_report_alive.py`), the rotation-due watcher
+(a hook since deleted), the rotation-due watcher
 (`rotation_due_watch.py`, now also feeding the context-gauge verb pair
 below), and the memory-passthrough sync wrapper lived only as this
 checkout's own operator-scope hooks, rendered by the hydration runbook
@@ -1741,21 +1774,24 @@ that lane's own report or by reading `capability_bundles.yaml` /
 on it.**
 
 **2a. After updating: verify your hooks actually fire.** Table below is
-read directly from the **landed** `hooks.json`
-(`plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks/hooks.json`,
-master HEAD `a83a4baa2`) — every row verified against that file, not
-taken from any summary. **`0.5.0` changed this file's own `description`
-field only** (disclosing the two spawn-injected hooks below) — the
-event/hook wiring table itself is byte-identical to `0.4.1`, verified by
-diff (`git diff 6f840d7d7 248a1294a -- .../hooks/hooks.json`).
+read directly from the current `hooks.json`
+(`plugins/github_midwife_plugin/claude_plugin/coordination-hooks/hooks/hooks.json`:
+fifteen hook entries across six events, counted from the file at master
+`6dcb0e38d`) — every row checked against that file, not taken from any
+summary. The wiring has changed since `0.5.0` (the heartbeat and rotation
+notice hooks and the two message and role reminders no longer ship, and the
+working-tree-recovery entries were added), so a table written for an earlier
+release does not match it. Re-count from the installed `hooks.json` if it
+differs.
 
 | Event | Hook(s) | Confirms |
 |---|---|---|
-| `UserPromptSubmit` | `step_zero_reminder.py`, `check_messages_reminder.py`, `session_context.py` (3 independent hook entries) | The KB-first reminder, the check-your-messages reminder, and per-prompt session context all fire on every prompt you submit. |
-| `SessionStart` | matcher `startup\|resume\|clear`: `check_messages_reminder.py`, `role_binding_reminder.py`; unconditional (any matcher): `session_context.py` | The check-your-messages and role-binding reminders fire on a startup/resume/`/clear`; session context fires on every `SessionStart`, including other matcher values not listed above (none currently defined). |
-| `Stop` | `wake_waiter.py` (`asyncRewake: true`, `timeout: 86400`) | The bounded idle-wake waiter, `0.3.1`+, is wired and its wait is capped rather than open-ended. |
-| `PreToolUse` | no matcher: `headless_tool_allowlist_gate.py` | The git-text gate was removed in `0.9.0` (operator ruling rul_e71e43be); the headless tool-allowlist gate is the only `PreToolUse` entry. |
-| `PostToolUse` | unconditional: `rotation_due_watch.py`, `heartbeat_report_alive.py` (2 independent hook entries, fire after every tool call); matcher `Write\|Edit\|MultiEdit`: `capture.py` | The rotation-due watcher and the heartbeat both fire on every tool call, new in `0.4.0`. `capture.py` (the memory-passthrough capture hook, new in `0.4.1`) fires only on file-mutating tool calls. |
+| `UserPromptSubmit` | `session_context.py` (1 hook entry) | Per-prompt session context fires on every prompt you submit. |
+| `SessionStart` | matcher `startup\|resume\|clear`: `step_zero_reminder.py`, `session_start_context.py`, `recovery_claude.py`; unconditional (any matcher): `session_context.py`, `capture_session_mapping.py` (5 hook entries) | The KB-first reminder and live session context fire on a startup/resume/`/clear`, as does the recovery adapter's start check; session context and the session-mapping capture fire on every `SessionStart` (the capture stays a no-op on any session a spawning adapter did not mark). |
+| `SessionEnd` | `recovery_claude.py` (1 hook entry) | The working-tree recovery adapter's end-of-session save fires when a session ends. |
+| `Stop` | `wake_waiter.py` (`asyncRewake: true`, `timeout: 86400`); `recovery_claude.py` (`async: true`, `timeout: 120`) (2 hook entries) | The bounded idle-wake waiter is wired and its wait is capped rather than open-ended; the recovery save runs asynchronously at the end of every turn. |
+| `PreToolUse` | no matcher: `headless_tool_allowlist_gate.py`; matcher `Bash`: `recovery_claude.py` (2 hook entries) | The git-text gate was removed in `0.9.0` (operator ruling rul_e71e43be); the headless tool-allowlist gate is the only non-recovery `PreToolUse` entry, and the recovery adapter saves before a shell command discards work. |
+| `PostToolUse` | unconditional: `rotation_due_watch.py`; matcher `Write\|Edit\|MultiEdit`: `capture.py`; matcher `CronCreate\|ScheduleWakeup`: `session_cron_sentinel.py`; matcher `Write\|Edit\|MultiEdit\|NotebookEdit\|Bash`: `recovery_claude.py` (4 hook entries) | The context gauge report fires after every tool call. `capture.py` (the memory-passthrough capture hook, new in `0.4.1`) fires only on file-mutating tool calls, the cron sentinel only on `CronCreate` and `ScheduleWakeup`, and the recovery adapter after file tools and Bash. |
 
 **Four CLI utilities ship in the same `hooks/` directory but are
 deliberately NOT hook-wired** — `drain.py`, `hydrate_render.py`,
@@ -1821,7 +1857,7 @@ a substitute for reading them:
 
 | Need | Verb(s) | One trap worth knowing before you call it |
 |---|---|---|
-| Spawn a new worker session | `spawn_session` | Already drives one automatic first turn — do not also hand-drive a first turn unless no lane charter is on file. |
+| Spawn a new worker session | `spawn_session` | Supply the first turn in `first_message`. The launch already submits it. |
 | Rotate a worker in place (clear + redrive, same process) | `peer_send_by_name` (pickup pointer) → `clear_session` (`park=False`) → `drive_session` | Rotate uses the spawn-time LEDGER `agent_instance_id`, never the `agi-watch-*` id from a role-thread message — they are different values for the same worker. |
 | Restart a dead/hung worker (kill + fresh process) | `session_status` → `terminate_session` → `spawn_session` | A hand relaunch that bypasses `spawn_session` (e.g. raw pane injection into a terminal) does NOT get the automatic first-turn drive for free and needs one explicitly. |
 | Park a worker (clear and leave idle, deliberately) | `clear_session` with `park=True` | Its role binding and any armed watcher survive a park — a parked worker is not a terminated one. |

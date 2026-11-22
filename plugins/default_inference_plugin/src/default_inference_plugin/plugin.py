@@ -382,16 +382,10 @@ class Plugin(
             time.sleep(retry_seconds)
             result = self.validate_availability()
             if result.get("action_status") == ActionStatus.COMPLETED.value:
-                try:
-                    self._prewarm_canonical_grammars()
-                except InferenceError as exc:
-                    error_message = f"LM Studio pre-warm failed after becoming available: {exc}"
-                    self.set_error(error_message)
-                    self.logger.warning("%s — retrying", error_message)
-                else:
-                    self.set_ready()
-                    self.logger.info("LM Studio is serving the configured model; inference plugin is ready")
-                    return
+                self.set_ready()
+                self.logger.info("LM Studio is serving the configured model; inference plugin is ready (grammar pre-warm continues in the background)")
+                self._start_prewarm_retry()
+                return
             retry_seconds = min(retry_seconds * 2, _LM_STUDIO_RETRY_MAX_SECONDS)
 
     # Common step-narrowed schema shapes to pre-warm alongside canonical schemas.

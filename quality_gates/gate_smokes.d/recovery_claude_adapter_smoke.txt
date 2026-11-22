@@ -1,0 +1,2 @@
+# C4 U3: the Claude Code recovery adapter, driven as a real process with synthetic payloads.
+plugins/github_midwife_plugin/claude_plugin/coordination-hooks/tests/recovery_claude_adapter_smoke.py

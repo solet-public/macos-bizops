@@ -44,7 +44,7 @@ from ananta.services.vault_service.enforcement import (
     requires_operator_principal,
     serialized_vault_operation,
 )
-from ananta.services.vault_service.interfaces.public import VaultQualificationAPI, VaultServiceAPI
+from ananta.services.vault_service.interfaces.public import ExternalKeychainReadError, VaultQualificationAPI, VaultServiceAPI
 from ananta.types.schema_types import SchemaDefinition
 from ananta.vault_core import (
     AUDIT_DIRECTION_EXPORT,
@@ -95,12 +95,15 @@ from .errors import (
     VaultNotInitializedError,
 )
 from .key_manager import VaultKeyManager, get_key_manager
-from .keychain import PerCredentialKeychain, SystemKeychain
+from .keychain import PerCredentialKeychain, SystemKeychain, read_generic_password_by_service
 from .schema import NAMESPACE as VAULT_NAMESPACE
 from .schema import (
     get_oauth_client_schema,
     get_oauth_refresh_token_schema,
 )
+
+_CLAUDE_CLOUD_PLUGIN = "claude_code_cloud_session_source_plugin"
+_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 
 class MacosVaultPlugin(
@@ -701,6 +704,15 @@ class MacosVaultPlugin(
         """Retrieve secret - interface method."""
         enforce_namespace(key, call_context)
         return self._retrieve_impl(key)
+
+    def read_external_keychain(self, service: str, *, call_context: CallContext | None = None) -> str | None:
+        """Read the Claude CLI item for the caller bound to cloud backfill."""
+        if call_context is None or call_context.principal_kind != "plugin" or call_context.calling_plugin != _CLAUDE_CLOUD_PLUGIN or service != _CLAUDE_KEYCHAIN_SERVICE:
+            raise VaultAccessDeniedError("External Keychain access is limited to the Claude cloud backfill credential.")
+        try:
+            return read_generic_password_by_service(service)
+        except Exception:  # noqa: BLE001 — keep native diagnostics out of the job outcome
+            raise ExternalKeychainReadError("The macOS Keychain could not read the Claude credential.") from None
 
     def delete(
         self,
@@ -2163,6 +2175,7 @@ _SERIAL_VAULT_OPERATIONS = frozenset(
     {
         "store",
         "retrieve",
+        "read_external_keychain",
         "use",
         "metadata",
         "delete",
